@@ -1,80 +1,81 @@
 # ============================================================================
-# 編譯 PonWrt HG5382A 韌體 (雙版本 + Nikki Alpha-Smart 預置 + 集客 AC)
+# 编译 PonWrt HG5382A 固件 (双版本 + Nikki 编译模块 + 集客 AC)
 # ----------------------------------------------------------------------------
 # 功能概览:
-#   - 雙 flavor 並行編譯: with-nikki(含 NIKKI 代理 + rtp2httpd) / no-nikki(純淨版)
-#   - 鎖定單一機型 fiberhome_hg5382a (AN7581)
-#   - with-nikki 預置 mihomo Alpha-Smart 核心 (UPX -9 壓縮)
-#   - 集成集客 AC 控制器 (luci-app-gecoosac)，兩個 flavor 均包含
-#   - 編譯後打印 PON 相關配置與 DTS 節點 (便於診斷 PON 驅動問題)
-#   - 上傳診斷 artifact (.config / feeds / dts / logs)，便於事後排查
-#   - 產物統一重命名並發布至 GitHub Releases
+#   - 双 flavor 并行编译: with-nikki(含 NIKKI 代理 + rtp2httpd + 集客AC) / no-nikki(纯净版)
+#   - 锁定单一机型 fiberhome_hg5382a (AN7581)
+#   - with-nikki 以 OpenWrt 包方式编译 mihomo-meta（不再预置二进制）
+#   - 集成版保证选中 libffi（解决 python3 的 ffi.h 编译失败）
+#   - 集客 AC 控制器仅集成版包含
+#   - 编译后打印 PON 相关配置与 DTS 节点 (便于诊断 PON 驱动问题)
+#   - 上传诊断 artifact (.config / feeds / dts / logs)，便于事后排查
+#   - 产物统一重命名并发布至 GitHub Releases
 # ============================================================================
-name: 編譯 PonWrt HG5382A 韌體 (雙版本 + Nikki Alpha-Smart 預置 + 集客AC)
+name: 编译 PonWrt HG5382A 固件 (双版本 + Nikki 编译模块 + 集客AC)
 
 on:
-  # 僅手動觸發，避免上游變動導致自動編譯失敗
+  # 仅手动触发，避免上游变动导致自动编译失败
   workflow_dispatch:
 
-# 需要寫入權限，用於創建 GitHub Release
+# 需要写入权限，用于创建 GitHub Release
 permissions:
   contents: write
 
-# 同一分支只允許一個編譯任務，避免並發衝突
+# 同一分支只允许一个编译任务，避免并发冲突
 concurrency:
   group: build-hg5382a-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   # ==========================================================================
-  # Job: build - 編譯韌體 (矩陣: with-nikki / no-nikki)
+  # Job: build - 编译固件 (矩阵: with-nikki / no-nikki)
   # ==========================================================================
   build:
-    name: 編譯韌體 (${{ matrix.flavor }})
+    name: 编译固件 (${{ matrix.flavor }})
     runs-on: ubuntu-24.04
-    # 編譯 OpenWrt 通常需要 2-4 小時，設 6 小時上限
+    # 编译 OpenWrt 通常需要 2-4 小时，设 6 小时上限
     timeout-minutes: 360
     strategy:
-      # 其中一個 flavor 失敗不影響另一個繼續
+      # 其中一个 flavor 失败不影响另一个继续
       fail-fast: false
       matrix:
         flavor: [with-nikki, no-nikki]
 
     steps:
       # ----------------------------------------------------------------------
-      # 1. 簽出工作流倉庫 (獲取本 YML 及可能的本地 files/)
+      # 1. 签出工作流仓库 (获取本 YML 及可能的本地 files/)
       # ----------------------------------------------------------------------
-      - name: 簽出工作流倉庫 (Checkout Workflow)
+      - name: 签出工作流仓库 (Checkout Workflow)
         uses: actions/checkout@v4
         with:
-          # fetch-depth: 0 確保能讀到完整 git 歷史 (用於獲取上游日期)
+          # fetch-depth: 0 确保能读到完整 git 历史 (用于获取上游日期)
           fetch-depth: 0
 
       # ----------------------------------------------------------------------
-      # 2. 清理磁碟空間 - OpenWrt 編譯需要約 30-40GB，GitHub runner 預設不夠
+      # 2. 清理磁盘空间 - OpenWrt 编译需要约 30-40GB，GitHub runner 默认不够
       # ----------------------------------------------------------------------
-      - name: 清理磁碟空間 (釋放容量)
+      - name: 清理磁盘空间 (释放容量)
         run: |
-          # 刪除 runner 上預裝但編譯用不到的大型工具鏈
+          # 删除 runner 上预装但编译用不到的大型工具链
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
             /usr/local/share/boost /usr/share/swift /usr/local/.ghcup \
             /opt/hostedtoolcache
           sudo docker system prune -af || true
           sudo apt-get clean
-          # 建立 8GB swap，防止編譯時 OOM
+          # 建立 8GB swap，防止编译时 OOM
           sudo swapoff /swapfile || true
           sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
-          # 輸出當前記憶體和磁碟狀態，便於確認
+          # 输出当前内存和磁盘状态，便于确认
           free -h
           df -h
 
       # ----------------------------------------------------------------------
-      # 3. 安裝編譯依賴 - 對齊 OpenWrt/ImmortalWrt 官方推薦的套件列表
+      # 3. 安装编译依赖
       # ----------------------------------------------------------------------
-      - name: 初始化編譯環境 (安裝相依套件)
+      - name: 初始化编译环境 (安装依赖软件包)
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -89,226 +90,147 @@ jobs:
             python3 python3-docutils python3-pip python3-ply python3-pyelftools \
             python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
             subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
-            libzstd-dev jq dos2unix upx-ucl
-          # 說明:
-          #   - device-tree-compiler: DTS/DTB 處理
-          #   - upx-ucl: 壓縮 mihomo 二進位
-          #   - jq: 解析 GitHub API 回應
-          #   - libyaml-dev: dtc 相關依賴
+            libzstd-dev jq dos2unix upx-ucl \
+            libffi-dev
 
       # ----------------------------------------------------------------------
-      # 4. 拉取 PonWrt 官方源碼
+      # 4. 拉取 PonWrt 官方源码
       # ----------------------------------------------------------------------
-      - name: 拉取 PonWrt 官方源碼 (Clone PonWrt)
+      - name: 拉取 PonWrt 官方源码 (Clone PonWrt)
         run: |
-          # 只克隆最新一次提交，節省時間和空間
           git clone --depth 1 https://github.com/pbs05/ponwrt.git ponwrt
-          echo ">>> PonWrt 源碼已克隆到 ./ponwrt"
+          echo ">>> PonWrt 源码已克隆到 ./ponwrt"
           ls -la ponwrt | head -n 20
 
       # ----------------------------------------------------------------------
-      # 5. 集成集客 AC 控制器 (luci-app-gecoosac)
+      # 5. 集成集客 AC 控制器 (luci-app-gecoosac) — 仅 with-nikki
       # ----------------------------------------------------------------------
-      # 說明:
-      #   - 集客 AC 有兩個主要分支:
-      #       * main (2.x): 支持集客 AP 7.6 及以上固件
-      #       * v1.0:       支持舊版集客 AP
-      #   - 請根據你的 AP 固件版本選擇分支:
-      #       * AP 7.6+:  git clone -b main ...
-      #       * 舊版 AP:  git clone -b v1.0 ...
-      #   - 源碼放入 package/ 目錄後，編譯系統會自動識別
-      #   - 注意: 集客 AC 二進位體積較大，閃存 < 64MB 的設備不建議集成
-      # ----------------------------------------------------------------------
-      - name: 集成集客 AC 控制器插件 (gecoosac)
+      - name: 集成集客 AC 控制器插件 (gecoosac，仅 with-nikki)
+        if: matrix.flavor == 'with-nikki'
         working-directory: ./ponwrt
         run: |
-          echo ">>> 正在克隆集客 AC 控制器源碼..."
-          # 默認使用 main 分支 (AP 7.6+)。如果你的 AP 是舊版，改成 -b v1.0
+          echo ">>> 正在克隆集客 AC 控制器源码..."
           git clone --depth 1 https://github.com/lyin888/openwrt-gecoosac package/openwrt-gecoosac
-          echo ">>> 集客 AC 源碼已克隆到 package/openwrt-gecoosac"
-          echo ">>> 目錄結構:"
+          echo ">>> 集客 AC 源码已克隆到 package/openwrt-gecoosac"
           ls -la package/openwrt-gecoosac/
-          echo ">>> 檢查 Makefile 是否聲明依賴:"
           grep -E "DEPENDS|PKG_NAME" package/openwrt-gecoosac/*/Makefile 2>/dev/null || \
-            echo "(未找到 Makefile，可能路徑結構不同)"
+            echo "(未找到 Makefile，可能路径结构不同)"
 
       # ----------------------------------------------------------------------
-      # 6. 注入外部軟體源 (僅 with-nikki 需要: NIKKI + rtp2httpd)
+      # 6. 注入外部软件源 (仅 with-nikki 需要: NIKKI + rtp2httpd)
       # ----------------------------------------------------------------------
-      - name: 加入外掛來源 (依條件注入 NIKKI + rtp2httpd)
+      - name: 加入外挂来源 (依条件注入 NIKKI + rtp2httpd)
         working-directory: ./ponwrt
         run: |
-          # 防護：feeds.conf.default 不存在時自動建立
           if [ ! -f feeds.conf.default ]; then
-            echo ">>> feeds.conf.default 不存在，正在建立空檔..."
+            echo ">>> feeds.conf.default 不存在，正在建立空文件..."
             touch feeds.conf.default
           fi
 
-          # 先清除可能殘留的 nikki 源 (避免重複)
           sed -i '/nikki/d' feeds.conf.default
 
           if [ "${{ matrix.flavor }}" = "with-nikki" ]; then
-            echo ">>> [with-nikki] 正在加入 NIKKI 外掛軟體源..."
-            # 若最後一行沒有換行，補一個，避免拼接錯亂
+            echo ">>> [with-nikki] 正在加入 NIKKI 外挂软件源..."
             [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
             echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
-            # Windows 換行符可能導致 feeds 解析失敗，強制轉為 LF
             dos2unix feeds.conf.default 2>/dev/null || true
 
-            # 引入 rtp2httpd 完整安裝支援
-            echo ">>> 正在引入 rtp2httpd 完整組件..."
+            echo ">>> 正在引入 rtp2httpd 完整组件..."
             git clone --depth 1 https://github.com/stackia/rtp2httpd /tmp/rtp2httpd
             mkdir -p package
             cp -r /tmp/rtp2httpd/openwrt-support/luci-app-rtp2httpd package/luci-app-rtp2httpd
             cp -r /tmp/rtp2httpd/openwrt-support/rtp2httpd package/rtp2httpd
-            # 上游用 .versioned 後綴避免版本衝突，這裡改名為標準 Makefile
             mv package/rtp2httpd/Makefile.versioned package/rtp2httpd/Makefile
             mv package/luci-app-rtp2httpd/Makefile.versioned package/luci-app-rtp2httpd/Makefile
           else
-            echo ">>> [no-nikki] 純淨版本，略過 NIKKI 與 rtp2httpd 注入"
+            echo ">>> [no-nikki] 纯净版本，略过 NIKKI 与 rtp2httpd 注入"
           fi
 
-          echo "===== feeds.conf.default 末尾內容 ====="
+          echo "===== feeds.conf.default 末尾内容 ====="
           tail -n 5 feeds.conf.default || true
 
       # ----------------------------------------------------------------------
-      # 7. 緩存下載的套件 (dl/) - 避免每次重複下載源碼包
+      # 7. 缓存下载的软件包 (dl/)
       # ----------------------------------------------------------------------
-      - name: 快取下載套件 (Cache dl)
+      - name: 缓存下载软件包 (Cache dl)
         uses: actions/cache@v4
         with:
           path: ponwrt/dl
-          # key 包含 feeds 和 config 的哈希，兩者變動時自動失效
           key: ponwrt-dl-an7581-${{ matrix.flavor }}-${{ hashFiles('ponwrt/feeds.conf.default', 'ponwrt/configs/*.config') }}
-          # 精確 key 未命中時，回退到同 flavor 的舊緩存
           restore-keys: |
             ponwrt-dl-an7581-${{ matrix.flavor }}-
             ponwrt-dl-an7581-
 
       # ----------------------------------------------------------------------
-      # 8. 更新並安裝 feeds (拉取所有軟體源)
+      # 8. 更新并安装 feeds
       # ----------------------------------------------------------------------
-      - name: 更新並安裝外掛來源 (Feeds)
+      - name: 更新并安装外挂来源 (Feeds)
         working-directory: ./ponwrt
         run: |
-          # 拉取 feeds.conf.default 中所有源
           ./scripts/feeds update -a
 
           if [ "${{ matrix.flavor }}" = "with-nikki" ]; then
             if [ -d feeds/nikki ]; then
-              echo ">>> 正在從 feeds/nikki 中剔除 +yq 相依性..."
-              # NIKKI 上游某些 Makefile 對 +yq 的依賴與其他包衝突，手動剔除
+              echo ">>> 正在从 feeds/nikki 中剔除 +yq 依赖..."
               find feeds/nikki -name Makefile -exec sed -i -E 's/[[:space:]]*\+yq\b//g' {} +
             fi
           fi
 
-          # 安裝所有可用軟體包到 package/feeds/
           ./scripts/feeds install -a
 
-          # 預設主題改為純淨 Argon
           if [ -f feeds/luci/collections/luci/Makefile ]; then
             sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile || true
           fi
 
       # ----------------------------------------------------------------------
-      # 9. 預置 NIKKI Alpha-Smart 核心 (僅 with-nikki)
+      # 9. （原“预置 Alpha-Smart 二进制”步骤已删除，mihomo 改为编译模块）
       # ----------------------------------------------------------------------
-      - name: 預置 Nikki Alpha-Smart 核心並進行 UPX 壓縮 (僅 with-nikki)
-        if: matrix.flavor == 'with-nikki'
-        working-directory: ./ponwrt
-        env:
-          # 用 GitHub Token 提高 API 速率限制，避免 403
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo ">>> 正在下載 vernesong/mihomo 最新 Alpha-Smart 核心並 UPX -9 壓縮..."
-          mkdir -p files/usr/libexec
-
-          # 透過 GitHub API 查詢 Prerelease-Alpha 的資產列表，匹配 arm64 smart 版本
-          SMART_URL=$(curl -sL \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            https://api.github.com/repos/vernesong/mihomo/releases/tags/Prerelease-Alpha \
-            | jq -r '.assets[] | select(.name | test("^mihomo-linux-arm64-alpha-smart-.*\\.gz$")) | .browser_download_url' | head -n 1)
-
-          # API 匹配失敗時，改從 Release 頁面 HTML 抓取
-          if [ -z "$SMART_URL" ] || [ "$SMART_URL" = "null" ]; then
-            echo "API 匹配失敗，嘗試從 Release 頁面提取..."
-            SMART_URL=$(curl -sL https://github.com/vernesong/mihomo/releases/expanded_assets/Prerelease-Alpha \
-              | grep -oE '/vernesong/mihomo/releases/download/Prerelease-Alpha/mihomo-linux-arm64-alpha-smart-[a-zA-Z0-9]+\.gz' \
-              | head -n 1)
-            [ -n "$SMART_URL" ] && SMART_URL="https://github.com${SMART_URL}"
-          fi
-
-          if [ -z "$SMART_URL" ] || [ "$SMART_URL" = "null" ]; then
-            echo "::error::未找到符合的 alpha-smart arm64 核心下載地址！"
-            exit 1
-          fi
-
-          echo "下載位址: $SMART_URL"
-          curl -fsSL -o /tmp/mihomo-smart.gz "$SMART_URL"
-          gzip -d -f /tmp/mihomo-smart.gz
-          chmod +x /tmp/mihomo-smart
-
-          # UPX 極限壓縮，減小固件體積
-          echo "執行 UPX -9 極限壓縮..."
-          upx -9 /tmp/mihomo-smart || echo "UPX 警告：若已加殼或不支援則略過，直接使用原二進位"
-
-          # 放入 files/ 覆蓋目錄，編譯時會自動複製到固件根文件系統
-          mv /tmp/mihomo-smart files/usr/libexec/mihomo
-          chmod +x files/usr/libexec/mihomo
-          echo ">>> Nikki Alpha-Smart 核心已部署至 files/usr/libexec/mihomo"
 
       # ----------------------------------------------------------------------
-      # 10. 產生 .config 並鎖定 HG5382A 機型
+      # 10. 生成 .config 并锁定 HG5382A 机型
       # ----------------------------------------------------------------------
-      - name: 產生並調整韌體設定檔 (鎖定 HG5382A + 核心插件 + 集客AC)
+      - name: 生成并调整固件设置文件 (锁定 HG5382A + 核心插件 + 集客AC)
         working-directory: ./ponwrt
         run: |
-          # 基於 an7581.config 和 release.config 生成基礎 .config
           perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
 
-          # 移除所有 target/profile 相關行，稍後統一由我們指定
           sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
           sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
           sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
           sed -i '/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
 
-          # ---- 公共核心組件 (兩個 flavor 都有) ----
+          # ---- 公共核心组件 (两个 flavor 都有) ----
           cat >> .config << 'EOF'
-          # 鎖定單一機型: fiberhome_hg5382a
+          # 锁定单一机型: fiberhome_hg5382a
           # CONFIG_TARGET_ALL_PROFILES is not set
           # CONFIG_TARGET_MULTI_PROFILE is not set
           CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5382a=y
           CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5382a=y
 
-          # === 主題 Argon（僅核心） ===
+          # === 主题 Argon（仅核心） ===
           CONFIG_PACKAGE_luci-theme-argon=y
           # CONFIG_PACKAGE_luci-theme-bootstrap is not set
 
-          # === 公共插件 1: TTYD（網頁終端） ===
+          # === 公共插件 1: TTYD（网页终端） ===
           CONFIG_PACKAGE_luci-app-ttyd=y
 
-          # === 公共插件 2: DDNS（動態網域） ===
+          # === 公共插件 2: DDNS（动态域名） ===
           CONFIG_PACKAGE_luci-app-ddns=y
           CONFIG_PACKAGE_ddns-scripts=y
 
-          # === 公共插件 3: OpenSSH SFTP（檔案傳輸） ===
+          # === 公共插件 3: OpenSSH SFTP（文件传输） ===
           CONFIG_PACKAGE_openssh-sftp-server=y
-
-          # === 集客 AC 控制器（兩個 flavor 均包含） ===
-          # 說明: 依賴 luci-compat，編譯系統會自動解析
-          #       若編譯報錯找不到套件，請確認源碼已正確放入 package/
-          CONFIG_PACKAGE_luci-app-gecoosac=y
           EOF
 
-          # ---- flavor 差異: with-nikki 額外組件 ----
+          # ---- flavor 差异: with-nikki 额外组件 ----
           if [ "${{ matrix.flavor }}" = "with-nikki" ]; then
-            echo ">>> [with-nikki] 注入 NIKKI 核心 + rtp2httpd 完整組件 + files/ 覆蓋"
+            echo ">>> [with-nikki] 注入 NIKKI 核心（编译为模块）+ rtp2httpd + 集客AC + libffi"
             cat >> .config << 'EOF'
-          # 啟用 files/ 目錄覆蓋 (用於預置 mihomo 二進位)
-          CONFIG_TARGET_ROOTFS_INCLUDE_FILES=y
+          # === 确保 libffi 被选中（python3 的 ffi.h 依赖） ===
+          CONFIG_PACKAGE_libffi=y
 
-          # Nikki 核心（預置二進位 + LuCI）
+          # === NIKKI 核心（由 nikki feed 编译为 OpenWrt 包，取代预置二进制） ===
+          CONFIG_PACKAGE_mihomo-meta=y
           CONFIG_PACKAGE_luci-app-nikki=y
           CONFIG_PACKAGE_luci-i18n-nikki-zh-cn=y
           CONFIG_PACKAGE_kmod-nft-tproxy=y
@@ -319,37 +241,54 @@ jobs:
           CONFIG_PACKAGE_ip-full=y
           CONFIG_PACKAGE_yq=y
 
-          # rtp2httpd 完整組件
+          # === rtp2httpd 完整组件 ===
           CONFIG_PACKAGE_rtp2httpd=y
           CONFIG_PACKAGE_luci-app-rtp2httpd=y
           CONFIG_PACKAGE_luci-i18n-rtp2httpd-zh-cn=y
+
+          # === 集客 AC 控制器（仅集成版） ===
+          CONFIG_PACKAGE_luci-app-gecoosac=y
           EOF
           else
-            echo ">>> [no-nikki] 顯式關閉 NIKKI 與 rtp2httpd"
-            echo "# CONFIG_PACKAGE_luci-app-nikki is not set" >> .config
-            echo "# CONFIG_PACKAGE_rtp2httpd is not set" >> .config
-            echo "# CONFIG_PACKAGE_luci-app-rtp2httpd is not set" >> .config
+            echo ">>> [no-nikki] 显式关闭 NIKKI / rtp2httpd / 集客AC / libffi 相关选项"
+            cat >> .config << 'EOF'
+          # CONFIG_PACKAGE_luci-app-nikki is not set
+          # CONFIG_PACKAGE_mihomo-meta is not set
+          # CONFIG_PACKAGE_rtp2httpd is not set
+          # CONFIG_PACKAGE_luci-app-rtp2httpd is not set
+          # CONFIG_PACKAGE_luci-app-gecoosac is not set
+          # CONFIG_PACKAGE_libffi is not set
+          EOF
           fi
 
-          # 讓 kconfig 解析所有依賴，補全缺失項
           make defconfig
 
-          # ---- 校驗: 必須且只能有一個 target device = fiberhome_hg5382a ----
+          # ---- 校验: 必须且只能有一个 target device = fiberhome_hg5382a ----
           sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
           if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5382a=y$' .config; then
-            echo "::error::HG5382A 單一機型鎖定校驗失敗！請檢查 target 設定。"
+            echo "::error::HG5382A 单一机型锁定校验失败！请检查 target 设置。"
             exit 1
           fi
 
-          # ---- 校驗: 集客 AC 是否被成功選中 ----
-          if ! grep -q '^CONFIG_PACKAGE_luci-app-gecoosac=y$' .config; then
-            echo "::warning::集客 AC (luci-app-gecoosac) 未被選中，可能是源碼缺失或依賴未滿足"
+          # ---- 校验（仅 with-nikki）: 集客 AC、mihomo-meta、libffi 是否被成功选中 ----
+          if [ "${{ matrix.flavor }}" = "with-nikki" ]; then
+            for pkg in luci-app-gecoosac mihomo-meta libffi; do
+              if ! grep -q "^CONFIG_PACKAGE_${pkg}=y$" .config; then
+                echo "::error::with-nikki 未选中 ${pkg}，请检查依赖或源码。"
+                exit 1
+              else
+                echo ">>> 已选中 ${pkg}"
+              fi
+            done
           else
-            echo ">>> 集客 AC (luci-app-gecoosac) 已成功選中"
+            if grep -q '^CONFIG_PACKAGE_luci-app-gecoosac=y$' .config; then
+              echo "::error::no-nikki 不应包含集客 AC！"
+              exit 1
+            fi
           fi
 
       # ----------------------------------------------------------------------
-      # 11. 打印 PON 相關配置 (運行中即可在 Actions 日誌查看)
+      # 11. 打印 PON 相关配置 (诊断)
       # ----------------------------------------------------------------------
       - name: 打印 PON 相关配置 (诊断)
         working-directory: ./ponwrt
@@ -373,26 +312,24 @@ jobs:
           echo "===== PON 相关 feed 是否安装 ====="
           ls -d feeds/* 2>/dev/null | grep -iE "pon|airoha" || echo "(feeds 中无 PON 相关目录)"
           echo ""
-          echo "===== 集客 AC 相关配置 ====="
-          grep -iE "gecoosac|gecoo" .config || echo "(无匹配)"
+          echo "===== 集客 AC / mihomo / libffi 相关配置 ====="
+          grep -iE "gecoosac|gecoo|mihomo|libffi" .config || echo "(无匹配)"
 
       # ----------------------------------------------------------------------
-      # 12. 下載所有源碼包 (dl/)
+      # 12. 下载所有源码包 (dl/)
       # ----------------------------------------------------------------------
-      - name: 下載原始碼套件 (Download Packages)
+      - name: 下载源码软件包 (Download Packages)
         working-directory: ./ponwrt
         run: |
-          # GOPROXY 加速 Go 模組下載
           export GOPROXY=https://proxy.golang.org,direct
           export GO111MODULE=on
           make download -j"$(nproc)"
-          # 刪除小於 1KB 的殘缺檔案 (下載失敗的垃圾)
           find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
 
       # ----------------------------------------------------------------------
-      # 13. 正式編譯固件 (帶日誌落盤)
+      # 13. 正式编译固件 (带日志落盘)
       # ----------------------------------------------------------------------
-      - name: 執行韌體編譯 (Compile Firmware)
+      - name: 执行固件编译 (Compile Firmware)
         working-directory: ./ponwrt
         run: |
           export GOPROXY=https://proxy.golang.org,direct
@@ -401,22 +338,18 @@ jobs:
           export GOENV=off
           export GOTOOLCHAIN=local
 
-          # 建 logs 目錄，把完整編譯日誌落盤
           mkdir -p logs
-          # pipefail: 確保 tee 也能反映 make 的退出碼
           set -o pipefail
-          # 多線程失敗時，降級為單線程 V=s 重新編譯，便於看清報錯
           make -j"$(nproc)" 2>&1 | tee logs/build.log || \
             (make -j1 V=s 2>&1 | tee -a logs/build.log)
 
       # ----------------------------------------------------------------------
-      # 14. 整理產物並統一重命名
+      # 14. 整理产物并统一重命名
       # ----------------------------------------------------------------------
-      - name: 整理產物與重新命名 (僅保留光貓固件 + 統一規則)
+      - name: 整理产物与重新命名 (仅保留光猫固件 + 统一规则)
         run: |
           mkdir -p ./firmware_out
 
-          # 只複製 HG5382A 相關的固件和元數據
           find ponwrt/bin/targets/airoha/an7581/ -type f \( \
             -iname '*hg5382a*.bin' -o \
             -iname '*hg5382a*.ubi' -o \
@@ -425,26 +358,22 @@ jobs:
             -name 'profiles.json' \
           \) -exec cp -f {} ./firmware_out/ \;
 
-          # 從上游 git log 獲取日期用於命名
           UPSTREAM_DATE=$(cd ponwrt && git log -1 --format='%cd' --date=format:'%Y%m%d' 2>/dev/null || true)
           [ -z "$UPSTREAM_DATE" ] && UPSTREAM_DATE=$(date +%Y%m%d)
           IMWT_VER="25.2"
           FLAVOR="${{ matrix.flavor }}"
-          echo ">>> 上游日期=$UPSTREAM_DATE 版本=$IMWT_VER 標籤=$FLAVOR"
+          echo ">>> 上游日期=$UPSTREAM_DATE 版本=$IMWT_VER 标签=$FLAVOR"
 
-          # 統一重命名: fiberhome_hg5382a-<版本>-<日期>-<flavor>-<类型>.<后缀>
           shopt -s nullglob
           for file in ./firmware_out/*; do
             [ -f "$file" ] || continue
             base=$(basename "$file")
             lower=$(echo "$base" | tr '[:upper:]' '[:lower:]')
 
-            # 跳過非固件
             if [[ ! "$lower" =~ hg5382a ]] || [[ ! "$lower" =~ \.(bin|ubi|itb)$ ]]; then
               continue
             fi
 
-            # 判斷類型
             if [[ "$lower" =~ initramfs ]]; then
               FW_TYPE="initramfs"
             elif [[ "$lower" =~ sysupgrade ]]; then
@@ -460,7 +389,6 @@ jobs:
             mv -f "$file" "./firmware_out/$NEW_NAME"
           done
 
-          # buildinfo / profiles 必須帶 flavor，防止 merge-multiple 覆蓋
           for bf in ./firmware_out/*.buildinfo; do
             [ -f "$bf" ] || continue
             mv -f "$bf" "${bf%.buildinfo}-${FLAVOR}.buildinfo"
@@ -469,24 +397,23 @@ jobs:
             mv -f ./firmware_out/profiles.json "./firmware_out/profiles-${FLAVOR}.json"
           fi
 
-          # 生成 sha256 校驗和
           (
             cd ./firmware_out
             shopt -s nullglob nocaseglob
             target_files=( *hg5382a*.bin *hg5382a*.ubi *hg5382a*.itb )
             if [ "${#target_files[@]}" -eq 0 ]; then
-              echo "::error::firmware_out 內沒有 HG5382A 光貓韌體映像"
+              echo "::error::firmware_out 内没有 HG5382A 光猫固件映像"
               exit 1
             fi
             sha256sum "${target_files[@]}" > "sha256sums-${FLAVOR}"
-            echo "===== ${FLAVOR} 最終產物 ====="
+            echo "===== ${FLAVOR} 最终产物 ====="
             ls -lh
           )
 
       # ----------------------------------------------------------------------
-      # 15. 上傳診斷配置與日誌 (即使編譯失敗也上傳)
+      # 15. 上传诊断配置与日志 (即使编译失败也上传)
       # ----------------------------------------------------------------------
-      - name: 上傳編譯配置與日誌 (診斷用)
+      - name: 上传编译配置与日志 (诊断用)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -497,13 +424,12 @@ jobs:
             ponwrt/target/linux/airoha/dts/
             ponwrt/logs/
           if-no-files-found: ignore
-          # 3 天後自動過期，避免舊 artifact 堆積
           retention-days: 3
 
       # ----------------------------------------------------------------------
-      # 16. 上傳固件產物 (供 release job 下載)
+      # 16. 上传固件产物 (供 release job 下载)
       # ----------------------------------------------------------------------
-      - name: 上傳臨時建置產物 (Upload Artifact)
+      - name: 上传临时构建产物 (Upload Artifact)
         uses: actions/upload-artifact@v4
         with:
           name: PonWrt-HG5382A-${{ matrix.flavor }}
@@ -512,34 +438,33 @@ jobs:
           retention-days: 1
 
   # ==========================================================================
-  # Job: release - 統一發布至 GitHub Releases
+  # Job: release - 统一发布至 GitHub Releases
   # ==========================================================================
   release:
-    name: 統一發布至 GitHub Releases
+    name: 统一发布至 GitHub Releases
     needs: build
-    # 即使 build 部分失敗，只要不是完全取消，仍嘗試發布已有產物
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - name: 下載所有建置產物
+      - name: 下载所有构建产物
         uses: actions/download-artifact@v4
         with:
           pattern: PonWrt-HG5382A-*
           path: ./all_firmwares
           merge-multiple: true
 
-      - name: 列出待發布檔案清單
+      - name: 列出待发布文件清单
         run: |
-          echo "===== 準備發布的全部光貓韌體清單 ====="
+          echo "===== 准备发布的全部光猫固件清单 ====="
           find ./all_firmwares -type f -printf '%s\t%p\n' | sort -k2
           if ! find ./all_firmwares -type f -iname '*hg5382a*' \( -name '*.bin' -o -name '*.ubi' -o -name '*.itb' \) | grep -q .; then
-            echo "::error::沒有可發布的光貓韌體映像"
+            echo "::error::没有可发布的光猫固件映像"
             exit 1
           fi
 
-      - name: 產生發布標籤與日期
+      - name: 生成发布标签与日期
         id: tag
         run: |
           export TZ="Asia/Shanghai"
@@ -548,50 +473,51 @@ jobs:
             echo "release_date=$(date +'%Y-%m-%d %H:%M')"
           } >> "$GITHUB_OUTPUT"
 
-      - name: 正式發布至 GitHub Releases
+      - name: 正式发布至 GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: ${{ steps.tag.outputs.release_tag }}
-          name: PonWrt HG5382A 雙版本純淨光貓固件 (${{ steps.tag.outputs.release_date }})
+          name: PonWrt HG5382A 双版本纯净光猫固件 (${{ steps.tag.outputs.release_date }})
           fail_on_unmatched_files: true
           body: |
-            ### 韌體版本說明
-            本韌體**僅適用於烽火 HG5382A（處理器：AN7581）光貓**。  
-            檔名統一格式：`fiberhome_hg5382a-<版本>-<上游日期>-<with-nikki|no-nikki>-<類型>.bin`
+            ### 固件版本说明
+            本固件**仅适用于烽火 HG5382A（处理器：AN7581）光猫**。  
+            文件名统一格式：`fiberhome_hg5382a-<版本>-<上游日期>-<with-nikki|no-nikki>-<类型>.bin`
 
             ---
 
-            #### 公共核心組件（兩個版本均包含）
-            | 類型 | 套件 | 說明 |
-            |------|------|------|
-            | 主題 | `luci-theme-argon` | 純淨 Argon 主題（僅核心） |
-            | 終端 | `luci-app-ttyd` | 網頁終端機（僅核心） |
-            | DDNS | `luci-app-ddns` + `ddns-scripts` | 動態網域（僅核心） |
-            | 檔案 | `openssh-sftp-server` | SFTP 伺服器（僅核心） |
-            | AC控制器 | `luci-app-gecoosac` | 集客 AC 控制器（適用 AP 7.6+） |
+            #### 公共核心组件（两个版本均包含）
+            | 类型 | 软件包 | 说明 |
+            |------|--------|------|
+            | 主题 | `luci-theme-argon` | 纯净 Argon 主题（仅核心） |
+            | 终端 | `luci-app-ttyd` | 网页终端（仅核心） |
+            | DDNS | `luci-app-ddns` + `ddns-scripts` | 动态域名（仅核心） |
+            | 文件 | `openssh-sftp-server` | SFTP 服务器（仅核心） |
 
-            #### 包含 NIKKI + rtp2httpd 進階版（檔名含 `with-nikki`）
-            | 類型 | 套件 | 說明 |
-            |------|------|------|
-            | 代理核心 | **預置 Alpha-Smart + UPX -9** | 放置於 `/usr/libexec/mihomo` |
-            | 代理插件 | `luci-app-nikki` + 簡中 | 透明代理管理界面 |
-            | 核心模組 | `kmod-nft-tproxy` `kmod-tun` `kmod-inet-diag` `kmod-nft-socket` `kmod-dummy` | TProxy / TUN |
-            | 工具 | `ip-full` `yq` | 完整 ip 命令與配置處理 |
-            | IPTV | `rtp2httpd` + `luci-app-rtp2httpd` + 簡中 | 完整 IPTV 串流轉換服務（完整組件） |
+            #### 集成版（文件名含 `with-nikki`）
+            | 类型 | 软件包 | 说明 |
+            |------|--------|------|
+            | 代理核心 | `mihomo-meta` | **以 OpenWrt 包方式编译安装**（不再预置二进制） |
+            | 代理插件 | `luci-app-nikki` + 简中 | 透明代理管理界面 |
+            | 核心模块 | `kmod-nft-tproxy` `kmod-tun` `kmod-inet-diag` `kmod-nft-socket` `kmod-dummy` | TProxy / TUN |
+            | 工具 | `ip-full` `yq` | 完整 ip 命令与配置处理 |
+            | IPTV | `rtp2httpd` + `luci-app-rtp2httpd` + 简中 | 完整 IPTV 串流转换服务 |
+            | 依赖 | `libffi` | 保证 python3 相关编译通过 |
+            | AC控制器 | `luci-app-gecoosac` | 集客 AC 控制器（适用 AP 7.6+，**仅集成版包含**） |
 
-            #### 純淨輕量版（檔名含 `no-nikki`）
-            僅包含上方「公共核心組件」，**完全不含** nikki / mihomo / rtp2httpd / yq / TProxy / TUN 相關組件。
-
-            ---
-
-            #### ⚠️ 集客 AC 版本說明
-            - 本固件集成的集客 AC 為 **main 分支（適用集客 AP 7.6 及以上固件）**
-            - 若你的集客 AP 固件低於 7.6，請在 YML 中改用 `-b v1.0` 重新編譯
-            - 集客 AC 二進位較大，若刷機後空間不足，可考慮使用 no-nikki 版本
+            #### 纯净轻量版（文件名含 `no-nikki`）
+            仅包含上方“公共核心组件”，**完全不含** nikki / mihomo / rtp2httpd / yq / TProxy / TUN / 集客 AC。
 
             ---
 
-            - 編譯完成時間：${{ steps.tag.outputs.release_date }}（UTC+8）
+            #### ⚠️ 集客 AC 版本说明
+            - **仅集成版（with-nikki）包含**集客 AC 控制器（main 分支，适用 AP 7.6+）
+            - 若你的集客 AP 固件低于 7.6，请在 YML 中改用 `-b v1.0` 重新编译
+            - 集客 AC 二进制较大，若刷机后空间不足，请改用 no-nikki 版本
+
+            ---
+
+            - 编译完成时间：${{ steps.tag.outputs.release_date }}（UTC+8）
             - 另附 `sha256sums-*`、`*.buildinfo`、`profiles-*.json`
           files: ./all_firmwares/*
