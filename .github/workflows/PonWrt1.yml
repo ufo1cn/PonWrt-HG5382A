@@ -101,6 +101,18 @@ jobs:
           if [ -f feeds/luci/collections/luci/Makefile ]; then
             sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile || true
           fi
+      - name: 注入 libffi 包 (上游 immortalwrt 树缺失 libffi，python3-ctypes 依赖 +libffi，缺它则 ffi.h 报错)
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p package/libs/libffi
+          curl -fsSL -o package/libs/libffi/Makefile \
+            https://raw.githubusercontent.com/openwrt/openwrt/master/package/libs/libffi/Makefile
+          if grep -q 'PKG_NAME:=libffi' package/libs/libffi/Makefile; then
+            echo ">>> libffi 包注入成功 (package/libs/libffi)"
+          else
+            echo "::error::libffi 包注入失败"
+            exit 1
+          fi
       - name: 生成并锁定 HG5382A 配置 (PON 修复 + mihomo + sing-box)
         working-directory: ./ponwrt
         run: |
@@ -185,9 +197,8 @@ jobs:
           export GOENV=off
           export GOTOOLCHAIN=local
           mkdir -p logs
-          # 先显式编译 libffi（python3 的 ffi.h 依赖；路径按 feeds install 后的目录，双路径兜底）
-          make package/feeds/packages/libffi/compile -j"$(nproc)" V=s \
-            || make package/libs/libffi/compile -j"$(nproc)" V=s || true
+          # 先显式编译 libffi（python3 的 ffi.h 依赖；包已在前面注入 package/libs/libffi）
+          make package/libs/libffi/compile -j"$(nproc)" V=s || true
           set -o pipefail
           make -j"$(nproc)" 2>&1 | tee logs/build.log || \
             (echo ">>> 并行编译失败，回退单线程重编" && make -j1 V=s 2>&1 | tee -a logs/build.log)
