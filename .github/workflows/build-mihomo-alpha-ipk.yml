@@ -1,0 +1,164 @@
+# ============================================================================
+# 单独编译某个软件包的 .ipk（默认 mihomo-alpha）
+# ----------------------------------------------------------------------------
+# 用途：主固件已在编译/已刷入的前提下，单独产出某个包的安装包，方便在运行中的
+#       固件里用 opkg 手动安装/替换（例如把 mihomo-meta 换成 mihomo-alpha）。
+# 说明：
+#   - 与「编译集成版固件」workflow 互不干扰（独立 concurrency 分组），可同时运行。
+#   - 使用与主固件完全相同的 ponwrt commit + an7581/aarch64 目标，确保 ipk 兼容。
+#   - mihomo-meta 与 mihomo-alpha 互 CONFLICTS，install 时 opkg 会自动替换。
+# ============================================================================
+name: 单独编译软件包 ipk (mihomo-alpha)
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: '要单独编译的软件包名（默认 mihomo-alpha）'
+        required: false
+        default: mihomo-alpha
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # 独立分组：不会取消正在运行的「编译集成版固件」任务
+  group: build-single-ipk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-ipk:
+    name: 编译 ${{ inputs.package }} .ipk
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+
+    env:
+      # 必须与主固件编译使用同一 commit，保证 ABI 一致
+      SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
+      PKG: ${{ inputs.package }}
+
+    steps:
+      - name: 清理磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo docker system prune -af || true
+          sudo apt-get clean
+          sudo swapoff /swapfile || true
+          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+          df -h
+
+      - name: 初始化编译环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
+            subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
+            libzstd-dev jq dos2unix upx-ucl
+
+      - name: 拉取 PonWrt 指定 commit
+        run: |
+          git init ponwrt
+          git -C ponwrt remote add origin https://github.com/pbs05/ponwrt.git
+          git -C ponwrt fetch --depth=1 -- origin "$SOURCE_REF"
+          git -C ponwrt checkout --detach FETCH_HEAD
+          echo ">>> PonWrt pinned: $SOURCE_REF"
+
+      - name: 加入外挂来源 (nikki + homeproxy)
+        working-directory: ./ponwrt
+        run: |
+          [ -f feeds.conf.default ] || touch feeds.conf.default
+          sed -i '/nikki/d;/homeproxy/d' feeds.conf.default
+          [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
+          echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
+          echo 'src-git homeproxy https://github.com/immortalwrt/homeproxy.git;master' >> feeds.conf.default
+          dos2unix feeds.conf.default 2>/dev/null || true
+
+      - name: 更新并安装外挂来源
+        working-directory: ./ponwrt
+        run: |
+          ./scripts/feeds update -a
+          if [ -d feeds/nikki ]; then
+            echo ">>> 剔除 nikki 的 +yq 依赖（如需要可显式编译 yq）"
+            find feeds/nikki -name Makefile -exec sed -i -E 's/[[:space:]]*\+yq\b//g' {} + || true
+          fi
+          ./scripts/feeds install -a
+
+      - name: 生成目标配置并启用目标包
+        working-directory: ./ponwrt
+        run: |
+          rm -rf tmp
+          perl ./scripts/kconfig.pl + configs/an7581.config > .config
+          echo "CONFIG_PACKAGE_${PKG}=y" >> .config
+          make defconfig
+          if ! grep -q "^CONFIG_PACKAGE_${PKG}=y$" .config; then
+            echo "::error::软件包 ${PKG} 未能在 .config 中启用，请确认包名存在于已安装的 feed"
+            exit 1
+          fi
+          echo ">>> 已启用 ${PKG}"
+
+      - name: 下载源码 (容错)
+        working-directory: ./ponwrt
+        run: |
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+          export GO111MODULE=on
+          make download -j"$(nproc)" || true
+          find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
+          make download -j1 V=s || true
+
+      - name: 单独编译软件包 ipk
+        working-directory: ./ponwrt
+        run: |
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+          export GOSUMDB=sum.golang.org
+          export GO111MODULE=on
+          export GOENV=off
+          export GOTOOLCHAIN=local
+          set -o pipefail
+          make package/${PKG}/compile V=s 2>&1 | tee compile.log || exit 1
+
+      - name: 收集 ipk
+        run: |
+          mkdir -p ./ipk_out
+          find ponwrt/bin/packages -type f -name "${PKG}_*.ipk" -exec cp -f {} ./ipk_out/ \;
+          (
+            cd ./ipk_out
+            shopt -s nullglob
+            files=( *.ipk )
+            if [ "${#files[@]}" -eq 0 ]; then
+              echo "::error::未找到 ${PKG} 的 ipk 产物"
+              exit 1
+            fi
+            sha256sum "${files[@]}" > sha256sums
+            echo "===== ipk 产物 ====="
+            ls -lh
+          )
+
+      - name: 上传 ipk
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipk-${{ inputs.package }}
+          path: ./ipk_out/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 上传诊断
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipk-${{ inputs.package }}-diag
+          path: |
+            ponwrt/.config
+            ponwrt/compile.log
+          if-no-files-found: ignore
+          retention-days: 3
