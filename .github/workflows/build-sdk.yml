@@ -92,7 +92,8 @@ jobs:
         working-directory: ./ponwrt
         run: |
           rm -rf tmp
-          perl ./scripts/kconfig.pl + configs/an7581.config > .config
+          # kconfig.pl 的 + 是二元操作符，必须提供两个 config（与主固件一致）
+          perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
           make defconfig
 
       - name: 下载源码 (容错)
