@@ -1,0 +1,156 @@
+# ============================================================================
+# 编译并保留 OpenWrt SDK（工具链 + 头文件）
+# ----------------------------------------------------------------------------
+# 作用：把 an7581/aarch64 目标的 SDK 编一次，存入 CI 缓存（保留 400 天）+ 上传
+#        artifact。之后所有「编译某个软件包 ipk」的 workflow 都 restore 这份 SDK，
+#        直接编译包，不再重复编译工具链。
+# 注意：先运行本 workflow 生成 SDK 缓存，再运行 build-package.yml 编包。
+# ============================================================================
+name: 编译并保留 OpenWrt SDK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-sdk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 必须与主固件编译使用同一 commit，保证 ABI 一致
+  SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
+
+jobs:
+  build-sdk:
+    name: 编译 SDK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+
+    env:
+      # 缓存保留到最大可配置值（400 天）
+      ACTIONS_CACHE_RETENTION_DAY: 400
+
+    steps:
+      - name: 清理磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo docker system prune -af || true
+          sudo apt-get clean
+          sudo swapoff /swapfile || true
+          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+          df -h
+
+      - name: 初始化编译环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
+            subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
+            libzstd-dev jq dos2unix upx-ucl
+
+      - name: 拉取 PonWrt 指定 commit
+        run: |
+          git init ponwrt
+          git -C ponwrt remote add origin https://github.com/pbs05/ponwrt.git
+          git -C ponwrt fetch --depth=1 -- origin "$SOURCE_REF"
+          git -C ponwrt checkout --detach FETCH_HEAD
+          echo ">>> PonWrt pinned: $SOURCE_REF"
+
+      - name: 加入外挂来源 (nikki + homeproxy)
+        working-directory: ./ponwrt
+        run: |
+          [ -f feeds.conf.default ] || touch feeds.conf.default
+          sed -i '/nikki/d;/homeproxy/d' feeds.conf.default
+          [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
+          echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
+          echo 'src-git homeproxy https://github.com/immortalwrt/homeproxy.git;master' >> feeds.conf.default
+          dos2unix feeds.conf.default 2>/dev/null || true
+
+      - name: 更新并安装外挂来源
+        working-directory: ./ponwrt
+        run: |
+          ./scripts/feeds update -a
+          if [ -d feeds/nikki ]; then
+            echo ">>> 剔除 nikki 的 +yq 依赖"
+            find feeds/nikki -name Makefile -exec sed -i -E 's/[[:space:]]*\+yq\b//g' {} + || true
+          fi
+          ./scripts/feeds install -a
+
+      - name: 生成目标配置
+        working-directory: ./ponwrt
+        run: |
+          rm -rf tmp
+          perl ./scripts/kconfig.pl + configs/an7581.config > .config
+          make defconfig
+
+      - name: 下载源码 (容错)
+        working-directory: ./ponwrt
+        run: |
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+          export GO111MODULE=on
+          make download -j"$(nproc)" || true
+          find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
+
+      - name: 编译 OpenWrt SDK
+        working-directory: ./ponwrt
+        run: |
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+          export GOSUMDB=sum.golang.org
+          export GO111MODULE=on
+          export GOENV=off
+          export GOTOOLCHAIN=local
+          set -o pipefail
+          make sdk V=s 2>&1 | tee sdk-build.log || exit 1
+
+      - name: 收集 SDK 并准备缓存
+        run: |
+          mkdir -p ./sdk_out
+          find ponwrt/bin/targets -type f -name '*sdk*.tar.*' -exec cp -f {} ./sdk_out/ \;
+          (
+            cd ./sdk_out
+            shopt -s nullglob
+            files=( *sdk*.tar.* )
+            if [ "${#files[@]}" -eq 0 ]; then
+              echo "::error::未生成 SDK tarball"
+              exit 1
+            fi
+            ls -lh
+          )
+
+      - name: 缓存 SDK（保留 400 天，供各包编译 workflow 复用）
+        uses: actions/cache/save@v4
+        with:
+          path: ./sdk_out
+          key: ponwrt-sdk-an7581
+          save-always: true
+
+      - name: 上传 SDK
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-sdk-an7581
+          path: ./sdk_out/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 上传诊断
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-sdk-an7581-diag
+          path: |
+            ponwrt/.config
+            ponwrt/sdk-build.log
+          if-no-files-found: ignore
+          retention-days: 3
