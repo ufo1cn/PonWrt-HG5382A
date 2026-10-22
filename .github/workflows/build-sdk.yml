@@ -104,7 +104,7 @@ jobs:
           make download -j"$(nproc)" || true
           find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
 
-      - name: 编译 OpenWrt SDK
+      - name: 编译 OpenWrt SDK（工具链 + 内核 + 打包）
         working-directory: ./ponwrt
         run: |
           export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
@@ -113,7 +113,15 @@ jobs:
           export GOENV=off
           export GOTOOLCHAIN=local
           set -o pipefail
-          make sdk V=s 2>&1 | tee sdk-build.log || exit 1
+          rm -f sdk-build.log
+          # 注意：这棵树（与 OpenWrt 上游一致）没有 make sdk 目标；SDK 由 target/sdk
+          # 子目录目标构建。必须先编好 host 工具、交叉工具链、内核（SDK 打包需要内核
+          # .ko/Module.symvers），最后 target/sdk/compile 打出 SDK tarball
+          # （bin/targets/*/PonWrt-sdk-*.tar.zst）。
+          make tools/install -j"$(nproc)" V=s 2>&1 | tee -a sdk-build.log || exit 1
+          make toolchain/install -j"$(nproc)" V=s 2>&1 | tee -a sdk-build.log || exit 1
+          make target/linux/compile -j"$(nproc)" V=s 2>&1 | tee -a sdk-build.log || exit 1
+          make target/sdk/compile -j"$(nproc)" V=s 2>&1 | tee -a sdk-build.log || exit 1
 
       - name: 收集 SDK 并准备缓存
         run: |
