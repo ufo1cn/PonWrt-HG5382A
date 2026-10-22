@@ -11,34 +11,27 @@
 #   - 固定 ponwrt 到已知可用 commit，避免上游漂移再踩「optical frontend provider 缺失」
 # ============================================================================
 name: 编译 PonWrt HG5382A 集成版固件 (mihomo + sing-box)
-
 on:
   workflow_dispatch:
-
 permissions:
   contents: write
-
 concurrency:
   group: build-hg5382a-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   build:
     name: 编译集成版固件
     runs-on: ubuntu-24.04
     timeout-minutes: 360
-
     env:
       # 固定到已验证支持 fiberhome_hg5382a 光前端(paged-bosa) 的上游 commit；
       # 如需跟踪最新上游，把 SOURCE_REF 改成 master
       SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
-
     steps:
       - name: 签出工作流仓库 (Checkout Workflow)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: 清理磁盘空间 (释放容量)
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
@@ -53,7 +46,6 @@ jobs:
           sudo swapon /swapfile
           free -h
           df -h
-
       - name: 初始化编译环境 (安装依赖软件包)
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -70,7 +62,6 @@ jobs:
             python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
             subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
             libzstd-dev jq dos2unix upx-ucl
-
       - name: 拉取 PonWrt 指定 commit (Clone PonWrt @ pinned)
         run: |
           git init ponwrt
@@ -78,7 +69,6 @@ jobs:
           git -C ponwrt fetch --depth=1 -- origin "$SOURCE_REF"
           git -C ponwrt checkout --detach FETCH_HEAD
           echo ">>> PonWrt pinned: $SOURCE_REF"
-
       - name: 加入外挂来源 (注入 nikki + homeproxy)
         working-directory: ./ponwrt
         run: |
@@ -90,7 +80,6 @@ jobs:
           dos2unix feeds.conf.default 2>/dev/null || true
           echo "===== feeds.conf.default ====="
           tail -n 8 feeds.conf.default
-
       - name: 缓存下载软件包 (Cache dl)
         uses: actions/cache@v4
         with:
@@ -99,7 +88,6 @@ jobs:
           restore-keys: |
             ponwrt-dl-an7581-
             ponwrt-dl-
-
       - name: 更新并安装外挂来源 (Feeds)
         working-directory: ./ponwrt
         run: |
@@ -113,24 +101,20 @@ jobs:
           if [ -f feeds/luci/collections/luci/Makefile ]; then
             sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile || true
           fi
-
       - name: 生成并锁定 HG5382A 配置 (PON 修复 + mihomo + sing-box)
         working-directory: ./ponwrt
         run: |
           rm -rf tmp
           perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
-
           sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
           sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
           sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
           sed -i '/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
-
           cat >> .config << 'EOF'
           # CONFIG_TARGET_ALL_PROFILES is not set
           # CONFIG_TARGET_MULTI_PROFILE is not set
           CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5382a=y
           CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5382a=y
-
           # === 公共核心 ===
           CONFIG_PACKAGE_luci-theme-argon=y
           # CONFIG_PACKAGE_luci-theme-bootstrap is not set
@@ -139,47 +123,41 @@ jobs:
           CONFIG_PACKAGE_ddns-scripts=y
           CONFIG_PACKAGE_openssh-sftp-server=y
           EOF
-
           make defconfig
-
           # 单一机型校验
           sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
           if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5382a=y$' .config; then
             echo "::error::HG5382A 单一机型锁定校验失败！"
             exit 1
           fi
-
           # ==== defconfig 之后显式钉住关键包（防上游漂移 / 被 defconfig 洗掉）====
           cat >> .config << 'EOF'
-
           # --- PON 修复：HG5382A 光前端 provider 必须内建（paged-bosa 提供 fiberhome,hg5x-bosa）---
           CONFIG_PACKAGE_kmod-airoha-paged-bosa=y
           CONFIG_PACKAGE_kmod-airoha-pon-frontend=y
           CONFIG_PACKAGE_kmod-airoha-xpon=y
           CONFIG_PACKAGE_airoha-ponctl=y
           CONFIG_PACKAGE_airoha-pond=y
-
           # --- 透明代理内核模块（mihomo/sing-box 共用底座）---
           CONFIG_PACKAGE_kmod-tun=y
           CONFIG_PACKAGE_kmod-nft-tproxy=y
           CONFIG_PACKAGE_kmod-nft-socket=y
           CONFIG_PACKAGE_kmod-inet-diag=y
           CONFIG_PACKAGE_kmod-dummy=y
-
           # --- mihomo（可卸载软件包；nikki feed；mihomo-meta=稳定通道，要最新可改 mihomo-alpha）---
           CONFIG_PACKAGE_mihomo-meta=y
           CONFIG_PACKAGE_nikki=y
           CONFIG_PACKAGE_luci-app-nikki=y
           CONFIG_PACKAGE_luci-i18n-nikki-zh-cn=y
-
           # --- sing-box（immortalwrt/homeproxy，界面自动依赖 sing-box + firewall4 + kmod-nft-tproxy）---
           CONFIG_PACKAGE_luci-app-homeproxy=y
-
           # --- 工具 ---
           CONFIG_PACKAGE_ip-full=y
           CONFIG_PACKAGE_yq=y
+          # --- python3 编译修复：_ctypes 需要 ffi.h，上游 an7581.config 未选 libffi，导致
+          #     Python-3.14.7 编译在 profile-opt 阶段 fatal error: ffi.h（主固件上次失败根因）---
+          CONFIG_PACKAGE_libffi=y
           EOF
-
           # 校验关键包是否进入 .config
           for pkg in kmod-airoha-paged-bosa kmod-airoha-pon-frontend kmod-airoha-xpon \
                      mihomo-meta nikki luci-app-nikki luci-app-homeproxy; do
@@ -189,7 +167,6 @@ jobs:
               echo ">>> 已锁定 ${pkg}"
             fi
           done
-
       - name: 下载源码软件包 (容错)
         working-directory: ./ponwrt
         run: |
@@ -199,7 +176,6 @@ jobs:
           find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
           make download -j1 V=s || { echo "::warning::仍有软件包下载失败，编译阶段会再尝试"; }
           find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
-
       - name: 执行固件编译 (Compile Firmware)
         working-directory: ./ponwrt
         run: |
@@ -209,10 +185,12 @@ jobs:
           export GOENV=off
           export GOTOOLCHAIN=local
           mkdir -p logs
+          # 先显式编译 libffi（python3 的 ffi.h 依赖；路径按 feeds install 后的目录，双路径兜底）
+          make package/feeds/packages/libffi/compile -j"$(nproc)" V=s \
+            || make package/libs/libffi/compile -j"$(nproc)" V=s || true
           set -o pipefail
           make -j"$(nproc)" 2>&1 | tee logs/build.log || \
             (echo ">>> 并行编译失败，回退单线程重编" && make -j1 V=s 2>&1 | tee -a logs/build.log)
-
       - name: 整理产物 (Collect Firmware)
         run: |
           mkdir -p ./firmware_out
@@ -223,7 +201,6 @@ jobs:
             -name '*.buildinfo' -o \
             -name 'profiles.json' \
           \) -exec cp -f {} ./firmware_out/ \;
-
           (
             cd ./firmware_out
             shopt -s nullglob nocaseglob
@@ -236,7 +213,6 @@ jobs:
             echo "===== 最终产物 ====="
             ls -lh
           )
-
       - name: 上传固件 (Upload Artifact)
         uses: actions/upload-artifact@v4
         with:
@@ -244,7 +220,6 @@ jobs:
           path: ./firmware_out/
           if-no-files-found: error
           retention-days: 14
-
       - name: 上传编译配置与日志 (诊断用)
         if: always()
         uses: actions/upload-artifact@v4
