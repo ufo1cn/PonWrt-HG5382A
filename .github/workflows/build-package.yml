@@ -1,0 +1,128 @@
+# ============================================================================
+# 用缓存 SDK 编译任意软件包 .ipk（默认 mihomo-alpha）
+# ----------------------------------------------------------------------------
+# 前置：先运行「编译并保留 OpenWrt SDK」workflow，生成 SDK 缓存（key=
+#       ponwrt-sdk-an7581，保留 400 天）。本 workflow restore 该 SDK，复用其
+#       工具链直接编译指定软件包，无需重编工具链。
+# 用法：Actions → 本 workflow → Run workflow → 输入软件包名（默认 mihomo-alpha）。
+# 兼容性：与主固件同 ponwrt commit + an7581/aarch64，ipk 可直接 opkg 安装。
+# ============================================================================
+name: 用缓存 SDK 编译软件包 ipk
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: '要编译的软件包名（默认 mihomo-alpha）'
+        required: false
+        default: mihomo-alpha
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-package-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
+  PKG: ${{ inputs.package }}
+
+jobs:
+  build-package:
+    name: 编译 ${{ inputs.package }} .ipk（复用 SDK）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: 清理磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache
+          sudo docker system prune -af || true
+          sudo apt-get clean
+
+      - name: 初始化编译环境（SDK 编译包所需最小依赖）
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            binutils build-essential bzip2 cmake curl flex gawk gettext git \
+            g++-multilib gcc-multilib libssl-dev libncurses-dev patch pkgconf \
+            python3 python3-pip python3-setuptools rsync sed tar unzip wget \
+            xz-utils zlib1g-dev zstd jq dos2unix
+
+      - name: 取回缓存的 SDK
+        uses: actions/cache/restore@v4
+        id: sdk-restore
+        with:
+          path: ./sdk_cache
+          key: ponwrt-sdk-an7581
+
+      - name: 解包 SDK
+        if: steps.sdk-restore.outputs.cache-hit == 'true'
+        run: |
+          mkdir -p ./sdk
+          ( tar -xf ./sdk_cache/*sdk*.tar.* -C ./sdk --strip-components=1 2>/dev/null || tar -xf ./sdk_cache/*sdk*.tar.* -C ./sdk )
+          echo "=== SDK 顶层 ==="
+          ls ./sdk | head -n 20
+
+      - name: 若缓存未命中则提示先编译 SDK
+        if: steps.sdk-restore.outputs.cache-hit != 'true'
+        run: |
+          echo "::error::未找到 SDK 缓存（key=ponwrt-sdk-an7581）。请先运行「编译并保留 OpenWrt SDK」workflow 生成 SDK 缓存后再编译软件包。"
+          exit 1
+
+      - name: 刷新 feed（SDK 内置 nikki/homeproxy；失败则全量拉取）
+        working-directory: ./sdk
+        run: |
+          ./scripts/feeds update -i || ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 编译软件包 ipk（复用 SDK 工具链）
+        working-directory: ./sdk
+        run: |
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+          export GOSUMDB=sum.golang.org
+          export GO111MODULE=on
+          export GOENV=off
+          export GOTOOLCHAIN=local
+          set -o pipefail
+          make package/${PKG}/compile V=s 2>&1 | tee compile.log || exit 1
+
+      - name: 收集 ipk
+        run: |
+          mkdir -p ./ipk_out
+          find ./sdk/bin/packages -type f -name "${PKG}_*.ipk" -exec cp -f {} ./ipk_out/ \;
+          (
+            cd ./ipk_out
+            shopt -s nullglob
+            files=( *.ipk )
+            if [ "${#files[@]}" -eq 0 ]; then
+              echo "::error::未找到 ${PKG} 的 ipk 产物"
+              exit 1
+            fi
+            sha256sum "${files[@]}" > sha256sums
+            echo "===== ipk 产物 ====="
+            ls -lh
+          )
+
+      - name: 上传 ipk
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipk-${{ inputs.package }}
+          path: ./ipk_out/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 上传诊断
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipk-${{ inputs.package }}-diag
+          path: |
+            ./sdk/.config
+            ./sdk/compile.log
+          if-no-files-found: ignore
+          retention-days: 3
