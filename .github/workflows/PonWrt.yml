@@ -1,15 +1,10 @@
 # ============================================================================
-# 编译 PonWrt HG5382A 固件 (双版本 + Nikki 编译模块 + 集客 AC)
+# 编译 PonWrt HG5382A 固件 (双版本 + Nikki 编译模块 + 集客 AC) + 固件发布后编译 SDK
 # ----------------------------------------------------------------------------
-# 功能概览:
-#   - 双 flavor 并行编译: with-nikki(含 NIKKI 代理 + rtp2httpd + 集客AC) / no-nikki(纯净版)
-#   - 锁定单一机型 fiberhome_hg5382a (AN7581)
-#   - with-nikki 以 OpenWrt 包方式编译 mihomo-meta（不再预置二进制）
-#   - 两个 flavor 均保留 libffi（python3 的基础依赖，避免 python3 编译失败）
-#   - 集客 AC 控制器仅集成版包含
-#   - 编译后打印 PON 相关配置与 DTS 节点 (便于诊断 PON 驱动问题)
-#   - 上传诊断 artifact (.config / feeds / dts / logs)，便于事后排查
-#   - 产物统一重命名并发布至 GitHub Releases
+# 与旧版差异:
+#   - 下载步骤容错: make download 失败不再直接退出，转由编译阶段补下载
+#   - GOPROXY 切换为国内镜像，避免 GitHub Actions 中 proxy.golang.org 被阻断
+#   - 新增 build-sdk Job，needs: release，固件发布后编译 OpenWrt SDK
 # ============================================================================
 name: 自动编译 PonWrt HG5382A 固件 (双版本 + Nikki 编译模块 + 集客AC)
 
@@ -133,7 +128,6 @@ jobs:
         run: |
           ./scripts/feeds update -a
 
-          # 移除 squeezelite 包，避免 Kconfig recursive dependency 报错
           find feeds -type d -iname '*squeezelite*' -prune -exec rm -rf {} + 2>/dev/null || true
 
           if [ "${{ matrix.flavor }}" = "with-nikki" ]; then
@@ -145,7 +139,6 @@ jobs:
 
           ./scripts/feeds install -a
 
-          # feeds install 后再清一次，防止符号链接重新出现
           rm -rf package/feeds/packages/squeezelite 2>/dev/null || true
 
           if [ -f feeds/luci/collections/luci/Makefile ]; then
@@ -220,14 +213,12 @@ jobs:
 
           make defconfig
 
-          # ---- 校验: 必须且只能有一个 target device = fiberhome_hg5382a ----
           sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
           if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5382a=y$' .config; then
             echo "::error::HG5382A 单一机型锁定校验失败！请检查 target 设置。"
             exit 1
           fi
 
-          # ---- 校验（仅 with-nikki）: 集客 AC、mihomo-meta 必须选中；libffi 只告警 ----
           if [ "${{ matrix.flavor }}" = "with-nikki" ]; then
             for pkg in luci-app-gecoosac mihomo-meta; do
               if ! grep -q "^CONFIG_PACKAGE_${pkg}=y$" .config; then
@@ -238,7 +229,6 @@ jobs:
               fi
             done
 
-            # libffi 不再作为硬性失败条件，缺失时强制写入 .config（不再跑 defconfig）
             if ! grep -q '^CONFIG_PACKAGE_libffi=y$' .config; then
               echo "::warning::libffi 未被 defconfig 保留，强制写入 .config 以保障 python3 编译"
               sed -i '/^# CONFIG_PACKAGE_libffi is not set$/d' .config
@@ -250,7 +240,6 @@ jobs:
               echo "::error::no-nikki 不应包含集客 AC！"
               exit 1
             fi
-            # no-nikki 也确保 libffi 存在，避免 python3 编译失败
             if ! grep -q '^CONFIG_PACKAGE_libffi=y$' .config; then
               sed -i '/^# CONFIG_PACKAGE_libffi is not set$/d' .config
               echo 'CONFIG_PACKAGE_libffi=y' >> .config
@@ -282,18 +271,31 @@ jobs:
           echo "===== 集客 AC / mihomo / libffi 相关配置 ====="
           grep -iE "gecoosac|gecoo|mihomo|libffi" .config || echo "(无匹配)"
 
-      - name: 下载源码软件包 (Download Packages)
+      # ========== 改动点 1: 下载步骤容错，失败不退出 ==========
+      - name: 下载源码软件包 (Download Packages, 容错)
         working-directory: ./ponwrt
         run: |
-          export GOPROXY=https://proxy.golang.org,direct
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
           export GO111MODULE=on
-          make download -j"$(nproc)"
+
+          echo ">>> 第一轮并行下载（个别失败不中断）"
+          make download -j"$(nproc)" || true
+
+          echo ">>> 清理下载失败产生的错误页/空文件"
           find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
 
+          echo ">>> 第二轮单线程补漏下载"
+          make download -j1 V=s || {
+            echo "::warning::仍有软件包下载失败，编译阶段会再次尝试下载；若编译失败请检查网络或源码地址"
+          }
+
+          find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
+
+      # ========== 改动点 2: 编译阶段使用国内 GOPROXY，保留单线程回退 ==========
       - name: 执行固件编译 (Compile Firmware)
         working-directory: ./ponwrt
         run: |
-          export GOPROXY=https://proxy.golang.org,direct
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
           export GOSUMDB=sum.golang.org
           export GO111MODULE=on
           export GOENV=off
@@ -302,12 +304,12 @@ jobs:
           mkdir -p logs
           set -o pipefail
 
-          # 清理 python3 缓存，避免 libffi 状态变化导致编译失败
           make package/feeds/packages/python3/clean V=s 2>/dev/null || true
           make package/feeds/packages/python3/host/clean V=s 2>/dev/null || true
 
           make -j"$(nproc)" 2>&1 | tee logs/build.log || \
-            (make -j1 V=s 2>&1 | tee -a logs/build.log)
+            (echo ">>> 并行编译失败，回退单线程重编" && \
+             make -j1 V=s 2>&1 | tee -a logs/build.log)
 
       - name: 整理产物与重新命名 (仅保留光猫固件 + 统一规则)
         run: |
@@ -395,14 +397,14 @@ jobs:
           retention-days: 1
 
   release:
-    name: 统一发布至 GitHub Releases
+    name: 统一发布固件至 GitHub Releases
     needs: build
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - name: 下载所有构建产物
+      - name: 下载所有固件构建产物
         uses: actions/download-artifact@v4
         with:
           pattern: PonWrt-HG5382A-*
@@ -427,7 +429,7 @@ jobs:
             echo "release_date=$(date +'%Y-%m-%d %H:%M')"
           } >> "$GITHUB_OUTPUT"
 
-      - name: 正式发布至 GitHub Releases
+      - name: 正式发布固件至 GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -436,7 +438,7 @@ jobs:
           fail_on_unmatched_files: true
           body: |
             ### 固件版本说明
-            本固件**仅适用于烽火 HG5382A（处理器：AN7581）光猫**。  
+            本固件**仅适用于烽火 HG5382A（处理器：AN7581）光猫**。
             文件名统一格式：`fiberhome_hg5382a-<版本>-<上游日期>-<with-nikki|no-nikki>-<类型>.bin`
 
             ---
@@ -452,26 +454,236 @@ jobs:
             #### 集成版（文件名含 `with-nikki`）
             | 类型 | 软件包 | 说明 |
             |------|--------|------|
-            | 代理核心 | `mihomo-meta` | **以 OpenWrt 包方式编译安装**（不再预置二进制） |
+            | 代理核心 | `mihomo-meta` | 以 OpenWrt 包方式编译安装 |
             | 代理插件 | `luci-app-nikki` + 简中 | 透明代理管理界面 |
             | 核心模块 | `kmod-nft-tproxy` `kmod-tun` `kmod-inet-diag` `kmod-nft-socket` `kmod-dummy` | TProxy / TUN |
             | 工具 | `ip-full` `yq` | 完整 ip 命令与配置处理 |
             | IPTV | `rtp2httpd` + `luci-app-rtp2httpd` + 简中 | 完整 IPTV 串流转换服务 |
             | 依赖 | `libffi` | 保证 python3 相关编译通过 |
-            | AC控制器 | `luci-app-gecoosac` | 集客 AC 控制器（适用 AP 7.6+，**仅集成版包含**） |
+            | AC控制器 | `luci-app-gecoosac` | 集客 AC 控制器（适用 AP 7.6+，仅集成版包含） |
 
             #### 纯净轻量版（文件名含 `no-nikki`）
-            仅包含上方“公共核心组件”，**完全不含** nikki / mihomo / rtp2httpd / yq / TProxy / TUN / 集客 AC。
-
-            ---
-
-            #### ⚠️ 集客 AC 版本说明
-            - **仅集成版（with-nikki）包含**集客 AC 控制器（main 分支，适用 AP 7.6+）
-            - 若你的集客 AP 固件低于 7.6，请在 YML 中改用 `-b v1.0` 重新编译
-            - 集客 AC 二进制较大，若刷机后空间不足，请改用 no-nikki 版本
+            仅包含上方“公共核心组件”，完全不含 nikki / mihomo / rtp2httpd / yq / TProxy / TUN / 集客 AC。
 
             ---
 
             - 编译完成时间：${{ steps.tag.outputs.release_date }}（UTC+8）
             - 另附 `sha256sums-*`、`*.buildinfo`、`profiles-*.json`
           files: ./all_firmwares/*
+
+  # ==================== 改动点 3: 固件发布后编译 OpenWrt SDK ====================
+  build-sdk:
+    name: 编译 OpenWrt SDK
+    needs: release
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: 签出工作流仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 清理磁盘空间 (释放容量)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/share/swift /usr/local/.ghcup \
+            /opt/hostedtoolcache
+          sudo docker system prune -af || true
+          sudo apt-get clean
+          sudo swapoff /swapfile || true
+          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          df -h
+
+      - name: 初始化编译环境 (安装依赖软件包)
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man inttool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
+            subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
+            libzstd-dev jq dos2unix upx-ucl libffi-dev
+
+      - name: 拉取 PonWrt 官方源码
+        run: |
+          git clone --depth 1 https://github.com/pbs05/ponwrt.git ponwrt
+
+      - name: 集成集客 AC 控制器 (与 with-nikki 保持一致)
+        working-directory: ./ponwrt
+        run: |
+          git clone --depth 1 https://github.com/lyin888/openwrt-gecoosac package/openwrt-gecoosac
+
+      - name: 加入外挂来源 (NIKKI + rtp2httpd)
+        working-directory: ./ponwrt
+        run: |
+          if [ ! -f feeds.conf.default ]; then touch feeds.conf.default; fi
+          sed -i '/nikki/d' feeds.conf.default
+          [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
+          echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
+          dos2unix feeds.conf.default 2>/dev/null || true
+
+          git clone --depth 1 https://github.com/stackia/rtp2httpd /tmp/rtp2httpd
+          mkdir -p package
+          cp -r /tmp/rtp2httpd/openwrt-support/luci-app-rtp2httpd package/luci-app-rtp2httpd
+          cp -r /tmp/rtp2httpd/openwrt-support/rtp2httpd package/rtp2httpd
+          mv package/rtp2httpd/Makefile.versioned package/rtp2httpd/Makefile
+          mv package/luci-app-rtp2httpd/Makefile.versioned package/luci-app-rtp2httpd/Makefile
+
+      - name: 更新并安装外挂来源 (Feeds)
+        working-directory: ./ponwrt
+        run: |
+          ./scripts/feeds update -a
+          find feeds -type d -iname '*squeezelite*' -prune -exec rm -rf {} + 2>/dev/null || true
+          if [ -d feeds/nikki ]; then
+            find feeds/nikki -name Makefile -exec sed -i -E 's/[[:space:]]*\+yq\b//g' {} + || true
+          fi
+          ./scripts/feeds install -a
+          rm -rf package/feeds/packages/squeezelite 2>/dev/null || true
+          if [ -f feeds/luci/collections/luci/Makefile ]; then
+            sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile || true
+          fi
+
+      - name: 生成 SDK 配置 (CONFIG_SDK=y，配置与 with-nikki 对齐)
+        working-directory: ./ponwrt
+        run: |
+          rm -rf tmp
+          perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
+
+          sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
+          sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
+          sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
+          sed -i '/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
+
+          cat >> .config << 'EOF'
+          # CONFIG_TARGET_ALL_PROFILES is not set
+          # CONFIG_TARGET_MULTI_PROFILE is not set
+          CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5382a=y
+          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5382a=y
+
+          # 关键：生成 SDK
+          CONFIG_SDK=y
+
+          CONFIG_PACKAGE_luci-theme-argon=y
+          # CONFIG_PACKAGE_luci-theme-bootstrap is not set
+          CONFIG_PACKAGE_luci-app-ttyd=y
+          CONFIG_PACKAGE_luci-app-ddns=y
+          CONFIG_PACKAGE_ddns-scripts=y
+          CONFIG_PACKAGE_openssh-sftp-server=y
+
+          CONFIG_PACKAGE_libffi=y
+          CONFIG_PACKAGE_mihomo-meta=y
+          CONFIG_PACKAGE_luci-app-nikki=y
+          CONFIG_PACKAGE_luci-i18n-nikki-zh-cn=y
+          CONFIG_PACKAGE_kmod-nft-tproxy=y
+          CONFIG_PACKAGE_kmod-tun=y
+          CONFIG_PACKAGE_kmod-inet-diag=y
+          CONFIG_PACKAGE_kmod-nft-socket=y
+          CONFIG_PACKAGE_kmod-dummy=y
+          CONFIG_PACKAGE_ip-full=y
+          CONFIG_PACKAGE_yq=y
+          CONFIG_PACKAGE_rtp2httpd=y
+          CONFIG_PACKAGE_luci-app-rtp2httpd=y
+          CONFIG_PACKAGE_luci-i18n-rtp2httpd-zh-cn=y
+          CONFIG_PACKAGE_luci-app-gecoosac=y
+          EOF
+
+          make defconfig
+
+          if ! grep -q '^CONFIG_SDK=y$' .config; then
+            echo "::error::CONFIG_SDK 未保留，SDK 编译将不会产出压缩包"
+            exit 1
+          fi
+          echo ">>> CONFIG_SDK=y 已确认"
+
+      - name: 下载源码软件包 (容错)
+        working-directory: ./ponwrt
+        run: |
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+          export GO111MODULE=on
+
+          make download -j"$(nproc)" || true
+          find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
+          make download -j1 V=s || {
+            echo "::warning::仍有软件包下载失败，编译阶段会再次尝试下载"
+          }
+          find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
+
+      - name: 编译 SDK
+        working-directory: ./ponwrt
+        run: |
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+          export GOSUMDB=sum.golang.org
+          export GO111MODULE=on
+          export GOENV=off
+          export GOTOOLCHAIN=local
+
+          mkdir -p logs
+          set -o pipefail
+
+          make -j"$(nproc)" 2>&1 | tee logs/sdk-build.log || \
+            (echo ">>> 并行编译失败，回退单线程重编" && \
+             make -j1 V=s 2>&1 | tee -a logs/sdk-build.log)
+
+      - name: 整理并重命名 SDK 产物
+        run: |
+          mkdir -p ./sdk_out
+          find ponwrt/bin/targets/airoha/an7581/ -type f \
+            \( -name 'openwrt-sdk-*.tar.zst' -o -name 'openwrt-sdk-*.tar.gz' \) \
+            -exec cp -f {} ./sdk_out/ \;
+
+          UPSTREAM_DATE=$(cd ponwrt && git log -1 --format='%cd' --date=format:'%Y%m%d' 2>/dev/null || true)
+          [ -z "$UPSTREAM_DATE" ] && UPSTREAM_DATE=$(date +%Y%m%d)
+          IMWT_VER="25.2"
+
+          shopt -s nullglob
+          for f in ./sdk_out/openwrt-sdk-*; do
+            [ -f "$f" ] || continue
+            if [[ "$f" == *.tar.zst ]]; then ext="tar.zst"; else ext="tar.gz"; fi
+            mv -f "$f" "./sdk_out/fiberhome_hg5382a-${IMWT_VER}-${UPSTREAM_DATE}-sdk.${ext}"
+          done
+
+          (
+            cd ./sdk_out
+            shopt -s nullglob
+            files=( *sdk* )
+            if [ "${#files[@]}" -eq 0 ]; then
+              echo "::error::sdk_out 内没有 SDK 压缩包"
+              exit 1
+            fi
+            sha256sum "${files[@]}" > sha256sums-sdk
+            echo "===== SDK 最终产物 ====="
+            ls -lh
+          )
+
+      - name: 上传 SDK 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: PonWrt-HG5382A-SDK
+          path: ./sdk_out/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 上传 SDK 编译配置与日志 (诊断用)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: HG5382A-SDK-diagnostics
+          path: |
+            ponwrt/.config
+            ponwrt/feeds.conf.default
+            ponwrt/logs/
+          if-no-files-found: ignore
+          retention-days: 3
