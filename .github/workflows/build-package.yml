@@ -64,7 +64,7 @@ jobs:
         if: steps.sdk-restore.outputs.cache-hit == 'true'
         run: |
           mkdir -p ./sdk
-          ( tar -xf ./sdk_cache/*sdk*.tar.* -C ./sdk --strip-components=1 2>/dev/null || tar -xf ./sdk_cache/*sdk*.tar.* -C ./sdk )
+          ( tar --zstd -xf ./sdk_cache/*sdk*.tar.* -C ./sdk --strip-components=1 2>/dev/null || tar --zstd -xf ./sdk_cache/*sdk*.tar.* -C ./sdk )
           echo "=== SDK 顶层 ==="
           ls ./sdk | head -n 20
 
