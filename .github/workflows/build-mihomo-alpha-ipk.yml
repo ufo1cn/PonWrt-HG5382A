@@ -116,6 +116,19 @@ jobs:
           find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
           make download -j1 V=s || true
 
+      - name: 构建并保留 OpenWrt SDK（工具链 + 头文件）
+        working-directory: ./ponwrt
+        run: |
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+          export GOSUMDB=sum.golang.org
+          export GO111MODULE=on
+          export GOENV=off
+          export GOTOOLCHAIN=local
+          make sdk V=s 2>&1 | tee sdk-build.log || exit 1
+          mkdir -p ../sdk_out
+          find bin/targets -type f -name '*sdk*.tar.*' -exec cp -f {} ../sdk_out/ \;
+          ( cd ../sdk_out && shopt -s nullglob; files=( *sdk*.tar.* ); echo "SDK_COUNT=${#files[@]}"; ls -lh )
+
       - name: 单独编译软件包 ipk
         working-directory: ./ponwrt
         run: |
@@ -152,6 +165,14 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: 上传 SDK（工具链 + 头文件，供离线复用）
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-sdk-an7581
+          path: ./sdk_out/
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: 上传诊断
         if: always()
         uses: actions/upload-artifact@v4
@@ -160,5 +181,6 @@ jobs:
           path: |
             ponwrt/.config
             ponwrt/compile.log
+            ponwrt/sdk-build.log
           if-no-files-found: ignore
           retention-days: 3
