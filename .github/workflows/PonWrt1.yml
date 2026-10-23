@@ -88,6 +88,38 @@ jobs:
           restore-keys: |
             ponwrt-dl-an7581-
             ponwrt-dl-
+      # ===== 增量编译缓存（断点续传）：失败修完 yml 重跑时复用已编产物，避免 2 小时全量重建 =====
+      # 分三卷：toolchain+host / 包安装产物(staging) / 慢包构建目录。配置变化时 key 失效，
+      # restore-keys 仍可回退到旧缓存，OpenWrt 的 stamp 机制自动只重编受影响的包。
+      - name: 缓存 toolchain + host 工具
+        uses: actions/cache@v4
+        with:
+          path: |
+            ponwrt/staging_dir/toolchain-*
+            ponwrt/staging_dir/host
+          key: hg5382a-toolchain-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
+          restore-keys: |
+            hg5382a-toolchain-
+      - name: 缓存包安装产物 (staging target)
+        uses: actions/cache@v4
+        with:
+          path: ponwrt/staging_dir/target-aarch64_cortex-a53_musl
+          key: hg5382a-stage-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
+          restore-keys: |
+            hg5382a-stage-
+      - name: 缓存慢包构建目录 (python3/golang/sing-box/openssl)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ponwrt/build_dir/hostpkg/golang-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/python3-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/golang-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/sing-box-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/libcronet-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/openssl-*
+          key: hg5382a-slow-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config', 'ponwrt/feeds.conf.default') }}
+          restore-keys: |
+            hg5382a-slow-
       - name: 更新并安装外挂来源 (Feeds)
         working-directory: ./ponwrt
         run: |
@@ -134,6 +166,9 @@ jobs:
           CONFIG_PACKAGE_luci-app-ddns=y
           CONFIG_PACKAGE_ddns-scripts=y
           CONFIG_PACKAGE_openssh-sftp-server=y
+          # 关闭 sing-box 的 naive outbound（免拉 libcronet/boringssl 长链；vless/trojan/ss 不受影响）。
+          # 必须放在 defconfig 之前：defconfig 之后的追加行会触发 out-of-sync 警告，conf 不采纳
+          # CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set
           EOF
           make defconfig
           # 单一机型校验
@@ -212,6 +247,9 @@ jobs:
           export GOENV=off
           export GOTOOLCHAIN=local
           mkdir -p logs
+          # 增量续编：缓存恢复的 staging 总 stamp 若存在，会让 make 误判"全部包已编译"而跳过，
+          # 必须清掉，让 make 按各包 build_dir 的 .built stamp 决定是否重编
+          rm -rf staging_dir/target-aarch64_cortex-a53_musl/stamp
           # 先显式编译 libffi（python3 的 ffi.h 依赖；包已在前面注入 package/libs/libffi）
           make package/libs/libffi/compile -j"$(nproc)" V=s || true
           set -o pipefail
