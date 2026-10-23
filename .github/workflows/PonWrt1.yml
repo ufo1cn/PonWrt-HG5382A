@@ -1,38 +1,36 @@
-# ============================================================================
-# 编译 PonWrt HG5382A 集成版固件（mihomo 软件包 + sing-box 共存 + PON 修复）
-# ----------------------------------------------------------------------------
-# 基于 ix1911/PonWrt-HG5382A 修改：
-#   - 单版本集成（不再分 with-nikki / no-nikki），mihomo 与 sing-box 同一镜像共存
-#   - mihomo 改为「可卸载软件包」：nikki feed 的 mihomo-meta + nikki + luci-app-nikki
-#     （不再把 alpha-smart 二进制硬塞进 files/usr/libexec）
-#   - 新增 sing-box：immortalwrt/homeproxy feed 的 luci-app-homeproxy（自动依赖 sing-box）
-#   - PON 修复：显式钉住 kmod-airoha-paged-bosa / pon-frontend / xpon + ponctl / pond
-#     （HG5382A 光前端 provider 由 paged-bosa 提供；历史失败即因该包没进镜像）
-#   - 固定 ponwrt 到已知可用 commit，避免上游漂移再踩「optical frontend provider 缺失」
-# ============================================================================
-name: 编译 PonWrt HG5382A 集成版固件 (mihomo + sing-box)
+name: 編譯 PonWrt HG5382A 韌體 (雙版本 + GPON 補丁)
+
 on:
   workflow_dispatch:
-permissions:
-  contents: write
+  # 補丁 / 工作流 / 腳本有變動時自動重編
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - 'patches/**'
+      - 'scripts/**'
+
 concurrency:
   group: build-hg5382a-${{ github.ref }}
   cancel-in-progress: true
+
 jobs:
   build:
-    name: 编译集成版固件
+    name: 編譯韌體 (${{ matrix.flavor }})
     runs-on: ubuntu-24.04
     timeout-minutes: 360
-    env:
-      # 固定到已验证支持 fiberhome_hg5382a 光前端(paged-bosa) 的上游 commit；
-      # 如需跟踪最新上游，把 SOURCE_REF 改成 master
-      SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [with-nikki, no-nikki]
+
     steps:
-      - name: 签出工作流仓库 (Checkout Workflow)
+      - name: 簽出工作流倉庫 (Checkout Workflow)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: 清理磁盘空间 (释放容量)
+
+      - name: 清理磁碟空間 (釋放容量)
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
             /usr/local/share/boost /usr/share/swift /usr/local/.ghcup \
@@ -46,7 +44,8 @@ jobs:
           sudo swapon /swapfile
           free -h
           df -h
-      - name: 初始化编译环境 (安装依赖软件包)
+
+      - name: 初始化編譯環境 (安裝相依套件)
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -62,237 +61,447 @@ jobs:
             python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
             subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
             libzstd-dev jq dos2unix upx-ucl
-      - name: 拉取 PonWrt 指定 commit (Clone PonWrt @ pinned)
+
+      - name: 拉取 PonWrt 官方源碼 (Clone PonWrt)
         run: |
-          git init ponwrt
-          git -C ponwrt remote add origin https://github.com/pbs05/ponwrt.git
-          git -C ponwrt fetch --depth=1 -- origin "$SOURCE_REF"
-          git -C ponwrt checkout --detach FETCH_HEAD
-          echo ">>> PonWrt pinned: $SOURCE_REF"
-      - name: 加入外挂来源 (注入 nikki + homeproxy)
+          git clone --depth 1 https://github.com/pbs05/ponwrt.git ponwrt
+          echo ">>> PonWrt 源碼已克隆到 ./ponwrt"
+          ls -la ponwrt | head -n 20
+
+      - name: 加入外掛來源 (依條件注入 NIKKI + rtp2httpd)
         working-directory: ./ponwrt
         run: |
-          if [ ! -f feeds.conf.default ]; then touch feeds.conf.default; fi
-          sed -i '/nikki/d;/homeproxy/d' feeds.conf.default
-          [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
-          echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
-          echo 'src-git homeproxy https://github.com/immortalwrt/homeproxy.git;master' >> feeds.conf.default
-          dos2unix feeds.conf.default 2>/dev/null || true
-          echo "===== feeds.conf.default ====="
-          tail -n 8 feeds.conf.default
-      - name: 缓存下载软件包 (Cache dl)
+          # 防護：feeds.conf.default 不存在時自動建立
+          if [ ! -f feeds.conf.default ]; then
+            echo ">>> feeds.conf.default 不存在，正在建立空檔..."
+            touch feeds.conf.default
+          fi
+
+          # 先清除可能殘留的 nikki 源
+          sed -i '/nikki/d' feeds.conf.default
+
+          if [ "${{ matrix.flavor }}" = "with-nikki" ]; then
+            echo ">>> [with-nikki] 正在加入 NIKKI 外掛軟體源..."
+            [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
+            echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
+            dos2unix feeds.conf.default 2>/dev/null || true
+
+            # 引入 rtp2httpd 完整安裝支援（對齊 ImmortalWrt.yml）
+            echo ">>> 正在引入 rtp2httpd 完整組件..."
+            git clone --depth 1 https://github.com/stackia/rtp2httpd /tmp/rtp2httpd
+            mkdir -p package
+            cp -r /tmp/rtp2httpd/openwrt-support/luci-app-rtp2httpd package/luci-app-rtp2httpd
+            cp -r /tmp/rtp2httpd/openwrt-support/rtp2httpd package/rtp2httpd
+            mv package/rtp2httpd/Makefile.versioned package/rtp2httpd/Makefile
+            mv package/luci-app-rtp2httpd/Makefile.versioned package/luci-app-rtp2httpd/Makefile
+          else
+            echo ">>> [no-nikki] 純淨版本，略過 NIKKI 與 rtp2httpd 注入"
+          fi
+
+          echo "===== feeds.conf.default 末尾內容 ====="
+          tail -n 5 feeds.conf.default || true
+
+      # dl 緩存 key 固定：內容只由上游源碼決定，改工作流/補丁不影響，命中後不重複上傳
+      - name: 快取下載套件 (Cache dl)
         uses: actions/cache@v4
         with:
           path: ponwrt/dl
-          key: ponwrt-dl-an7581-${{ hashFiles('ponwrt/feeds.conf.default', 'ponwrt/configs/*.config') }}
+          key: ponwrt-dl-an7581
           restore-keys: |
-            ponwrt-dl-an7581-
-            ponwrt-dl-
-      # ===== 增量编译缓存（断点续传）：失败修完 yml 重跑时复用已编产物，避免 2 小时全量重建 =====
-      # 分三卷：toolchain+host / 包安装产物(staging) / 慢包构建目录。配置变化时 key 失效，
-      # restore-keys 仍可回退到旧缓存，OpenWrt 的 stamp 机制自动只重编受影响的包。
-      - name: 缓存 toolchain + host 工具
-        uses: actions/cache@v4
-        with:
-          path: |
-            ponwrt/staging_dir/toolchain-*
-            ponwrt/staging_dir/host
-          key: hg5382a-toolchain-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
-          restore-keys: |
-            hg5382a-toolchain-
-      - name: 缓存包安装产物 (staging target)
-        uses: actions/cache@v4
-        with:
-          path: ponwrt/staging_dir/target-aarch64_cortex-a53_musl
-          key: hg5382a-stage-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
-          restore-keys: |
-            hg5382a-stage-
-      - name: 缓存慢包构建目录 (python3/golang/sing-box/openssl)
-        uses: actions/cache@v4
-        with:
-          path: |
-            ponwrt/build_dir/hostpkg/golang-*
-            ponwrt/build_dir/target-aarch64_cortex-a53_musl/python3-*
-            ponwrt/build_dir/target-aarch64_cortex-a53_musl/golang-*
-            ponwrt/build_dir/target-aarch64_cortex-a53_musl/sing-box-*
-            ponwrt/build_dir/target-aarch64_cortex-a53_musl/libcronet-*
-            ponwrt/build_dir/target-aarch64_cortex-a53_musl/openssl-*
-          key: hg5382a-slow-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config', 'ponwrt/feeds.conf.default') }}
-          restore-keys: |
-            hg5382a-slow-
-      - name: 更新并安装外挂来源 (Feeds)
+            ponwrt-dl-an7581
+
+      - name: 更新並安裝外掛來源 (Feeds)
         working-directory: ./ponwrt
         run: |
           ./scripts/feeds update -a
-          if [ -d feeds/nikki ]; then
-            echo ">>> 剔除 nikki 的 +yq 依赖（改由 CONFIG_PACKAGE_yq=y 显式提供）"
-            find feeds/nikki -name Makefile -exec sed -i -E 's/[[:space:]]*\+yq\b//g' {} + || true
+          if [ "${{ matrix.flavor }}" = "with-nikki" ]; then
+            if [ -d feeds/nikki ]; then
+              echo ">>> 正在從 feeds/nikki 中剔除 +yq 相依性..."
+              find feeds/nikki -name Makefile -exec sed -i -E 's/[[:space:]]*\+yq\b//g' {} +
+            fi
           fi
           ./scripts/feeds install -a
-          # 默认主题改 Argon
+
+          # 預設主題改為純淨 Argon（對齊 ImmortalWrt.yml）
           if [ -f feeds/luci/collections/luci/Makefile ]; then
             sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile || true
           fi
-      - name: 注入 libffi 包 (上游 immortalwrt 树缺失 libffi，python3-ctypes 依赖 +libffi，缺它则 ffi.h 报错)
+
+      # PON 驅動來自 git feed（pon_drivers / pon_userspace），feeds 更新後才會
+      # checkout 到 ponwrt/feeds/ 下，所以補丁必須在 feeds 步驟之後打。
+      - name: 應用 GPON feed 補丁 (Apply GPON feed patches)
+        env:
+          PONWRT_DIR: ponwrt
+          FEED_PATCHES_STRICT: '1'
+        run: bash scripts/apply-feed-patches.sh
+
+      # 補丁沒真正落進 feed 直接失敗，避免白編幾小時
+      - name: 校驗 GPON 補丁已生效 (Verify GPON patches)
         working-directory: ./ponwrt
         run: |
-          mkdir -p package/libs/libffi
-          curl -fsSL -o package/libs/libffi/Makefile \
-            https://raw.githubusercontent.com/openwrt/openwrt/master/package/libs/libffi/Makefile
-          if grep -q 'PKG_NAME:=libffi' package/libs/libffi/Makefile; then
-            echo ">>> libffi 包注入成功 (package/libs/libffi)"
-          else
-            echo "::error::libffi 包注入失败"
+          set -e
+          test -f feeds/pon_drivers/airoha-xpon/src/airoha-xpon-gpon.c
+          grep -q 'AIROHA_PON_FRONTEND_MODE_GPON' \
+            feeds/pon_drivers/airoha-pon-frontends/src/airoha-paged-bosa-ux3363.c
+          grep -q "o.value('gpon'" \
+            feeds/pon_userspace/luci-app-pon/htdocs/luci-static/resources/view/pon/config.js
+          echo "OK: GPON patches are present in the feed checkouts."
+
+      # ccache 緩存 key 只取決於補丁/腳本內容，改 yml 重跑時仍能命中舊緩存，
+      # 大幅縮短失敗後修改重編的時間。
+      - name: 快取編譯緩存 (Cache ccache)
+        uses: actions/cache@v4
+        with:
+          path: ccache
+          key: ponwrt-ccache-${{ matrix.flavor }}-${{ hashFiles('patches/feeds/**', 'scripts/**') }}
+          restore-keys: |
+            ponwrt-ccache-${{ matrix.flavor }}-
+
+      - name: 預置 Nikki Alpha-Smart 核心並進行 UPX 壓縮 (僅 with-nikki)
+        if: matrix.flavor == 'with-nikki'
+        working-directory: ./ponwrt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo ">>> 正在下載 vernesong/mihomo 最新 Alpha-Smart 核心並 UPX -9 壓縮..."
+          mkdir -p files/usr/libexec
+
+          SMART_URL=$(curl -sL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/vernesong/mihomo/releases/tags/Prerelease-Alpha \
+            | jq -r '.assets[] | select(.name | test("^mihomo-linux-arm64-alpha-smart-.*\\.gz$")) | .browser_download_url' | head -n 1)
+
+          if [ -z "$SMART_URL" ] || [ "$SMART_URL" = "null" ]; then
+            echo "API 匹配失敗，嘗試從 Release 頁面提取..."
+            SMART_URL=$(curl -sL https://github.com/vernesong/mihomo/releases/expanded_assets/Prerelease-Alpha \
+              | grep -oE '/vernesong/mihomo/releases/download/Prerelease-Alpha/mihomo-linux-arm64-alpha-smart-[a-zA-Z0-9]+\.gz' \
+              | head -n 1)
+            [ -n "$SMART_URL" ] && SMART_URL="https://github.com${SMART_URL}"
+          fi
+
+          if [ -z "$SMART_URL" ] || [ "$SMART_URL" = "null" ]; then
+            echo "::error::未找到符合的 alpha-smart arm64 核心下載地址！"
             exit 1
           fi
-      - name: 生成并锁定 HG5382A 配置 (PON 修复 + mihomo + sing-box)
+
+          echo "下載位址: $SMART_URL"
+          curl -fsSL -o /tmp/mihomo-smart.gz "$SMART_URL"
+          gzip -d -f /tmp/mihomo-smart.gz
+          chmod +x /tmp/mihomo-smart
+
+          echo "執行 UPX -9 極限壓縮..."
+          upx -9 /tmp/mihomo-smart || echo "UPX 警告：若已加殼或不支援則略過，直接使用原二進位"
+
+          mv /tmp/mihomo-smart files/usr/libexec/mihomo
+          chmod +x files/usr/libexec/mihomo
+          echo ">>> Nikki Alpha-Smart 核心已部署至 files/usr/libexec/mihomo"
+
+      - name: 產生並調整韌體設定檔 (鎖定 HG5382A + 核心插件)
         working-directory: ./ponwrt
         run: |
-          rm -rf tmp
           perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
+
           sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
           sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
           sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
           sed -i '/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
+
+          # 公共核心插件 + 主題 Argon（完全對齊 ImmortalWrt.yml 精簡風格）
           cat >> .config << 'EOF'
           # CONFIG_TARGET_ALL_PROFILES is not set
           # CONFIG_TARGET_MULTI_PROFILE is not set
           CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5382a=y
           CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5382a=y
-          # === 公共核心 ===
+
+          # === 主題 Argon（僅核心） ===
           CONFIG_PACKAGE_luci-theme-argon=y
           # CONFIG_PACKAGE_luci-theme-bootstrap is not set
+
+          # === 公共插件 1: TTYD（僅核心） ===
           CONFIG_PACKAGE_luci-app-ttyd=y
+
+          # === 公共插件 2: DDNS（僅核心） ===
           CONFIG_PACKAGE_luci-app-ddns=y
           CONFIG_PACKAGE_ddns-scripts=y
+
+          # === 公共插件 3: OpenSSH SFTP（僅核心） ===
           CONFIG_PACKAGE_openssh-sftp-server=y
-          # 关闭 sing-box 的 naive outbound（免拉 libcronet/boringssl 长链；vless/trojan/ss 不受影响）。
-          # 必须放在 defconfig 之前：defconfig 之后的追加行会触发 out-of-sync 警告，conf 不采纳
-          # CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set
           EOF
-          make defconfig
-          # 单一机型校验
-          sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
-          if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5382a=y$' .config; then
-            echo "::error::HG5382A 单一机型锁定校验失败！"
-            exit 1
-          fi
-          # ==== defconfig 之后显式钉住关键包（防上游漂移 / 被 defconfig 洗掉）====
-          cat >> .config << 'EOF'
-          # --- PON 修复：HG5382A 光前端 provider 必须内建（paged-bosa 提供 fiberhome,hg5x-bosa）---
-          CONFIG_PACKAGE_kmod-airoha-paged-bosa=y
-          CONFIG_PACKAGE_kmod-airoha-pon-frontend=y
-          CONFIG_PACKAGE_kmod-airoha-xpon=y
-          CONFIG_PACKAGE_airoha-ponctl=y
-          CONFIG_PACKAGE_airoha-pond=y
-          # --- 透明代理内核模块（mihomo/sing-box 共用底座）---
-          CONFIG_PACKAGE_kmod-tun=y
-          CONFIG_PACKAGE_kmod-nft-tproxy=y
-          CONFIG_PACKAGE_kmod-nft-socket=y
-          CONFIG_PACKAGE_kmod-inet-diag=y
-          CONFIG_PACKAGE_kmod-dummy=y
-          # --- mihomo（可卸载软件包；nikki feed；mihomo-meta=稳定通道，要最新可改 mihomo-alpha）---
-          CONFIG_PACKAGE_mihomo-meta=y
-          CONFIG_PACKAGE_nikki=y
+
+          if [ "${{ matrix.flavor }}" = "with-nikki" ]; then
+            echo ">>> [with-nikki] 注入 NIKKI 核心 + rtp2httpd 完整組件 + files/ 覆蓋"
+            cat >> .config << 'EOF'
+          CONFIG_TARGET_ROOTFS_INCLUDE_FILES=y
+
+          # Nikki 核心（預置二進位 + LuCI）
           CONFIG_PACKAGE_luci-app-nikki=y
           CONFIG_PACKAGE_luci-i18n-nikki-zh-cn=y
-          # --- sing-box（immortalwrt/homeproxy，界面自动依赖 sing-box + firewall4 + kmod-nft-tproxy）---
-          CONFIG_PACKAGE_luci-app-homeproxy=y
-          CONFIG_PACKAGE_sing-box=y
-          # 关闭 naive outbound，免拉 libcronet/boringssl 编译链（vless/trojan/ss 等不受影响）
-          # CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set
-          # --- curl / libcurl 依赖链（an7581.config 显式关闭，nikki 依赖 curl，OpenWrt 依赖不会自动拉起显式关闭的包）---
-          CONFIG_PACKAGE_curl=y
-          CONFIG_PACKAGE_libcurl=y
-          CONFIG_PACKAGE_libidn2=y
-          CONFIG_PACKAGE_libnghttp2=y
-          CONFIG_PACKAGE_libpsl=y
-          CONFIG_PACKAGE_libgnutls=y
-          CONFIG_PACKAGE_libtasn1=y
-          CONFIG_PACKAGE_libunistring=y
-          CONFIG_PACKAGE_nettle=y
-          CONFIG_PACKAGE_gmp=y
-          # --- 工具 ---
+          CONFIG_PACKAGE_kmod-nft-tproxy=y
+          CONFIG_PACKAGE_kmod-tun=y
+          CONFIG_PACKAGE_kmod-inet-diag=y
+          CONFIG_PACKAGE_kmod-nft-socket=y
+          CONFIG_PACKAGE_kmod-dummy=y
           CONFIG_PACKAGE_ip-full=y
           CONFIG_PACKAGE_yq=y
-          # --- python3 编译修复：_ctypes 需要 ffi.h，上游 an7581.config 未选 libffi，导致
-          #     Python-3.14.7 编译在 profile-opt 阶段 fatal error: ffi.h（主固件上次失败根因）---
-          CONFIG_PACKAGE_libffi=y
+
+          # rtp2httpd 完整組件（對齊 ImmortalWrt.yml）
+          CONFIG_PACKAGE_rtp2httpd=y
+          CONFIG_PACKAGE_luci-app-rtp2httpd=y
+          CONFIG_PACKAGE_luci-i18n-rtp2httpd-zh-cn=y
           EOF
-          # 校验关键包是否进入 .config
-          for pkg in kmod-airoha-paged-bosa kmod-airoha-pon-frontend kmod-airoha-xpon \
-                     mihomo-meta nikki luci-app-nikki luci-app-homeproxy \
-                     sing-box curl libcurl libgnutls; do
-            if ! grep -q "^CONFIG_PACKAGE_${pkg}=y$" .config; then
-              echo "::warning::${pkg} 未在 .config 中 =y（可能被依赖折叠），继续构建"
-            else
-              echo ">>> 已锁定 ${pkg}"
-            fi
-          done
-      - name: 下载源码软件包 (容错)
+          else
+            echo ">>> [no-nikki] 顯式關閉 NIKKI 與 rtp2httpd"
+            echo "# CONFIG_PACKAGE_luci-app-nikki is not set" >> .config
+            echo "# CONFIG_PACKAGE_rtp2httpd is not set" >> .config
+            echo "# CONFIG_PACKAGE_luci-app-rtp2httpd is not set" >> .config
+          fi
+
+          make defconfig
+
+          # 啟用 ccache：失敗後改 yml 重跑時大部分編譯直接命中緩存
+          if ! grep -q '^CONFIG_CCACHE=y' .config; then
+            sed -i 's/^# CONFIG_CCACHE is not set/CONFIG_CCACHE=y/' .config
+          fi
+          make defconfig
+          grep -q '^CONFIG_CCACHE=y' .config && echo ">>> CONFIG_CCACHE=y 已生效"
+
+          sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
+          if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5382a=y$' .config; then
+            echo "::error::HG5382A 單一機型鎖定校驗失敗！請檢查 target 設定。"
+            exit 1
+          fi
+
+      - name: 下載原始碼套件 (Download Packages)
         working-directory: ./ponwrt
         run: |
-          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+          export GOPROXY=https://proxy.golang.org,direct
           export GO111MODULE=on
-          make download -j"$(nproc)" || true
+          make download -j"$(nproc)"
           find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
-          make download -j1 V=s || { echo "::warning::仍有软件包下载失败，编译阶段会再尝试"; }
-          find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
-      - name: 执行固件编译 (Compile Firmware)
+
+      - name: 執行韌體編譯 (Compile Firmware)
         working-directory: ./ponwrt
+        env:
+          GOPROXY: https://proxy.golang.org,direct
+          GOSUMDB: sum.golang.org
+          GO111MODULE: 'on'
+          GOENV: 'off'
+          GOTOOLCHAIN: local
+          CCACHE_DIR: ${{ github.workspace }}/ccache
+          CCACHE_MAXSIZE: 1G
         run: |
-          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
-          export GOSUMDB=sum.golang.org
-          export GO111MODULE=on
-          export GOENV=off
-          export GOTOOLCHAIN=local
-          mkdir -p logs
-          # 增量续编：缓存恢复的 staging 总 stamp 若存在，会让 make 误判"全部包已编译"而跳过，
-          # 必须清掉，让 make 按各包 build_dir 的 .built stamp 决定是否重编
-          rm -rf staging_dir/target-aarch64_cortex-a53_musl/stamp
-          # 先显式编译 libffi（python3 的 ffi.h 依赖；包已在前面注入 package/libs/libffi）
-          make package/libs/libffi/compile -j"$(nproc)" V=s || true
           set -o pipefail
-          make -j"$(nproc)" 2>&1 | tee logs/build.log || \
-            (echo ">>> 并行编译失败，回退单线程重编" && make -j1 V=s 2>&1 | tee -a logs/build.log)
-      - name: 整理产物 (Collect Firmware)
+          if ! make -j"$(nproc)" 2>&1 | tee ../build-${{ matrix.flavor }}.log; then
+            echo "=== 編譯失敗，嘗試定位失敗套件並 V=s 重編留證 ==="
+            failed_pkg=$(grep -oE 'ERROR: (package|target)/[^ ]+ failed to build' \
+              ../build-${{ matrix.flavor }}.log | head -1 \
+              | sed -E 's/^ERROR: //; s/ failed to build$//' || true)
+            if [ -n "$failed_pkg" ]; then
+              echo "=== 使用 V=s 重編 $failed_pkg ==="
+              make "$failed_pkg/compile" V=s -j1 2>&1 | tee ../build-verbose-${{ matrix.flavor }}.log || true
+              grep -nE 'error:|Error [0-9]|FAILED|Patch failed|No rule to make target' \
+                ../build-verbose-${{ matrix.flavor }}.log | head -40 || true
+            else
+              tail -150 ../build-${{ matrix.flavor }}.log || true
+            fi
+            exit 1
+          fi
+
+      - name: 整理產物與重新命名 (僅保留光貓固件 + 統一規則)
+        working-directory: ./ponwrt
         run: |
-          mkdir -p ./firmware_out
+          mkdir -p ../firmware_out
+
+          # 只複製真正的光貓固件與必要元數據
           find ponwrt/bin/targets/airoha/an7581/ -type f \( \
             -iname '*hg5382a*.bin' -o \
             -iname '*hg5382a*.ubi' -o \
             -iname '*hg5382a*.itb' -o \
             -name '*.buildinfo' -o \
             -name 'profiles.json' \
-          \) -exec cp -f {} ./firmware_out/ \;
+          \) -exec cp -f {} ../firmware_out/ \;
+
+          UPSTREAM_DATE=$(git log -1 --format='%cd' --date=format:'%Y%m%d' 2>/dev/null || true)
+          [ -z "$UPSTREAM_DATE" ] && UPSTREAM_DATE=$(date +%Y%m%d)
+          IMWT_VER="25.2"
+          FLAVOR="${{ matrix.flavor }}"
+          echo ">>> 上游日期=$UPSTREAM_DATE 版本=$IMWT_VER 標籤=$FLAVOR"
+
+          shopt -s nullglob
+          for file in ../firmware_out/*; do
+            [ -f "$file" ] || continue
+            base=$(basename "$file")
+            lower=$(echo "$base" | tr '[:upper:]' '[:lower:]')
+
+            # 跳過非固件
+            if [[ ! "$lower" =~ hg5382a ]] || [[ ! "$lower" =~ \.(bin|ubi|itb)$ ]]; then
+              continue
+            fi
+
+            # 判斷類型
+            if [[ "$lower" =~ initramfs ]]; then
+              FW_TYPE="initramfs"
+            elif [[ "$lower" =~ sysupgrade ]]; then
+              FW_TYPE="sysupgrade"
+            elif [[ "$lower" =~ factory ]]; then
+              FW_TYPE="factory"
+            else
+              FW_TYPE="firmware"
+            fi
+
+            NEW_NAME="fiberhome_hg5382a-${IMWT_VER}-${UPSTREAM_DATE}-${FLAVOR}-${FW_TYPE}.${base##*.}"
+            echo "重新命名: $base -> $NEW_NAME"
+            mv -f "$file" "../firmware_out/$NEW_NAME"
+          done
+
+          # buildinfo / profiles 必須帶 flavor，防止 merge-multiple 覆蓋
+          for bf in ../firmware_out/*.buildinfo; do
+            [ -f "$bf" ] || continue
+            mv -f "$bf" "${bf%.buildinfo}-${FLAVOR}.buildinfo"
+          done
+          if [ -f ../firmware_out/profiles.json ]; then
+            mv -f ../firmware_out/profiles.json "../firmware_out/profiles-${FLAVOR}.json"
+          fi
+
           (
-            cd ./firmware_out
+            cd ../firmware_out
             shopt -s nullglob nocaseglob
-            files=( *hg5382a*.bin *hg5382a*.ubi *hg5382a*.itb )
-            if [ "${#files[@]}" -eq 0 ]; then
-              echo "::error::firmware_out 内没有 HG5382A 固件映像"
+            target_files=( *hg5382a*.bin *hg5382a*.ubi *hg5382a*.itb )
+            if [ "${#target_files[@]}" -eq 0 ]; then
+              echo "::error::firmware_out 內沒有 HG5382A 光貓韌體映像"
               exit 1
             fi
-            sha256sum "${files[@]}" > sha256sums
-            echo "===== 最终产物 ====="
+            sha256sum "${target_files[@]}" > "sha256sums-${FLAVOR}"
+            echo "===== ${FLAVOR} 最終產物 ====="
             ls -lh
           )
-      - name: 上传固件 (Upload Artifact)
+
+      # 釋放編譯中間目錄，騰出磁碟空間打包 ipk（選 m 的模組全部保留）
+      - name: 釋放編譯中間目錄 (Free build_dir)
+        if: always()
+        working-directory: ./ponwrt
+        run: |
+          rm -rf build_dir staging_dir dl tmp
+          df -h /
+
+      # 打包 bin/packages（含所有選 m 模組的 .ipk）與 bin/targets 套件，成敗都保留
+      - name: 打包套件與診斷日誌 (Pack packages & logs)
+        if: always()
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p ../packages_out
+          FLAVOR="${{ matrix.flavor }}"
+          if [ -d bin/packages ] && [ -n "$(find bin/packages -name '*.ipk' | head -1)" ]; then
+            tar --zstd -cf "../packages_out/ipk-packages-${FLAVOR}.tar.zst" bin/packages || true
+          fi
+          if [ -d bin/targets/airoha/an7581/packages ] && [ -n "$(find bin/targets/airoha/an7581/packages -name '*.ipk' | head -1)" ]; then
+            tar --zstd -cf "../packages_out/ipk-target-${FLAVOR}.tar.zst" bin/targets/airoha/an7581/packages || true
+          fi
+          cp -f .config "../packages_out/config-${FLAVOR}.config" 2>/dev/null || true
+          cp -f ../build-${{ matrix.flavor }}.log ../packages_out/ 2>/dev/null || true
+          cp -f ../build-verbose-${{ matrix.flavor }}.log ../packages_out/ 2>/dev/null || true
+          echo "===== packages_out 內容 ====="
+          ls -la ../packages_out || true
+
+      - name: 上傳臨時建置產物 (Upload firmware artifact)
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: PonWrt-HG5382A-integrated
+          name: PonWrt-HG5382A-${{ matrix.flavor }}
           path: ./firmware_out/
           if-no-files-found: error
-          retention-days: 14
-      - name: 上传编译配置与日志 (诊断用)
+          retention-days: 1
+
+      # 中間結果 / 診斷 14 天：失敗後改 yml 重跑前可下載核對
+      - name: 上傳套件與日誌 (Upload packages & logs artifact)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: HG5382A-diagnostics
+          name: ponwrt-packages-${{ matrix.flavor }}
           path: |
-            ponwrt/.config
-            ponwrt/feeds.conf.default
-            ponwrt/target/linux/airoha/dts/
-            ponwrt/logs/
-          if-no-files-found: ignore
-          retention-days: 3
+            ./packages_out/*.tar.zst
+            ./packages_out/*.log
+            ./packages_out/config-*.config
+          if-no-files-found: warn
+          retention-days: 14
+
+  release:
+    name: 統一發布至 GitHub Releases
+    needs: build
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: 下載所有建置產物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: PonWrt-HG5382A-*
+          path: ./all_firmwares
+          merge-multiple: true
+
+      - name: 列出待發布檔案清單
+        run: |
+          echo "===== 準備發布的全部光貓韌體清單 ====="
+          find ./all_firmwares -type f -printf '%s\t%p\n' | sort -k2
+          if ! find ./all_firmwares -type f -iname '*hg5382a*' \( -name '*.bin' -o -name '*.ubi' -o -name '*.itb' \) | grep -q .; then
+            echo "::error::沒有可發布的光貓韌體映像"
+            exit 1
+          fi
+
+      - name: 產生發布標籤與日期
+        id: tag
+        run: |
+          export TZ="Asia/Shanghai"
+          {
+            echo "release_tag=HG5382A-$(date +'%Y.%m.%d-%H%M%S')-r${{ github.run_number }}"
+            echo "release_date=$(date +'%Y-%m-%d %H:%M')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 正式發布至 GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          name: PonWrt HG5382A 雙版本純淨光貓固件 (${{ steps.tag.outputs.release_date }})
+          fail_on_unmatched_files: true
+          body: |
+            ### 韌體版本說明
+            本韌體**僅適用於烽火 HG5382A（處理器：AN7581）光貓**。  
+            檔名統一格式：`fiberhome_hg5382a-<版本>-<上游日期>-<with-nikki|no-nikki>-<類型>.bin`
+
+            ---
+
+            #### 本版新增：GPON 支援補丁（pon_drivers / pon_userspace feed）
+            - `airoha-xpon`：新增 GPON (ITU-T G.984) MAC 驅動（O1~O5 激活狀態機、GTC 同步、PLOAM/OMCI 通路）
+            - `airoha-pon-frontends`：UX3363 光前端聲明支援 GPON 模式
+            - `luci-app-pon`：Line mode 增加 GPON 選項
+            - 補丁來源：`patches/feeds/`（本倉庫），工作流在 feeds 更新後自動應用並校驗
+
+            #### 公共核心組件（兩個版本均包含）
+            | 類型 | 套件 | 說明 |
+            |------|------|------|
+            | 主題 | `luci-theme-argon` | 純淨 Argon 主題（僅核心） |
+            | 終端 | `luci-app-ttyd` | 網頁終端機（僅核心） |
+            | DDNS | `luci-app-ddns` + `ddns-scripts` | 動態網域（僅核心） |
+            | 檔案 | `openssh-sftp-server` | SFTP 伺服器（僅核心） |
+
+            #### 包含 NIKKI + rtp2httpd 進階版（檔名含 `with-nikki`）
+            | 類型 | 套件 | 說明 |
+            |------|------|------|
+            | 代理核心 | **預置 Alpha-Smart + UPX -9** | 放置於 `/usr/libexec/mihomo` |
+            | 代理插件 | `luci-app-nikki` + 簡中 | 透明代理管理界面 |
+            | 核心模組 | `kmod-nft-tproxy` `kmod-tun` `kmod-inet-diag` `kmod-nft-socket` `kmod-dummy` | TProxy / TUN |
+            | 工具 | `ip-full` `yq` | 完整 ip 命令與配置處理 |
+            | IPTV | `rtp2httpd` + `luci-app-rtp2httpd` + 簡中 | 完整 IPTV 串流轉換服務（完整組件） |
+
+            #### 純淨輕量版（檔名含 `no-nikki`）
+            僅包含上方「公共核心組件」，**完全不含** nikki / mihomo / rtp2httpd / yq / TProxy / TUN 相關組件。
+
+            ---
+
+            - 編譯完成時間：${{ steps.tag.outputs.release_date }}（UTC+8）
+            - 另附 `sha256sums-*`、`*.buildinfo`、`profiles-*.json`
+            - 所有 `.ipk` 套件（含選 m 模組）在 Actions 的 `ponwrt-packages-*` artifact 中保留 14 天
+          files: ./all_firmwares/*
