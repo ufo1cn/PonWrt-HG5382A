@@ -248,6 +248,10 @@ jobs:
           # --- python3 编译修复：_ctypes 需要 ffi.h，上游 an7581.config 未选 libffi，导致
           #     Python-3.14.7 编译在 profile-opt 阶段 fatal error: ffi.h（主固件上次失败根因）---
           CONFIG_PACKAGE_libffi=y
+          # --- sing-box full 编译修复：immortalwrt 的 sing-box 在 aarch64 上
+          #     SING_BOX_BUILD_NAIVE_OUTBOUND 默认 y，二进制链接 libcronet.so；
+          #     显式选中 libcronet，强制编出该库（否则打包报 missing libcronet.so）---
+          CONFIG_PACKAGE_libcronet=y
           EOF
           # 校验关键包是否进入 .config
           for pkg in kmod-airoha-paged-bosa kmod-airoha-pon-frontend kmod-airoha-xpon \
@@ -307,17 +311,18 @@ jobs:
             echo "===== 最终产物 ====="
             ls -lh
           )
-      # ===== GPON 补丁（本 fork 新增）：保留所有 .ipk（含选 m 的模块）=====
+      # ===== GPON 补丁（本 fork 新增）：保留所有软件包（.apk 与 .ipk，含选 m 的模块）=====
+      # ponwrt 使用 APK 包格式（bin/packages/*/packages/*.apk），也兼容旧 .ipk。
       # 成功失败都执行：编译失败时也能拿到已产出的软件包与日志
-      - name: 打包全部 ipk 软件包 (Pack all ipk, incl. m modules)
+      - name: 打包全部软件包 (Pack all packages, incl. m modules)
         if: always()
         working-directory: ./ponwrt
         run: |
           mkdir -p ../ipk_out
-          if [ -d bin/packages ] && [ -n "$(find bin/packages -name '*.ipk' | head -1)" ]; then
+          if [ -d bin/packages ] && [ -n "$(find bin/packages \( -name '*.apk' -o -name '*.ipk' \) | head -1)" ]; then
             tar --zstd -cf ../ipk_out/ipk-packages.tar.zst bin/packages || true
           fi
-          if [ -d bin/targets/airoha/an7581/packages ] && [ -n "$(find bin/targets/airoha/an7581/packages -name '*.ipk' | head -1)" ]; then
+          if [ -d bin/targets/airoha/an7581/packages ] && [ -n "$(find bin/targets/airoha/an7581/packages \( -name '*.apk' -o -name '*.ipk' \) | head -1)" ]; then
             tar --zstd -cf ../ipk_out/ipk-target.tar.zst bin/targets/airoha/an7581/packages || true
           fi
           echo "===== ipk_out 内容 ====="
@@ -330,8 +335,8 @@ jobs:
           path: ./firmware_out/
           if-no-files-found: error
           retention-days: 14
-      # ===== GPON 补丁（本 fork 新增）：m 模块 ipk 单独上传，保留 14 天 =====
-      - name: 上传全部 ipk 软件包 (Upload ipk artifact)
+      # ===== GPON 补丁（本 fork 新增）：m 模块软件包单独上传，保留 14 天 =====
+      - name: 上传全部软件包 (Upload packages artifact)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -340,6 +345,38 @@ jobs:
             ./ipk_out/*.tar.zst
           if-no-files-found: warn
           retention-days: 14
+      # ===== GPON 补丁（本 fork 新增）：编译失败时显式保存三卷增量缓存 =====
+      # 实测：job 主步骤失败时 actions/cache 的 Post 步骤不会保存缓存（中间产物白丢）；
+      # 这里在 failure() 时用 actions/cache/save@v4 显式保存，重跑可直接断点续编。
+      - name: 失败时保存 toolchain+host 缓存
+        if: failure()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ponwrt/staging_dir/toolchain-*
+            ponwrt/staging_dir/host
+          key: hg5382a-toolchain-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
+      - name: 失败时保存 staging target 缓存
+        if: failure()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ponwrt/staging_dir/target-aarch64_cortex-a53_musl
+          key: hg5382a-stage-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
+      - name: 失败时保存慢包 build_dir 缓存
+        if: failure()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ponwrt/build_dir/hostpkg/golang-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/python3-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/golang-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/sing-box-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/libcronet-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/openssl-*
+          key: hg5382a-slow-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config', 'ponwrt/feeds.conf.default') }}
       - name: 上传编译配置与日志 (诊断用)
         if: always()
         uses: actions/upload-artifact@v4
@@ -351,4 +388,5 @@ jobs:
             ponwrt/target/linux/airoha/dts/
             ponwrt/logs/
           if-no-files-found: ignore
+          include-hidden-files: true
           retention-days: 3
