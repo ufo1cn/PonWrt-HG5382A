@@ -1,0 +1,91 @@
+name: 发布固件到 Releases
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag（留空则自动生成）'
+        required: false
+        default: ''
+
+permissions:
+  actions: read      # 读取其他工作流的 Artifact
+  contents: write    # 创建 Release 并上传附件
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      # ===== 1. 拉取 PonWrt1.yml 的产物（主固件）=====
+      - name: 下载 PonWrt1 固件产物
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: PonWrt1.yml            # ← 确认文件名
+          workflow_conclusion: success
+          name: PonWrt-HG5382A-integrated  # ← 确认 Artifact 名称（与 upload-artifact 的 name 一致）
+          path: release-assets/firmware    # 单独子目录，避免与其它产物同名冲突
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ===== 2. 拉取 build-package.yml 的产物（软件包）=====
+      - name: 下载软件包产物
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: build-package.yml      # ← 确认文件名
+          workflow_conclusion: success
+          name: ponwrt-ipk-packages        # ← 确认 Artifact 名称
+          path: release-assets/packages
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ===== 3. 拉取 build-sdk.yml 的产物（SDK）=====
+      - name: 下载 SDK 产物
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: build-sdk.yml          # ← 确认文件名
+          workflow_conclusion: success
+          name: ponwrt-sdk                 # ← 确认 Artifact 名称
+          path: release-assets/sdk
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ===== 4. 检查下载结果 =====
+      - name: 检查产物
+        run: |
+          echo "===== release-assets 结构 ====="
+          find release-assets -type f | sort
+          echo "===== 文件数量 ====="
+          find release-assets -type f | wc -l
+
+      # ===== 5. 发布到 Release =====
+      - name: 创建 Release 并上传全部产物
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="build-$(date +%Y%m%d-%H%M%S)"
+          fi
+          echo ">>> 使用 tag: $TAG"
+
+          # 把三个子目录下的文件全部摊平到一个临时目录，
+          # 若存在同名文件，先到先得（firmware 优先），后续重名自动跳过并告警
+          mkdir -p upload
+          for dir in firmware packages sdk; do
+            if [ -d "release-assets/$dir" ]; then
+              find "release-assets/$dir" -type f | while read -r f; do
+                base="$(basename "$f")"
+                if [ -e "upload/$base" ]; then
+                  echo "::warning::同名文件已存在，跳过: $base（来自 $dir）"
+                else
+                  cp "$f" "upload/$base"
+                fi
+              done
+            fi
+          done
+
+          echo "===== 最终上传文件 ====="
+          ls -lh upload
+
+          gh release create "$TAG" upload/* \
+            --repo ${{ github.repository }} \
+            --title "PonWrt HG5382A 集成版 $TAG" \
+            --notes "包含固件、软件包、SDK 三类产物。编译 commit: ${{ github.sha }}" \
+            --draft
