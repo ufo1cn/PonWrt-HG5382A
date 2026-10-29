@@ -16,45 +16,61 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      # ===== 1. 拉取 PonWrt1.yml 的产物（主固件）=====
+      # ===== 1. PonWrt1.yml：主固件 =====
       - name: 下载 PonWrt1 固件产物
         uses: dawidd6/action-download-artifact@v6
         with:
-          workflow: PonWrt1.yml            # ← 确认文件名
+          workflow: PonWrt1.yml
           workflow_conclusion: success
-          name: PonWrt-HG5382A-integrated  # ← 确认 Artifact 名称（与 upload-artifact 的 name 一致）
-          path: release-assets/firmware    # 单独子目录，避免与其它产物同名冲突
+          name: PonWrt-HG5382A-integrated
+          path: release-assets/firmware
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      # ===== 2. 拉取 build-package.yml 的产物（软件包）=====
-      - name: 下载软件包产物
+      # ===== 2. PonWrt1.yml：软件包 =====
+      - name: 下载 PonWrt1 软件包产物
         uses: dawidd6/action-download-artifact@v6
         with:
-          workflow: build-package.yml      # ← 确认文件名
+          workflow: PonWrt1.yml
           workflow_conclusion: success
-          name: ponwrt-ipk-packages        # ← 确认 Artifact 名称
+          name: ponwrt-ipk-packages
           path: release-assets/packages
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      # ===== 3. 拉取 build-sdk.yml 的产物（SDK）=====
+      # ===== 3. build-package.yml：暂时没有产物，容错跳过 =====
+      # 以后有产物时，把 name 改成实际 Artifact 名称，并删除 continue-on-error
+      - name: 下载 build-package 产物（暂缺，容错）
+        uses: dawidd6/action-download-artifact@v6
+        continue-on-error: true
+        with:
+          workflow: build-package.yml
+          workflow_conclusion: success
+          name: ponwrt-build-package      # ← 以后有产物时改成实际名称
+          path: release-assets/packages-build
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ===== 4. build-sdk.yml：SDK =====
       - name: 下载 SDK 产物
         uses: dawidd6/action-download-artifact@v6
         with:
-          workflow: build-sdk.yml          # ← 确认文件名
+          workflow: build-sdk.yml
           workflow_conclusion: success
-          name: ponwrt-sdk                 # ← 确认 Artifact 名称
+          name: openwrt-sdk-an7581
           path: release-assets/sdk
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      # ===== 4. 检查下载结果 =====
+      # ===== 5. 检查下载结果 =====
       - name: 检查产物
         run: |
           echo "===== release-assets 结构 ====="
-          find release-assets -type f | sort
-          echo "===== 文件数量 ====="
-          find release-assets -type f | wc -l
+          find release-assets -type f | sort || true
+          COUNT=$(find release-assets -type f | wc -l)
+          echo "===== 文件数量: $COUNT ====="
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::没有下载到任何产物，终止发布"
+            exit 1
+          fi
 
-      # ===== 5. 发布到 Release =====
+      # ===== 6. 摊平并发布 =====
       - name: 创建 Release 并上传全部产物
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -65,10 +81,8 @@ jobs:
           fi
           echo ">>> 使用 tag: $TAG"
 
-          # 把三个子目录下的文件全部摊平到一个临时目录，
-          # 若存在同名文件，先到先得（firmware 优先），后续重名自动跳过并告警
           mkdir -p upload
-          for dir in firmware packages sdk; do
+          for dir in firmware packages packages-build sdk; do
             if [ -d "release-assets/$dir" ]; then
               find "release-assets/$dir" -type f | while read -r f; do
                 base="$(basename "$f")"
@@ -83,6 +97,10 @@ jobs:
 
           echo "===== 最终上传文件 ====="
           ls -lh upload
+          if [ -z "$(ls -A upload)" ]; then
+            echo "::error::upload 目录为空，终止发布"
+            exit 1
+          fi
 
           gh release create "$TAG" upload/* \
             --repo ${{ github.repository }} \
