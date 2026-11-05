@@ -1,0 +1,406 @@
+# ============================================================================
+# 编译 PonWrt HG5585F 电信版集成版固件
+# （mihomo + sing-box 共存 + PON 修复 + GPON 补丁 + Releases 预发布）
+# ----------------------------------------------------------------------------
+# 基于 HG5382A 工作流修改，差异点：
+#   - 目标设备改为 fiberhome_hg5585f-ct（HG5585F 电信版）
+#   - 产物过滤、cache key、artifact 名称统一加 hg5585f 前缀
+#   - 新增预发布到 GitHub Releases（prerelease=true，不覆盖正式版）
+#   - 保留全部软件包（.apk / .ipk，含选 m 的模块）并挂到 Release
+# 注意：PON 修复包与 GPON 补丁先按 HG5382A 原样保留。
+#   HG5585F-CT 同属 AN7581 平台，首次编译后需检查 dmesg 中
+#   光前端 provider 是否正常注册；若电信版光模块需要不同 provider，
+#   再回头调整 kmod-airoha-paged-bosa / pon-frontend 或补丁文件。
+# ============================================================================
+name: 编译 PonWrt HG5585F 电信版固件 (mihomo + sing-box + GPON)
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - 'patches/**'
+      - 'scripts/**'
+permissions:
+  contents: write   # 创建 Release 必需
+concurrency:
+  group: build-hg5585f-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    name: 编译 HG5585F-CT 集成版固件
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      # 固定到已验证支持 fiberhome_hg5585f-ct 的上游 commit
+      SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
+    steps:
+      - name: 签出工作流仓库 (Checkout Workflow)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 清理磁盘空间 (释放容量)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/share/swift /usr/local/.ghcup \
+            /opt/hostedtoolcache
+          sudo docker system prune -af || true
+          sudo apt-get clean
+          sudo swapoff /swapfile || true
+          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          df -h
+
+      - name: 初始化编译环境 (安装依赖软件包)
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
+            subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
+            libzstd-dev jq dos2unix upx-ucl
+
+      - name: 拉取 PonWrt 指定 commit (Clone PonWrt @ pinned)
+        run: |
+          git init ponwrt
+          git -C ponwrt remote add origin https://github.com/pbs05/ponwrt.git
+          git -C ponwrt fetch --depth=1 -- origin "$SOURCE_REF"
+          git -C ponwrt checkout --detach FETCH_HEAD
+          echo ">>> PonWrt pinned: $SOURCE_REF"
+
+      - name: 加入外挂来源 (注入 nikki + homeproxy)
+        working-directory: ./ponwrt
+        run: |
+          if [ ! -f feeds.conf.default ]; then touch feeds.conf.default; fi
+          sed -i '/nikki/d;/homeproxy/d' feeds.conf.default
+          [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
+          echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
+          echo 'src-git homeproxy https://github.com/immortalwrt/homeproxy.git;master' >> feeds.conf.default
+          dos2unix feeds.conf.default 2>/dev/null || true
+          echo "===== feeds.conf.default ====="
+          tail -n 8 feeds.conf.default
+
+      - name: 缓存下载软件包 (Cache dl)
+        uses: actions/cache@v4
+        with:
+          path: ponwrt/dl
+          key: ponwrt-dl-an7581-${{ hashFiles('ponwrt/feeds.conf.default', 'ponwrt/configs/*.config') }}
+          restore-keys: |
+            ponwrt-dl-an7581-
+            ponwrt-dl-
+
+      # ===== 三卷增量缓存（断点续传）=====
+      - name: 缓存 toolchain + host 工具
+        uses: actions/cache@v4
+        with:
+          path: |
+            ponwrt/staging_dir/toolchain-*
+            ponwrt/staging_dir/host
+          key: hg5585f-toolchain-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
+          restore-keys: |
+            hg5585f-toolchain-
+
+      - name: 缓存包安装产物 (staging target)
+        uses: actions/cache@v4
+        with:
+          path: ponwrt/staging_dir/target-aarch64_cortex-a53_musl
+          key: hg5585f-stage-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
+          restore-keys: |
+            hg5585f-stage-
+
+      - name: 缓存慢包构建目录 (python3/golang/sing-box/openssl)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ponwrt/build_dir/hostpkg/golang-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/python3-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/golang-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/sing-box-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/libcronet-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/openssl-*
+          key: hg5585f-slow-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config', 'ponwrt/feeds.conf.default') }}
+          restore-keys: |
+            hg5585f-slow-
+
+      - name: 更新并安装外挂来源 (Feeds)
+        working-directory: ./ponwrt
+        run: |
+          ./scripts/feeds update -a
+          if [ -d feeds/nikki ]; then
+            echo ">>> 剔除 nikki 的 +yq 依赖（改由 CONFIG_PACKAGE_yq=y 显式提供）"
+            find feeds/nikki -name Makefile -exec sed -i -E 's/[[:space:]]*\+yq\b//g' {} + || true
+          fi
+          ./scripts/feeds install -a
+          if [ -f feeds/luci/collections/luci/Makefile ]; then
+            sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile || true
+          fi
+
+      - name: 应用 GPON feed 补丁 (Apply GPON feed patches)
+        env:
+          PONWRT_DIR: ponwrt
+          FEED_PATCHES_STRICT: '1'
+        run: bash scripts/apply-feed-patches.sh
+
+      - name: 校验 GPON 补丁已生效 (Verify GPON patches)
+        working-directory: ./ponwrt
+        run: |
+          set -e
+          test -f feeds/pon_drivers/airoha-xpon/src/airoha-xpon-gpon.c
+          grep -q 'AIROHA_PON_FRONTEND_MODE_GPON' \
+            feeds/pon_drivers/airoha-pon-frontends/src/airoha-paged-bosa-ux3363.c
+          grep -q "o.value('gpon'" \
+            feeds/pon_userspace/luci-app-pon/htdocs/luci-static/resources/view/pon/config.js
+          echo "OK: GPON patches are present in the feed checkouts."
+
+      - name: 注入 libffi 包
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p package/libs/libffi
+          curl -fsSL -o package/libs/libffi/Makefile \
+            https://raw.githubusercontent.com/openwrt/openwrt/master/package/libs/libffi/Makefile
+          if grep -q 'PKG_NAME:=libffi' package/libs/libffi/Makefile; then
+            echo ">>> libffi 包注入成功 (package/libs/libffi)"
+          else
+            echo "::error::libffi 包注入失败"
+            exit 1
+          fi
+
+      # ===== 设备锁定：HG5585F-CT =====
+      - name: 生成并锁定 HG5585F-CT 配置
+        working-directory: ./ponwrt
+        run: |
+          rm -rf tmp
+          perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
+          sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
+          sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
+          sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
+          sed -i '/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
+          cat >> .config << 'EOF'
+          # CONFIG_TARGET_ALL_PROFILES is not set
+          # CONFIG_TARGET_MULTI_PROFILE is not set
+          CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y
+          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y
+          # === 公共核心 ===
+          CONFIG_PACKAGE_luci-theme-argon=y
+          # CONFIG_PACKAGE_luci-theme-bootstrap is not set
+          CONFIG_PACKAGE_luci-app-ttyd=y
+          CONFIG_PACKAGE_luci-app-ddns=y
+          CONFIG_PACKAGE_ddns-scripts=y
+          CONFIG_PACKAGE_openssh-sftp-server=y
+          # CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set
+          EOF
+          make defconfig
+          sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
+          if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y$' .config; then
+            echo "::error::HG5585F-CT 单一机型锁定校验失败！"
+            exit 1
+          fi
+          cat >> .config << 'EOF'
+          # --- PON 修复（按 HG5382A 保留；首次编译后验证光前端注册）---
+          CONFIG_PACKAGE_kmod-airoha-paged-bosa=y
+          CONFIG_PACKAGE_kmod-airoha-pon-frontend=y
+          CONFIG_PACKAGE_kmod-airoha-xpon=y
+          CONFIG_PACKAGE_airoha-ponctl=y
+          CONFIG_PACKAGE_airoha-pond=y
+          # --- 透明代理内核模块 ---
+          CONFIG_PACKAGE_kmod-tun=y
+          CONFIG_PACKAGE_kmod-nft-tproxy=y
+          CONFIG_PACKAGE_kmod-nft-socket=y
+          CONFIG_PACKAGE_kmod-inet-diag=y
+          CONFIG_PACKAGE_kmod-dummy=y
+          # --- mihomo ---
+          CONFIG_PACKAGE_mihomo-meta=y
+          CONFIG_PACKAGE_nikki=y
+          CONFIG_PACKAGE_luci-app-nikki=y
+          CONFIG_PACKAGE_luci-i18n-nikki-zh-cn=y
+          # --- sing-box ---
+          CONFIG_PACKAGE_luci-app-homeproxy=y
+          CONFIG_PACKAGE_sing-box=y
+          # CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set
+          # --- curl / libcurl 依赖链 ---
+          CONFIG_PACKAGE_curl=y
+          CONFIG_PACKAGE_libcurl=y
+          CONFIG_PACKAGE_libidn2=y
+          CONFIG_PACKAGE_libnghttp2=y
+          CONFIG_PACKAGE_libpsl=y
+          CONFIG_PACKAGE_libgnutls=y
+          CONFIG_PACKAGE_libtasn1=y
+          CONFIG_PACKAGE_libunistring=y
+          CONFIG_PACKAGE_nettle=y
+          CONFIG_PACKAGE_gmp=y
+          # --- 工具 ---
+          CONFIG_PACKAGE_ip-full=y
+          CONFIG_PACKAGE_yq=y
+          # --- python3 ffi.h 修复 ---
+          CONFIG_PACKAGE_libffi=y
+          # --- sing-box 链接 libcronet.so 兜底 ---
+          CONFIG_PACKAGE_libcronet=y
+          EOF
+          for pkg in kmod-airoha-paged-bosa kmod-airoha-pon-frontend kmod-airoha-xpon \
+                     mihomo-meta nikki luci-app-nikki luci-app-homeproxy \
+                     sing-box curl libcurl libgnutls; do
+            if ! grep -q "^CONFIG_PACKAGE_${pkg}=y$" .config; then
+              echo "::warning::${pkg} 未在 .config 中 =y（可能被依赖折叠），继续构建"
+            else
+              echo ">>> 已锁定 ${pkg}"
+            fi
+          done
+
+      - name: 下载源码软件包 (容错)
+        working-directory: ./ponwrt
+        run: |
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+          export GO111MODULE=on
+          make download -j"$(nproc)" || true
+          find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
+          make download -j1 V=s || { echo "::warning::仍有软件包下载失败，编译阶段会再尝试"; }
+          find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
+
+      - name: 执行固件编译 (Compile Firmware)
+        working-directory: ./ponwrt
+        run: |
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+          export GOSUMDB=sum.golang.org
+          export GO111MODULE=on
+          export GOENV=off
+          export GOTOOLCHAIN=local
+          mkdir -p logs
+          rm -rf staging_dir/target-aarch64_cortex-a53_musl/stamp
+          make package/libs/libffi/compile -j"$(nproc)" V=s || true
+          set -o pipefail
+          make -j"$(nproc)" 2>&1 | tee logs/build.log || \
+            (echo ">>> 并行编译失败，回退单线程重编" && make -j1 V=s 2>&1 | tee -a logs/build.log)
+
+      # ===== 产物过滤：HG5585F-CT =====
+      - name: 整理产物 (Collect Firmware)
+        run: |
+          mkdir -p ./firmware_out
+          find ponwrt/bin/targets/airoha/an7581/ -type f \( \
+            -iname '*hg5585f-ct*.bin' -o \
+            -iname '*hg5585f-ct*.ubi' -o \
+            -iname '*hg5585f-ct*.itb' -o \
+            -name '*.buildinfo' -o \
+            -name 'profiles.json' \
+          \) -exec cp -f {} ./firmware_out/ \;
+          (
+            cd ./firmware_out
+            shopt -s nullglob nocaseglob
+            files=( *hg5585f-ct*.bin *hg5585f-ct*.ubi *hg5585f-ct*.itb )
+            if [ "${#files[@]}" -eq 0 ]; then
+              echo "::error::firmware_out 内没有 HG5585F-CT 固件映像"
+              exit 1
+            fi
+            sha256sum "${files[@]}" > sha256sums
+            echo "===== 最终产物 ====="
+            ls -lh
+          )
+
+      # ===== 保留全部软件包 =====
+      - name: 打包全部软件包 (Pack all packages, incl. m modules)
+        if: always()
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p ../ipk_out
+          if [ -d bin/packages ] && [ -n "$(find bin/packages \( -name '*.apk' -o -name '*.ipk' \) | head -1)" ]; then
+            tar --zstd -cf ../ipk_out/ipk-packages.tar.zst bin/packages || true
+          fi
+          if [ -d bin/targets/airoha/an7581/packages ] && [ -n "$(find bin/targets/airoha/an7581/packages \( -name '*.apk' -o -name '*.ipk' \) | head -1)" ]; then
+            tar --zstd -cf ../ipk_out/ipk-target.tar.zst bin/targets/airoha/an7581/packages || true
+          fi
+          echo "===== ipk_out 内容 ====="
+          ls -la ../ipk_out || true
+
+      - name: 上传固件 Artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PonWrt-HG5585F-CT-integrated
+          path: ./firmware_out/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 上传全部软件包 Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ponwrt-hg5585f-ipk-packages
+          path: ./ipk_out/*.tar.zst
+          if-no-files-found: warn
+          retention-days: 14
+
+      # ===== 预发布到 GitHub Releases =====
+      - name: 预发布到 GitHub Releases
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: hg5585f-ct-${{ github.run_number }}-${{ github.run_attempt }}
+          name: HG5585F-CT 预发布 ${{ github.run_number }}
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            ./firmware_out/*.bin
+            ./firmware_out/*.ubi
+            ./firmware_out/*.itb
+            ./firmware_out/sha256sums
+            ./ipk_out/*.tar.zst
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ===== 失败时显式保存三卷缓存 =====
+      - name: 失败时保存 toolchain+host 缓存
+        if: failure()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ponwrt/staging_dir/toolchain-*
+            ponwrt/staging_dir/host
+          key: hg5585f-toolchain-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
+
+      - name: 失败时保存 staging target 缓存
+        if: failure()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ponwrt/staging_dir/target-aarch64_cortex-a53_musl
+          key: hg5585f-stage-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
+
+      - name: 失败时保存慢包 build_dir 缓存
+        if: failure()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ponwrt/build_dir/hostpkg/golang-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/python3-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/golang-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/sing-box-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/libcronet-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/openssl-*
+          key: hg5585f-slow-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config', 'ponwrt/feeds.conf.default') }}
+
+      - name: 上传编译配置与日志 (诊断用)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: HG5585F-CT-diagnostics
+          path: |
+            ponwrt/.config
+            ponwrt/feeds.conf.default
+            ponwrt/target/linux/airoha/dts/
+            ponwrt/logs/
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 3
