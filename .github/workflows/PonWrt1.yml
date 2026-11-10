@@ -1,24 +1,15 @@
 # ============================================================================
-# 编译 PonWrt HG5382A 集成版固件（mihomo 软件包 + sing-box 共存 + PON 修复 + GPON 补丁）
+# 编译 PonWrt HG5382A 集成版固件（mihomo + sing-box + IPTV 驱动 + omcproxy + GPON 补丁）
 # ----------------------------------------------------------------------------
-# 基于 ix1911/PonWrt-HG5382A 修改（保留其全部软件/修复逻辑，不与其冲突）：
-#   - 单版本集成（不再分 with-nikki / no-nikki），mihomo 与 sing-box 同一镜像共存
-#   - mihomo 改为「可卸载软件包」：nikki feed 的 mihomo-meta + nikki + luci-app-nikki
-#   - 新增 sing-box：immortalwrt/homeproxy feed 的 luci-app-homeproxy（自动依赖 sing-box）
-#   - PON 修复：显式钉住 kmod-airoha-paged-bosa / pon-frontend / xpon + ponctl / pond
-#   - 固定 ponwrt 到已知可用 commit，避免上游漂移再踩「optical frontend provider 缺失」
-#   - libffi 注入 + CONFIG_PACKAGE_libffi=y（python3 ffi.h 编译修复）
-#   - 三卷增量缓存（toolchain+host / staging target / 慢包 build_dir），失败修完 yml
-#     重跑时复用已编产物，避免全量重建
-# 本 fork 新增（在下方标注 GPON 补丁 的步骤）：
-#   - feeds 更新后应用 pon_drivers / pon_userspace 的 GPON 补丁（UX3363 千兆 GPON 支持）
-#   - 补丁落位校验，未生效直接失败，避免白编数小时
-#   - 编译产物额外保留 bin/packages 与 bin/targets 下全部 .ipk（含选 m 的模块）
+# 在原工作流基础上新增：
+#   - openwrt-iptv feed（kmod-iptv + luci-app-iptv）
+#   - omcproxy / luci-app-omcproxy（IGMP/MLD 组播代理，IPTV 场景推荐）
+#   - 对应配置锁定与校验
+#   - 编译成功后创建 GitHub 预发布（Pre-release），上传固件与软件包
 # ============================================================================
-name: 编译 PonWrt HG5382A 集成版固件 (mihomo + sing-box + GPON)
+name: 编译 PonWrt HG5382A 集成版固件 (mihomo + sing-box + IPTV + omcproxy + GPON)
 on:
   workflow_dispatch:
-  # GPON 补丁 / 工作流 / 脚本有变动时自动重编
   push:
     branches: [main]
     paths:
@@ -36,14 +27,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
-      # 固定到已验证支持 fiberhome_hg5382a 光前端(paged-bosa) 的上游 commit；
-      # 如需跟踪最新上游，把 SOURCE_REF 改成 master
       SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
     steps:
       - name: 签出工作流仓库 (Checkout Workflow)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: 清理磁盘空间 (释放容量)
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
@@ -58,6 +48,7 @@ jobs:
           sudo swapon /swapfile
           free -h
           df -h
+
       - name: 初始化编译环境 (安装依赖软件包)
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -74,6 +65,7 @@ jobs:
             python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
             subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
             libzstd-dev jq dos2unix upx-ucl
+
       - name: 拉取 PonWrt 指定 commit (Clone PonWrt @ pinned)
         run: |
           git init ponwrt
@@ -81,17 +73,20 @@ jobs:
           git -C ponwrt fetch --depth=1 -- origin "$SOURCE_REF"
           git -C ponwrt checkout --detach FETCH_HEAD
           echo ">>> PonWrt pinned: $SOURCE_REF"
-      - name: 加入外挂来源 (注入 nikki + homeproxy)
+
+      - name: 加入外挂来源 (注入 nikki + homeproxy + openwrt-iptv)
         working-directory: ./ponwrt
         run: |
           if [ ! -f feeds.conf.default ]; then touch feeds.conf.default; fi
-          sed -i '/nikki/d;/homeproxy/d' feeds.conf.default
+          sed -i '/nikki/d;/homeproxy/d;/openwrt-iptv/d' feeds.conf.default
           [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
           echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
           echo 'src-git homeproxy https://github.com/immortalwrt/homeproxy.git;master' >> feeds.conf.default
+          echo 'src-git iptv https://github.com/yveming/openwrt-iptv.git' >> feeds.conf.default
           dos2unix feeds.conf.default 2>/dev/null || true
           echo "===== feeds.conf.default ====="
-          tail -n 8 feeds.conf.default
+          tail -n 10 feeds.conf.default
+
       - name: 缓存下载软件包 (Cache dl)
         uses: actions/cache@v4
         with:
@@ -100,9 +95,7 @@ jobs:
           restore-keys: |
             ponwrt-dl-an7581-
             ponwrt-dl-
-      # ===== 增量编译缓存（断点续传）：失败修完 yml 重跑时复用已编产物，避免 2 小时全量重建 =====
-      # 分三卷：toolchain+host / 包安装产物(staging) / 慢包构建目录。配置变化时 key 失效，
-      # restore-keys 仍可回退到旧缓存，OpenWrt 的 stamp 机制自动只重编受影响的包。
+
       - name: 缓存 toolchain + host 工具
         uses: actions/cache@v4
         with:
@@ -112,6 +105,7 @@ jobs:
           key: hg5382a-toolchain-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
           restore-keys: |
             hg5382a-toolchain-
+
       - name: 缓存包安装产物 (staging target)
         uses: actions/cache@v4
         with:
@@ -119,6 +113,7 @@ jobs:
           key: hg5382a-stage-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
           restore-keys: |
             hg5382a-stage-
+
       - name: 缓存慢包构建目录 (python3/golang/sing-box/openssl)
         uses: actions/cache@v4
         with:
@@ -132,6 +127,7 @@ jobs:
           key: hg5382a-slow-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config', 'ponwrt/feeds.conf.default') }}
           restore-keys: |
             hg5382a-slow-
+
       - name: 更新并安装外挂来源 (Feeds)
         working-directory: ./ponwrt
         run: |
@@ -141,18 +137,16 @@ jobs:
             find feeds/nikki -name Makefile -exec sed -i -E 's/[[:space:]]*\+yq\b//g' {} + || true
           fi
           ./scripts/feeds install -a
-          # 默认主题改 Argon
           if [ -f feeds/luci/collections/luci/Makefile ]; then
             sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile || true
           fi
-      # ===== GPON 补丁（本 fork 新增）：PON 驱动来自 git feed（pon_drivers / pon_userspace），
-      # 必须等 feeds 更新检出到 ponwrt/feeds/ 之后才能打；脚本幂等，可重复执行 =====
+
       - name: 应用 GPON feed 补丁 (Apply GPON feed patches)
         env:
           PONWRT_DIR: ponwrt
           FEED_PATCHES_STRICT: '1'
         run: bash scripts/apply-feed-patches.sh
-      # 补丁没真正落进 feed 直接失败，避免白编几小时
+
       - name: 校验 GPON 补丁已生效 (Verify GPON patches)
         working-directory: ./ponwrt
         run: |
@@ -163,7 +157,8 @@ jobs:
           grep -q "o.value('gpon'" \
             feeds/pon_userspace/luci-app-pon/htdocs/luci-static/resources/view/pon/config.js
           echo "OK: GPON patches are present in the feed checkouts."
-      - name: 注入 libffi 包 (上游 immortalwrt 树缺失 libffi，python3-ctypes 依赖 +libffi，缺它则 ffi.h 报错)
+
+      - name: 注入 libffi 包
         working-directory: ./ponwrt
         run: |
           mkdir -p package/libs/libffi
@@ -175,7 +170,8 @@ jobs:
             echo "::error::libffi 包注入失败"
             exit 1
           fi
-      - name: 生成并锁定 HG5382A 配置 (PON 修复 + mihomo + sing-box)
+
+      - name: 生成并锁定 HG5382A 配置 (PON 修复 + mihomo + sing-box + IPTV + omcproxy)
         working-directory: ./ponwrt
         run: |
           rm -rf tmp
@@ -196,42 +192,37 @@ jobs:
           CONFIG_PACKAGE_luci-app-ddns=y
           CONFIG_PACKAGE_ddns-scripts=y
           CONFIG_PACKAGE_openssh-sftp-server=y
-          # 关闭 sing-box 的 naive outbound（免拉 libcronet/boringssl 长链；vless/trojan/ss 不受影响）。
-          # 必须放在 defconfig 之前：defconfig 之后的追加行会触发 out-of-sync 警告，conf 不采纳
           # CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set
           EOF
           make defconfig
-          # 单一机型校验
           sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
           if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5382a=y$' .config; then
             echo "::error::HG5382A 单一机型锁定校验失败！"
             exit 1
           fi
-          # ==== defconfig 之后显式钉住关键包（防上游漂移 / 被 defconfig 洗掉）====
           cat >> .config << 'EOF'
-          # --- PON 修复：HG5382A 光前端 provider 必须内建（paged-bosa 提供 fiberhome,hg5x-bosa）---
+          # --- PON 修复 ---
           CONFIG_PACKAGE_kmod-airoha-paged-bosa=y
           CONFIG_PACKAGE_kmod-airoha-pon-frontend=y
           CONFIG_PACKAGE_kmod-airoha-xpon=y
           CONFIG_PACKAGE_airoha-ponctl=y
           CONFIG_PACKAGE_airoha-pond=y
-          # --- 透明代理内核模块（mihomo/sing-box 共用底座）---
+          # --- 透明代理内核模块 ---
           CONFIG_PACKAGE_kmod-tun=y
           CONFIG_PACKAGE_kmod-nft-tproxy=y
           CONFIG_PACKAGE_kmod-nft-socket=y
           CONFIG_PACKAGE_kmod-inet-diag=y
           CONFIG_PACKAGE_kmod-dummy=y
-          # --- mihomo（可卸载软件包；nikki feed；mihomo-meta=稳定通道，要最新可改 mihomo-alpha）---
+          # --- mihomo ---
           CONFIG_PACKAGE_mihomo-meta=y
           CONFIG_PACKAGE_nikki=y
           CONFIG_PACKAGE_luci-app-nikki=y
           CONFIG_PACKAGE_luci-i18n-nikki-zh-cn=y
-          # --- sing-box（immortalwrt/homeproxy，界面自动依赖 sing-box + firewall4 + kmod-nft-tproxy）---
+          # --- sing-box ---
           CONFIG_PACKAGE_luci-app-homeproxy=y
           CONFIG_PACKAGE_sing-box=y
-          # 关闭 naive outbound，免拉 libcronet/boringssl 编译链（vless/trojan/ss 等不受影响）
           # CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set
-          # --- curl / libcurl 依赖链（an7581.config 显式关闭，nikki 依赖 curl，OpenWrt 依赖不会自动拉起显式关闭的包）---
+          # --- curl / libcurl 依赖链 ---
           CONFIG_PACKAGE_curl=y
           CONFIG_PACKAGE_libcurl=y
           CONFIG_PACKAGE_libidn2=y
@@ -245,24 +236,28 @@ jobs:
           # --- 工具 ---
           CONFIG_PACKAGE_ip-full=y
           CONFIG_PACKAGE_yq=y
-          # --- python3 编译修复：_ctypes 需要 ffi.h，上游 an7581.config 未选 libffi，导致
-          #     Python-3.14.7 编译在 profile-opt 阶段 fatal error: ffi.h（主固件上次失败根因）---
+          # --- python3 编译修复 ---
           CONFIG_PACKAGE_libffi=y
-          # --- sing-box full 编译修复：immortalwrt 的 sing-box 在 aarch64 上
-          #     SING_BOX_BUILD_NAIVE_OUTBOUND 默认 y，二进制链接 libcronet.so；
-          #     显式选中 libcronet，强制编出该库（否则打包报 missing libcronet.so）---
+          # --- sing-box full 编译修复 ---
           CONFIG_PACKAGE_libcronet=y
+          # --- openwrt-iptv（业务/组播 VLAN 驱动层分离）---
+          CONFIG_PACKAGE_kmod-iptv=y
+          CONFIG_PACKAGE_luci-app-iptv=y
+          # --- omcproxy（IGMPv3/MLDv2 组播代理，IPTV 推荐）---
+          CONFIG_PACKAGE_omcproxy=y
+          CONFIG_PACKAGE_luci-app-omcproxy=y
           EOF
-          # 校验关键包是否进入 .config
           for pkg in kmod-airoha-paged-bosa kmod-airoha-pon-frontend kmod-airoha-xpon \
                      mihomo-meta nikki luci-app-nikki luci-app-homeproxy \
-                     sing-box curl libcurl libgnutls; do
+                     sing-box curl libcurl libgnutls \
+                     kmod-iptv luci-app-iptv omcproxy luci-app-omcproxy; do
             if ! grep -q "^CONFIG_PACKAGE_${pkg}=y$" .config; then
               echo "::warning::${pkg} 未在 .config 中 =y（可能被依赖折叠），继续构建"
             else
               echo ">>> 已锁定 ${pkg}"
             fi
           done
+
       - name: 下载源码软件包 (容错)
         working-directory: ./ponwrt
         run: |
@@ -272,6 +267,7 @@ jobs:
           find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
           make download -j1 V=s || { echo "::warning::仍有软件包下载失败，编译阶段会再尝试"; }
           find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
+
       - name: 执行固件编译 (Compile Firmware)
         working-directory: ./ponwrt
         run: |
@@ -281,14 +277,12 @@ jobs:
           export GOENV=off
           export GOTOOLCHAIN=local
           mkdir -p logs
-          # 增量续编：缓存恢复的 staging 总 stamp 若存在，会让 make 误判"全部包已编译"而跳过，
-          # 必须清掉，让 make 按各包 build_dir 的 .built stamp 决定是否重编
           rm -rf staging_dir/target-aarch64_cortex-a53_musl/stamp
-          # 先显式编译 libffi（python3 的 ffi.h 依赖；包已在前面注入 package/libs/libffi）
           make package/libs/libffi/compile -j"$(nproc)" V=s || true
           set -o pipefail
           make -j"$(nproc)" 2>&1 | tee logs/build.log || \
             (echo ">>> 并行编译失败，回退单线程重编" && make -j1 V=s 2>&1 | tee -a logs/build.log)
+
       - name: 整理产物 (Collect Firmware)
         run: |
           mkdir -p ./firmware_out
@@ -311,9 +305,7 @@ jobs:
             echo "===== 最终产物 ====="
             ls -lh
           )
-      # ===== GPON 补丁（本 fork 新增）：保留所有软件包（.apk 与 .ipk，含选 m 的模块）=====
-      # ponwrt 使用 APK 包格式（bin/packages/*/packages/*.apk），也兼容旧 .ipk。
-      # 成功失败都执行：编译失败时也能拿到已产出的软件包与日志
+
       - name: 打包全部软件包 (Pack all packages, incl. m modules)
         if: always()
         working-directory: ./ponwrt
@@ -327,6 +319,7 @@ jobs:
           fi
           echo "===== ipk_out 内容 ====="
           ls -la ../ipk_out || true
+
       - name: 上传固件 (Upload Artifact)
         if: success()
         uses: actions/upload-artifact@v4
@@ -335,7 +328,7 @@ jobs:
           path: ./firmware_out/
           if-no-files-found: error
           retention-days: 14
-      # ===== GPON 补丁（本 fork 新增）：m 模块软件包单独上传，保留 14 天 =====
+
       - name: 上传全部软件包 (Upload packages artifact)
         if: always()
         uses: actions/upload-artifact@v4
@@ -345,9 +338,56 @@ jobs:
             ./ipk_out/*.tar.zst
           if-no-files-found: warn
           retention-days: 14
-      # ===== GPON 补丁（本 fork 新增）：编译失败时显式保存三卷增量缓存 =====
-      # 实测：job 主步骤失败时 actions/cache 的 Post 步骤不会保存缓存（中间产物白丢）；
-      # 这里在 failure() 时用 actions/cache/save@v4 显式保存，重跑可直接断点续编。
+
+      - name: 准备预发布文件 (Prepare pre-release assets)
+        if: success()
+        run: |
+          rm -rf release_out
+          mkdir -p release_out
+          cp -f firmware_out/* release_out/ 2>/dev/null || true
+          cp -f ipk_out/*.tar.zst release_out/ 2>/dev/null || true
+
+          cd release_out
+          shopt -s nullglob
+          files=( *)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::release_out 内没有可预发布文件"
+            exit 1
+          fi
+
+          sha256sum "${files[@]}" > SHA256SUMS
+          echo "===== 预发布文件 ====="
+          ls -lh
+          echo "===== SHA256SUMS ====="
+          cat SHA256SUMS
+
+      - name: 创建 GitHub 预发布 (Create GitHub pre-release)
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ponwrt-hg5382a-${{ github.run_number }}-${{ github.run_attempt }}
+          name: PonWrt HG5382A 集成版预发布 #${{ github.run_number }}
+          prerelease: true
+          make_latest: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            本 Release 为 PonWrt HG5382A 集成版自动预发布。
+
+            包含：
+            - HG5382A 固件镜像（bin/ubi/itb 等）
+            - 全部软件包压缩包（ipk-packages.tar.zst / ipk-target.tar.zst，如生成）
+            - SHA256SUMS 校验和
+
+            构建信息：
+            - Workflow run: ${{ github.run_number }} / attempt ${{ github.run_attempt }}
+            - Commit: ${{ github.sha }}
+            - PonWrt SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
+
+            注意：这是预发布（pre-release），仅用于测试验证，不建议直接作为稳定版分发。
+          files: |
+            release_out/*
+
       - name: 失败时保存 toolchain+host 缓存
         if: failure()
         continue-on-error: true
@@ -357,6 +397,7 @@ jobs:
             ponwrt/staging_dir/toolchain-*
             ponwrt/staging_dir/host
           key: hg5382a-toolchain-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
+
       - name: 失败时保存 staging target 缓存
         if: failure()
         continue-on-error: true
@@ -364,6 +405,7 @@ jobs:
         with:
           path: ponwrt/staging_dir/target-aarch64_cortex-a53_musl
           key: hg5382a-stage-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
+
       - name: 失败时保存慢包 build_dir 缓存
         if: failure()
         continue-on-error: true
@@ -377,6 +419,7 @@ jobs:
             ponwrt/build_dir/target-aarch64_cortex-a53_musl/libcronet-*
             ponwrt/build_dir/target-aarch64_cortex-a53_musl/openssl-*
           key: hg5382a-slow-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config', 'ponwrt/feeds.conf.default') }}
+
       - name: 上传编译配置与日志 (诊断用)
         if: always()
         uses: actions/upload-artifact@v4
