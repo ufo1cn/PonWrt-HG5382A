@@ -1,18 +1,20 @@
 # ============================================================================
 # 编译 PonWrt HG5585F 电信版集成版固件
-# （mihomo + sing-box 共存 + PON 修复 + GPON 补丁 + Releases 预发布）
+# （mihomo + sing-box 共存 + IPTV 驱动 + omcproxy + PON 修复 + GPON 补丁 + Releases 预发布）
 # ----------------------------------------------------------------------------
 # 基于 HG5382A 工作流修改，差异点：
 #   - 目标设备改为 fiberhome_hg5585f-ct（HG5585F 电信版）
 #   - 产物过滤、cache key、artifact 名称统一加 hg5585f 前缀
-#   - 新增预发布到 GitHub Releases（prerelease=true，不覆盖正式版）
+#   - 新增 openwrt-iptv feed（kmod-iptv + luci-app-iptv）
+#   - 新增 omcproxy / luci-app-omcproxy（IGMP/MLD 组播代理，IPTV 推荐）
+#   - 预发布到 GitHub Releases（prerelease=true，不覆盖正式版）
 #   - 保留全部软件包（.apk / .ipk，含选 m 的模块）并挂到 Release
 # 注意：PON 修复包与 GPON 补丁先按 HG5382A 原样保留。
 #   HG5585F-CT 同属 AN7581 平台，首次编译后需检查 dmesg 中
 #   光前端 provider 是否正常注册；若电信版光模块需要不同 provider，
 #   再回头调整 kmod-airoha-paged-bosa / pon-frontend 或补丁文件。
 # ============================================================================
-name: 编译 PonWrt HG5585F 电信版固件 (mihomo + sing-box + GPON)
+name: 编译 PonWrt HG5585F 电信版固件 (mihomo + sing-box + IPTV + omcproxy + GPON)
 on:
   workflow_dispatch:
   push:
@@ -80,17 +82,18 @@ jobs:
           git -C ponwrt checkout --detach FETCH_HEAD
           echo ">>> PonWrt pinned: $SOURCE_REF"
 
-      - name: 加入外挂来源 (注入 nikki + homeproxy)
+      - name: 加入外挂来源 (注入 nikki + homeproxy + openwrt-iptv)
         working-directory: ./ponwrt
         run: |
           if [ ! -f feeds.conf.default ]; then touch feeds.conf.default; fi
-          sed -i '/nikki/d;/homeproxy/d' feeds.conf.default
+          sed -i '/nikki/d;/homeproxy/d;/openwrt-iptv/d' feeds.conf.default
           [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
           echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
           echo 'src-git homeproxy https://github.com/immortalwrt/homeproxy.git;master' >> feeds.conf.default
+          echo 'src-git iptv https://github.com/yveming/openwrt-iptv.git' >> feeds.conf.default
           dos2unix feeds.conf.default 2>/dev/null || true
           echo "===== feeds.conf.default ====="
-          tail -n 8 feeds.conf.default
+          tail -n 10 feeds.conf.default
 
       - name: 缓存下载软件包 (Cache dl)
         uses: actions/cache@v4
@@ -177,8 +180,8 @@ jobs:
             exit 1
           fi
 
-      # ===== 设备锁定：HG5585F-CT =====
-      - name: 生成并锁定 HG5585F-CT 配置
+      # ===== 设备锁定：HG5585F-CT + IPTV + omcproxy =====
+      - name: 生成并锁定 HG5585F-CT 配置 (PON 修复 + mihomo + sing-box + IPTV + omcproxy)
         working-directory: ./ponwrt
         run: |
           rm -rf tmp
@@ -247,10 +250,17 @@ jobs:
           CONFIG_PACKAGE_libffi=y
           # --- sing-box 链接 libcronet.so 兜底 ---
           CONFIG_PACKAGE_libcronet=y
+          # --- openwrt-iptv（业务/组播 VLAN 驱动层分离）---
+          CONFIG_PACKAGE_kmod-iptv=y
+          CONFIG_PACKAGE_luci-app-iptv=y
+          # --- omcproxy（IGMPv3/MLDv2 组播代理，IPTV 推荐）---
+          CONFIG_PACKAGE_omcproxy=y
+          CONFIG_PACKAGE_luci-app-omcproxy=y
           EOF
           for pkg in kmod-airoha-paged-bosa kmod-airoha-pon-frontend kmod-airoha-xpon \
                      mihomo-meta nikki luci-app-nikki luci-app-homeproxy \
-                     sing-box curl libcurl libgnutls; do
+                     sing-box curl libcurl libgnutls \
+                     kmod-iptv luci-app-iptv omcproxy luci-app-omcproxy; do
             if ! grep -q "^CONFIG_PACKAGE_${pkg}=y$" .config; then
               echo "::warning::${pkg} 未在 .config 中 =y（可能被依赖折叠），继续构建"
             else
@@ -340,21 +350,63 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      # ===== 准备预发布文件 =====
+      - name: 准备预发布文件 (Prepare pre-release assets)
+        if: success()
+        run: |
+          rm -rf release_out
+          mkdir -p release_out
+          cp -f firmware_out/* release_out/ 2>/dev/null || true
+          cp -f ipk_out/*.tar.zst release_out/ 2>/dev/null || true
+
+          cd release_out
+          shopt -s nullglob
+          files=( *)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::release_out 内没有可预发布文件"
+            exit 1
+          fi
+
+          sha256sum "${files[@]}" > SHA256SUMS
+          echo "===== 预发布文件 ====="
+          ls -lh
+          echo "===== SHA256SUMS ====="
+          cat SHA256SUMS
+
       # ===== 预发布到 GitHub Releases =====
-      - name: 预发布到 GitHub Releases
+      - name: 创建 GitHub 预发布 (Create GitHub pre-release)
         if: success()
         uses: softprops/action-gh-release@v2
         with:
           tag_name: hg5585f-ct-${{ github.run_number }}-${{ github.run_attempt }}
-          name: HG5585F-CT 预发布 ${{ github.run_number }}
+          name: PonWrt HG5585F-CT 集成版预发布 #${{ github.run_number }}
           prerelease: true
+          make_latest: false
           generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            本 Release 为 PonWrt HG5585F-CT 集成版自动预发布。
+
+            包含：
+            - HG5585F-CT 固件镜像（bin/ubi/itb 等）
+            - 全部软件包压缩包（ipk-packages.tar.zst / ipk-target.tar.zst，如生成）
+            - SHA256SUMS 校验和
+
+            集成内容：
+            - mihomo（nikki）+ sing-box（homeproxy）共存
+            - openwrt-iptv（kmod-iptv + luci-app-iptv）
+            - omcproxy + luci-app-omcproxy
+            - PON 修复包与 GPON 补丁（按 HG5382A 保留）
+
+            构建信息：
+            - Workflow run: ${{ github.run_number }} / attempt ${{ github.run_attempt }}
+            - Commit: ${{ github.sha }}
+            - PonWrt SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
+
+            注意：这是预发布（pre-release），仅用于测试验证，不建议直接作为稳定版分发。
+            首次刷入后请检查 dmesg 中光前端 provider 是否正常注册。
           files: |
-            ./firmware_out/*.bin
-            ./firmware_out/*.ubi
-            ./firmware_out/*.itb
-            ./firmware_out/sha256sums
-            ./ipk_out/*.tar.zst
+            release_out/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
