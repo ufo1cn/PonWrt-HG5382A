@@ -1,10 +1,11 @@
 # ============================================================================
 # 编译 PonWrt HG5382A 集成版固件（mihomo + sing-box + IPTV 驱动 + omcproxy + GPON 补丁）
 # ----------------------------------------------------------------------------
-# 在原工作流基础上新增：
+# 在原工作流基础上新增/调整：
 #   - openwrt-iptv feed（kmod-iptv + luci-app-iptv）
 #   - omcproxy / luci-app-omcproxy（IGMP/MLD 组播代理，IPTV 场景推荐）
-#   - 对应配置锁定与校验
+#   - 修正 luci-app-iptv 打包定义：移除与 kmod-iptv 冲突的文件安装
+#   - luci-app-iptv 编译为独立软件包（=m），不集成进固件
 #   - 编译成功后创建 GitHub 预发布（Pre-release），上传固件与软件包
 # ============================================================================
 name: 编译 PonWrt HG5382A 集成版固件 (mihomo + sing-box + IPTV + omcproxy + GPON)
@@ -141,6 +142,39 @@ jobs:
             sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile || true
           fi
 
+      - name: 修正 luci-app-iptv 打包定义（独立包且不覆盖 kmod-iptv）
+        working-directory: ./ponwrt
+        run: |
+          set -e
+          MK="feeds/pon_userspace/luci-app-iptv/Makefile"
+          if [ ! -f "$MK" ]; then
+            echo "::error::找不到 $MK"
+            exit 1
+          fi
+
+          cp -f "$MK" "$MK.orig"
+
+          # 1) 去掉对 kmod-iptv 的强制依赖（+ 号），避免单独编译时被强制拉入
+          sed -i 's/+kmod-iptv/kmod-iptv/g' "$MK"
+
+          # 2) 删除安装与 kmod-iptv 冲突的文件：
+          #    /etc/config/iptv
+          #    /etc/init.d/iptv
+          sed -i '/\/etc\/config\/iptv/d' "$MK"
+          sed -i '/\/etc\/init\.d\/iptv/d' "$MK"
+
+          # 3) 严格校验：Makefile 中不能再出现这两个冲突路径
+          if grep -qE '/etc/config/iptv|/etc/init\.d/iptv' "$MK"; then
+            echo "::error::luci-app-iptv Makefile 仍包含冲突文件安装路径"
+            grep -nE '/etc/config/iptv|/etc/init\.d/iptv' "$MK" || true
+            exit 1
+          fi
+
+          echo ">>> luci-app-iptv Makefile 修改完成"
+          echo ">>> 当前 DEPENDS："
+          grep -n 'DEPENDS' "$MK" || true
+          echo ">>> 已确认不再安装 /etc/config/iptv 和 /etc/init.d/iptv"
+
       - name: 应用 GPON feed 补丁 (Apply GPON feed patches)
         env:
           PONWRT_DIR: ponwrt
@@ -242,21 +276,30 @@ jobs:
           CONFIG_PACKAGE_libcronet=y
           # --- openwrt-iptv（业务/组播 VLAN 驱动层分离）---
           CONFIG_PACKAGE_kmod-iptv=y
-          CONFIG_PACKAGE_luci-app-iptv=y
+          # luci-app-iptv 编译为独立软件包，不集成进固件
+          CONFIG_PACKAGE_luci-app-iptv=m
           # --- omcproxy（IGMPv3/MLDv2 组播代理，IPTV 推荐）---
           CONFIG_PACKAGE_omcproxy=y
           CONFIG_PACKAGE_luci-app-omcproxy=y
           EOF
+
           for pkg in kmod-airoha-paged-bosa kmod-airoha-pon-frontend kmod-airoha-xpon \
                      mihomo-meta nikki luci-app-nikki luci-app-homeproxy \
                      sing-box curl libcurl libgnutls \
-                     kmod-iptv luci-app-iptv omcproxy luci-app-omcproxy; do
+                     kmod-iptv omcproxy luci-app-omcproxy; do
             if ! grep -q "^CONFIG_PACKAGE_${pkg}=y$" .config; then
               echo "::warning::${pkg} 未在 .config 中 =y（可能被依赖折叠），继续构建"
             else
               echo ">>> 已锁定 ${pkg}"
             fi
           done
+
+          if grep -q '^CONFIG_PACKAGE_luci-app-iptv=m$' .config; then
+            echo ">>> 已锁定 luci-app-iptv=m（独立软件包，不集成固件）"
+          else
+            echo "::warning::luci-app-iptv 未设置为 m，请检查 .config"
+            grep -n 'CONFIG_PACKAGE_luci-app-iptv' .config || true
+          fi
 
       - name: 下载源码软件包 (容错)
         working-directory: ./ponwrt
@@ -320,6 +363,23 @@ jobs:
           echo "===== ipk_out 内容 ====="
           ls -la ../ipk_out || true
 
+      - name: 收集独立 luci-app-iptv 软件包
+        if: always()
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p ../ipk_out
+          found=0
+          while IFS= read -r -d '' f; do
+            cp -f "$f" ../ipk_out/
+            found=1
+          done < <(find bin -name 'luci-app-iptv*.apk' -print0)
+          if [ "$found" -eq 0 ]; then
+            echo "::warning::未找到 luci-app-iptv 独立 apk"
+          else
+            echo "===== luci-app-iptv 独立包 ====="
+            ls -lh ../ipk_out/luci-app-iptv*.apk
+          fi
+
       - name: 上传固件 (Upload Artifact)
         if: success()
         uses: actions/upload-artifact@v4
@@ -336,6 +396,7 @@ jobs:
           name: ponwrt-ipk-packages
           path: |
             ./ipk_out/*.tar.zst
+            ./ipk_out/*.apk
           if-no-files-found: warn
           retention-days: 14
 
@@ -346,6 +407,7 @@ jobs:
           mkdir -p release_out
           cp -f firmware_out/* release_out/ 2>/dev/null || true
           cp -f ipk_out/*.tar.zst release_out/ 2>/dev/null || true
+          cp -f ipk_out/*.apk release_out/ 2>/dev/null || true
 
           cd release_out
           shopt -s nullglob
@@ -377,6 +439,7 @@ jobs:
             包含：
             - HG5382A 固件镜像（bin/ubi/itb 等）
             - 全部软件包压缩包（ipk-packages.tar.zst / ipk-target.tar.zst，如生成）
+            - 独立 luci-app-iptv 软件包（已移除与 kmod-iptv 冲突的文件安装）
             - SHA256SUMS 校验和
 
             构建信息：
