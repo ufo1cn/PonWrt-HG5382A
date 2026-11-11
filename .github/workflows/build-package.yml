@@ -1,128 +1,153 @@
 # ============================================================================
-# 用缓存 SDK 编译任意软件包 .ipk（默认 mihomo-alpha）
-# ----------------------------------------------------------------------------
-# 前置：先运行「编译并保留 OpenWrt SDK」workflow，生成 SDK 缓存（key=
-#       ponwrt-sdk-an7581，保留 400 天）。本 workflow restore 该 SDK，复用其
-#       工具链直接编译指定软件包，无需重编工具链。
-# 用法：Actions → 本 workflow → Run workflow → 输入软件包名（默认 mihomo-alpha）。
-# 兼容性：与主固件同 ponwrt commit + an7581/aarch64，ipk 可直接 opkg 安装。
+# SDK 分包编译工作流：单独编译上层IPK，不编译完整固件
+# 配套：PonWrt HG5585F-CT an7581
+# 依赖：整机固件编译产出的 SDK tar.gz
+# 新增包前必读：核对上游仓库README / Makefile / submodule / 平台支持
 # ============================================================================
-name: 用缓存 SDK 编译软件包 ipk
-
+name: SDK 分包编译 IPK
 on:
   workflow_dispatch:
-    inputs:
-      package:
-        description: '要编译的软件包名（默认 mihomo-alpha）'
-        required: false
-        default: mihomo-alpha
-        type: string
+  workflow_run:
+    workflows: ["编译 PonWrt HG5585F 电信版固件 (mihomo + sing-box + IPTV + omcproxy + GPON + USB)"]
+    types: [completed]
+    branches: [main]
 
 permissions:
-  contents: read
-
+  contents: write
 concurrency:
-  group: build-package-${{ github.ref }}
+  group: sdk-hg5585f-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
-  PKG: ${{ inputs.package }}
-
 jobs:
-  build-package:
-    name: 编译 ${{ inputs.package }} .ipk（复用 SDK）
+  build-sdk-pkg:
+    name: SDK 编译上层软件包
     runs-on: ubuntu-24.04
     timeout-minutes: 180
-
+    env:
+      SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
+      SDK_ARTIFACT_NAME: PonWrt-HG5585F-CT-integrated
     steps:
-      - name: 清理磁盘空间
+      - name: 签出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 释放磁盘 + 交换分区
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/share/swift /usr/local/.ghcup
           sudo docker system prune -af || true
           sudo apt-get clean
+          sudo swapoff /swapfile || true
+          sudo fallocate -l 6G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=6144
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          df -h
 
-      - name: 初始化编译环境（SDK 编译包所需最小依赖）
+      - name: 安装编译依赖
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
-            binutils build-essential bzip2 cmake curl flex gawk gettext git \
-            g++-multilib gcc-multilib libssl-dev libncurses-dev patch pkgconf \
-            python3 python3-pip python3-setuptools rsync sed tar unzip wget \
-            xz-utils zlib1g-dev zstd jq dos2unix
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
+            subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
+            libzstd-dev jq dos2unix upx-ucl
 
-      - name: 取回缓存的 SDK
-        uses: actions/cache/restore@v4
-        id: sdk-restore
+      - name: 下载整机固件产出的 SDK 归档
+        uses: actions/download-artifact@v4
         with:
-          path: ./sdk_cache
-          key: ponwrt-sdk-an7581
+          name: ${{ env.SDK_ARTIFACT_NAME }}
+          path: ./sdk_download
+        continue-on-error: false
 
-      - name: 解包 SDK
-        if: steps.sdk-restore.outputs.cache-hit == 'true'
+      - name: 解压 OpenWrt SDK
         run: |
-          mkdir -p ./sdk
-          ( tar --zstd -xf ./sdk_cache/*sdk*.tar.* -C ./sdk --strip-components=1 2>/dev/null || tar --zstd -xf ./sdk_cache/*sdk*.tar.* -C ./sdk )
-          echo "=== SDK 顶层 ==="
-          ls ./sdk | head -n 20
+          mkdir -p sdk
+          cd sdk_download
+          SDK_FILE=$(find . -maxdepth 1 -name "openwrt-sdk-*.tar.xz" | head -1)
+          if [ -z "$SDK_FILE" ]; then
+            echo "::error::没有找到 openwrt-sdk-*.tar.xz，整机固件编译没有导出SDK！"
+            exit 1
+          fi
+          tar -xf "$SDK_FILE" -C ../sdk
+          cd ../sdk
+          SDK_ROOT=$(find . -maxdepth 1 -type d | grep -v '^\.$' | head -1)
+          echo "SDK_ROOT=$SDK_ROOT" >> $GITHUB_ENV
+          echo "SDK路径: sdk/$SDK_ROOT"
 
-      - name: 若缓存未命中则提示先编译 SDK
-        if: steps.sdk-restore.outputs.cache-hit != 'true'
+      - name: 进入SDK目录，初始化feeds
+        working-directory: ./sdk/${{ env.SDK_ROOT }}
         run: |
-          echo "::error::未找到 SDK 缓存（key=ponwrt-sdk-an7581）。请先运行「编译并保留 OpenWrt SDK」workflow 生成 SDK 缓存后再编译软件包。"
-          exit 1
-
-      - name: 刷新 feed（SDK 内置 nikki/homeproxy；失败则全量拉取）
-        working-directory: ./sdk
-        run: |
-          ./scripts/feeds update -i || ./scripts/feeds update -a
+          # 外挂源和整机保持一致，保证依赖版本对齐
+          cat > feeds.conf.default <<'EOF'
+src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main
+src-git homeproxy https://github.com/immortalwrt/homeproxy.git;master
+src-git iptv https://github.com/yveming/openwrt-iptv.git
+EOF
+          dos2unix feeds.conf.default 2>/dev/null || true
+          ./scripts/feeds update -a
           ./scripts/feeds install -a
+          # 可选：argon主题
+          if [ -f feeds/luci/collections/luci/Makefile ]; then
+            sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile || true
+          fi
 
-      - name: 编译软件包 ipk（复用 SDK 工具链）
-        working-directory: ./sdk
+      - name: 【可选】新增自定义包（clone 到 package，自动处理submodule）
+        working-directory: ./sdk/${{ env.SDK_ROOT }}
         run: |
-          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
-          export GOSUMDB=sum.golang.org
-          export GO111MODULE=on
-          export GOENV=off
-          export GOTOOLCHAIN=local
-          set -o pipefail
-          make package/${PKG}/compile V=s 2>&1 | tee compile.log || exit 1
+          # 示例模板，后续新增包在这里追加，记得先核对上游仓库
+          # rm -rf package/xxx-app
+          # git clone --depth=1 https://github.com/xxx/xxx-app.git package/xxx-app
+          # if [ -f package/xxx-app/.gitmodules ]; then
+          #   echo ">>> 检测到子模块，同步 submodule"
+          #   git -C package/xxx-app submodule update --init --recursive --depth=1
+          # fi
+          echo ">>> 如需新增包，在本步骤添加clone脚本，先核查上游文档"
 
-      - name: 收集 ipk
+      - name: 配置需要编译的包（samba4 / nfs / cups / mjpg-streamer）
+        working-directory: ./sdk/${{ env.SDK_ROOT }}
         run: |
-          mkdir -p ./ipk_out
-          find ./sdk/bin/packages -type f -name "${PKG}_*.ipk" -exec cp -f {} ./ipk_out/ \;
-          (
-            cd ./ipk_out
-            shopt -s nullglob
-            files=( *.ipk )
-            if [ "${#files[@]}" -eq 0 ]; then
-              echo "::error::未找到 ${PKG} 的 ipk 产物"
-              exit 1
-            fi
-            sha256sum "${files[@]}" > sha256sums
-            echo "===== ipk 产物 ====="
-            ls -lh
-          )
+          rm -rf .config tmp
+          cat > .config <<'EOF'
+CONFIG_PACKAGE_samba4=y
+CONFIG_PACKAGE_luci-app-samba4=y
+CONFIG_PACKAGE_nfs-kernel-server=y
+CONFIG_PACKAGE_luci-app-nfs=y
+CONFIG_PACKAGE_cups=y
+CONFIG_PACKAGE_luci-app-cups=y
+CONFIG_PACKAGE_mjpg-streamer=y
+CONFIG_PACKAGE_luci-app-mjpg-streamer=y
+# 基础默认配置，保留SDK原生必要选项
+CONFIG_TARGET_ROOTFS_TAR=y
+EOF
+          # 清理旧编译产物
+          make clean
 
-      - name: 上传 ipk
+      - name: 编译选中软件包
+        working-directory: ./sdk/${{ env.SDK_ROOT }}
+        run: |
+          make -j$(nproc) package/compile
+
+      - name: 收集IPK产物
+        working-directory: ./sdk/${{ env.SDK_ROOT }}
+        run: |
+          mkdir -p ipk_out
+          find bin/packages/ -name "*.ipk" -exec cp {} ipk_out/ \;
+          ls -la ipk_out/
+
+      - name: 上传IPK制品
         uses: actions/upload-artifact@v4
         with:
-          name: ipk-${{ inputs.package }}
-          path: ./ipk_out/
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: 上传诊断
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ipk-${{ inputs.package }}-diag
-          path: |
-            ./sdk/.config
-            ./sdk/compile.log
-          if-no-files-found: ignore
-          retention-days: 3
+          name: sdk-ipk-output
+          path: ./sdk/${{ env.SDK_ROOT }}/ipk_out/
+          retention-days: 30
