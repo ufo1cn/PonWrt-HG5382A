@@ -11,6 +11,9 @@
 #   - luci-app-iptv 已移除与 kmod-iptv 冲突的文件安装
 #   - airoha-npu 改为直接克隆到 package/ 目录，避免 feeds 方式解析失败
 #   - 预发布到 GitHub Releases（prerelease=true，不覆盖正式版）
+#   - 修复：softprops/action-gh-release 固定 @v3.0.4
+#   - 修复：luci-app-airoha-npu 克隆后删除嵌套子目录，解决编译报错
+#   - 修复：收集包同时支持 *.ipk / *.apk
 # ============================================================================
 name: 编译 PonWrt HG5585F 电信版固件 (mihomo + sing-box + IPTV + omcproxy + GPON)
 on:
@@ -146,12 +149,14 @@ jobs:
             sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile || true
           fi
 
-      - name: 将 luci-app-airoha-npu 克隆到 package 目录
+      - name: 将 luci-app-airoha-npu 克隆到 package 目录（清理嵌套目录）
         working-directory: ./ponwrt
         run: |
           rm -rf package/luci-app-airoha-npu
           git clone --depth=1 https://github.com/rchen14b/luci-app-airoha-npu.git package/luci-app-airoha-npu
-          echo ">>> luci-app-airoha-npu 已克隆到 package/ 目录"
+          rm -rf package/luci-app-airoha-npu/.git package/luci-app-airoha-npu/.github package/luci-app-airoha-npu/screenshots
+          rm -rf package/luci-app-airoha-npu/luci-app-airoha-npu
+          echo ">>> luci-app-airoha-npu 已克隆到 package/ 目录，嵌套目录已删除"
           echo ">>> 当前 Makefile 中的 PKG_NAME:"
           grep -m1 'PKG_NAME' package/luci-app-airoha-npu/Makefile || echo "::warning::未找到 PKG_NAME"
 
@@ -352,7 +357,7 @@ jobs:
           if [ -n "$NPU_PKG" ]; then
             echo ">>> 编译 $NPU_PKG"
             make package/$NPU_PKG/download V=s 2>&1 | tail -3 || echo "::warning::$NPU_PKG 下载失败"
-            make package/$NPU_PKG/compile -j"$(nproc)" V=s 2>&1 | tee logs/npu-pkg.log | tail -20
+            make package/$NPU_PKG/compile -j1 V=s 2>&1 | tee logs/npu-pkg.log | tail -20
             [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::$NPU_PKG 编译失败（不影响固件）" || echo ">>> $NPU_PKG 成功"
           else
             echo "::warning::未检测到 airoha-npu/soc 包，跳过"
@@ -380,10 +385,10 @@ jobs:
           mkdir -p ../ipk_out
           for pkg in luci-app-iptv luci-app-airoha-npu luci-app-airoha-soc; do
             found=0
-            while IFS= read -r -d '' f; do cp -f "$f" ../ipk_out/; found=1; done < <(find bin -name "${pkg}*.apk" -print0)
+            while IFS= read -r -d '' f; do cp -f "$f" ../ipk_out/; found=1; done < <(find bin -name "${pkg}*.apk" -o -name "${pkg}*.ipk" -print0)
             [ "$found" -eq 1 ] && echo ">>> 已收集 $pkg" || echo "::notice::$pkg 未生成，跳过"
           done
-          ls -lh ../ipk_out/luci-app-*.apk 2>/dev/null || true
+          ls -lh ../ipk_out/luci-app-*.apk ../ipk_out/luci-app-*.ipk 2>/dev/null || true
 
       - name: 上传固件 Artifact
         if: success()
@@ -402,6 +407,7 @@ jobs:
           path: |
             ./ipk_out/*.tar.zst
             ./ipk_out/*.apk
+            ./ipk_out/*.ipk
           if-no-files-found: warn
           retention-days: 14
 
@@ -413,6 +419,7 @@ jobs:
           cp -f firmware_out/* release_out/ 2>/dev/null || true
           cp -f ipk_out/*.tar.zst release_out/ 2>/dev/null || true
           cp -f ipk_out/*.apk release_out/ 2>/dev/null || true
+          cp -f ipk_out/*.ipk release_out/ 2>/dev/null || true
           cd release_out
           shopt -s nullglob
           files=( *)
@@ -422,7 +429,7 @@ jobs:
 
       - name: 创建 GitHub 预发布
         if: success()
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.4
         with:
           tag_name: hg5585f-ct-${{ github.run_number }}-${{ github.run_attempt }}
           name: PonWrt HG5585F-CT 集成版预发布 #${{ github.run_number }}
