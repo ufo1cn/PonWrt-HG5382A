@@ -116,18 +116,15 @@ jobs:
         working-directory: ./sdk/${{ env.SDK_ROOT }}
         run: |
           rm -rf .config tmp
-          cat > .config <<EOF
-CONFIG_PACKAGE_samba4=y
-CONFIG_PACKAGE_luci-app-samba4=y
-CONFIG_PACKAGE_nfs-kernel-server=y
-CONFIG_PACKAGE_luci-app-nfs=y
-CONFIG_PACKAGE_cups=y
-CONFIG_PACKAGE_luci-app-cups=y
-CONFIG_PACKAGE_mjpg-streamer=y
-CONFIG_PACKAGE_luci-app-mjpg-streamer=y
-# 基础默认配置，保留SDK原生必要选项
-CONFIG_TARGET_ROOTFS_TAR=y
-EOF
+          echo "CONFIG_PACKAGE_samba4=y" > .config
+          echo "CONFIG_PACKAGE_luci-app-samba4=y" >> .config
+          echo "CONFIG_PACKAGE_nfs-kernel-server=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-nfs=y" >> .config
+          echo "CONFIG_PACKAGE_cups=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-cups=y" >> .config
+          echo "CONFIG_PACKAGE_mjpg-streamer=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-mjpg-streamer=y" >> .config
+          echo "CONFIG_TARGET_ROOTFS_TAR=y" >> .config
           make clean
 
       - name: 编译选中软件包
