@@ -9,11 +9,8 @@
 #   - 新增 omcproxy / luci-app-omcproxy（IGMP/MLD 组播代理，IPTV 推荐）
 #   - luci-app-iptv / luci-app-airoha-npu 作为独立软件包单独编译，失败不影响固件
 #   - luci-app-iptv 已移除与 kmod-iptv 冲突的文件安装
+#   - airoha-npu 改为直接克隆到 package/ 目录，避免 feeds 方式解析失败
 #   - 预发布到 GitHub Releases（prerelease=true，不覆盖正式版）
-# 注意：PON 修复包与 GPON 补丁先按 HG5382A 原样保留。
-#   HG5585F-CT 同属 AN7581 平台，首次编译后需检查 dmesg 中
-#   光前端 provider 是否正常注册；若电信版光模块需要不同 provider，
-#   再回头调整 kmod-airoha-paged-bosa / pon-frontend 或补丁文件。
 # ============================================================================
 name: 编译 PonWrt HG5585F 电信版固件 (mihomo + sing-box + IPTV + omcproxy + GPON)
 on:
@@ -25,7 +22,7 @@ on:
       - 'patches/**'
       - 'scripts/**'
 permissions:
-  contents: write   # 创建 Release 必需
+  contents: write
 concurrency:
   group: build-hg5585f-${{ github.ref }}
   cancel-in-progress: true
@@ -35,7 +32,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
-      # 固定到已验证支持 fiberhome_hg5585f-ct 的上游 commit
       SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
     steps:
       - name: 签出工作流仓库 (Checkout Workflow)
@@ -83,16 +79,15 @@ jobs:
           git -C ponwrt checkout --detach FETCH_HEAD
           echo ">>> PonWrt pinned: $SOURCE_REF"
 
-      - name: 加入外挂来源 (nikki + homeproxy + openwrt-iptv + airoha-npu)
+      - name: 加入外挂来源 (nikki + homeproxy + openwrt-iptv)
         working-directory: ./ponwrt
         run: |
           if [ ! -f feeds.conf.default ]; then touch feeds.conf.default; fi
-          sed -i '/nikki/d;/homeproxy/d;/openwrt-iptv/d;/airoha-npu/d' feeds.conf.default
+          sed -i '/nikki/d;/homeproxy/d;/openwrt-iptv/d' feeds.conf.default
           [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
           echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
           echo 'src-git homeproxy https://github.com/immortalwrt/homeproxy.git;master' >> feeds.conf.default
           echo 'src-git iptv https://github.com/yveming/openwrt-iptv.git' >> feeds.conf.default
-          echo 'src-git airoha_npu https://github.com/rchen14b/luci-app-airoha-npu.git;main' >> feeds.conf.default
           dos2unix feeds.conf.default 2>/dev/null || true
           echo "===== feeds.conf.default ====="
           tail -n 10 feeds.conf.default
@@ -106,7 +101,6 @@ jobs:
             ponwrt-dl-an7581-
             ponwrt-dl-
 
-      # ===== 三卷增量缓存（断点续传）=====
       - name: 缓存 toolchain + host 工具
         uses: actions/cache@v4
         with:
@@ -125,7 +119,7 @@ jobs:
           restore-keys: |
             hg5585f-stage-
 
-      - name: 缓存慢包构建目录 (python3/golang/sing-box/openssl)
+      - name: 缓存慢包构建目录
         uses: actions/cache@v4
         with:
           path: |
@@ -144,13 +138,22 @@ jobs:
         run: |
           ./scripts/feeds update -a
           if [ -d feeds/nikki ]; then
-            echo ">>> 剔除 nikki 的 +yq 依赖（改由 CONFIG_PACKAGE_yq=y 显式提供）"
+            echo ">>> 剔除 nikki 的 +yq 依赖"
             find feeds/nikki -name Makefile -exec sed -i -E 's/[[:space:]]*\+yq\b//g' {} + || true
           fi
           ./scripts/feeds install -a
           if [ -f feeds/luci/collections/luci/Makefile ]; then
             sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile || true
           fi
+
+      - name: 将 luci-app-airoha-npu 克隆到 package 目录
+        working-directory: ./ponwrt
+        run: |
+          rm -rf package/luci-app-airoha-npu
+          git clone --depth=1 https://github.com/rchen14b/luci-app-airoha-npu.git package/luci-app-airoha-npu
+          echo ">>> luci-app-airoha-npu 已克隆到 package/ 目录"
+          echo ">>> 当前 Makefile 中的 PKG_NAME:"
+          grep -m1 'PKG_NAME' package/luci-app-airoha-npu/Makefile || echo "::warning::未找到 PKG_NAME"
 
       - name: 修正 luci-app-iptv 打包定义（独立包且不覆盖 kmod-iptv）
         working-directory: ./ponwrt
@@ -162,24 +165,22 @@ jobs:
             exit 1
           fi
           cp -f "$MK" "$MK.orig"
-          # 去掉强制依赖，避免单独编译时被强制拉入 kmod-iptv
           sed -i 's/+kmod-iptv/kmod-iptv/g' "$MK"
-          # 删除与 kmod-iptv 冲突的文件安装指令
           sed -i '/\/etc\/config\/iptv/d' "$MK"
           sed -i '/\/etc\/init\.d\/iptv/d' "$MK"
           if grep -qE '/etc/config/iptv|/etc/init\.d/iptv' "$MK"; then
             echo "::error::luci-app-iptv Makefile 仍包含冲突文件安装路径"
             exit 1
           fi
-          echo ">>> luci-app-iptv Makefile 修改完成（独立编译时不再覆盖 kmod-iptv）"
+          echo ">>> luci-app-iptv Makefile 修改完成"
 
-      - name: 应用 GPON feed 补丁 (Apply GPON feed patches)
+      - name: 应用 GPON feed 补丁
         env:
           PONWRT_DIR: ponwrt
           FEED_PATCHES_STRICT: '1'
         run: bash scripts/apply-feed-patches.sh
 
-      - name: 校验 GPON 补丁已生效 (Verify GPON patches)
+      - name: 校验 GPON 补丁已生效
         working-directory: ./ponwrt
         run: |
           set -e
@@ -188,7 +189,7 @@ jobs:
             feeds/pon_drivers/airoha-pon-frontends/src/airoha-paged-bosa-ux3363.c
           grep -q "o.value('gpon'" \
             feeds/pon_userspace/luci-app-pon/htdocs/luci-static/resources/view/pon/config.js
-          echo "OK: GPON patches are present in the feed checkouts."
+          echo "OK: GPON patches are present."
 
       - name: 注入 libffi 包
         working-directory: ./ponwrt
@@ -196,15 +197,9 @@ jobs:
           mkdir -p package/libs/libffi
           curl -fsSL -o package/libs/libffi/Makefile \
             https://raw.githubusercontent.com/openwrt/openwrt/master/package/libs/libffi/Makefile
-          if grep -q 'PKG_NAME:=libffi' package/libs/libffi/Makefile; then
-            echo ">>> libffi 包注入成功 (package/libs/libffi)"
-          else
-            echo "::error::libffi 包注入失败"
-            exit 1
-          fi
+          grep -q 'PKG_NAME:=libffi' package/libs/libffi/Makefile && echo ">>> libffi 注入成功" || exit 1
 
-      # ===== 设备锁定：HG5585F-CT + IPTV + omcproxy（独立包不参与固件）=====
-      - name: 生成并锁定 HG5585F-CT 配置 (PON 修复 + mihomo + sing-box + IPTV + omcproxy)
+      - name: 生成并锁定 HG5585F-CT 配置
         working-directory: ./ponwrt
         run: |
           rm -rf tmp
@@ -218,7 +213,6 @@ jobs:
           # CONFIG_TARGET_MULTI_PROFILE is not set
           CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y
           CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y
-          # === 公共核心 ===
           CONFIG_PACKAGE_luci-theme-argon=y
           # CONFIG_PACKAGE_luci-theme-bootstrap is not set
           CONFIG_PACKAGE_luci-app-ttyd=y
@@ -230,11 +224,10 @@ jobs:
           make defconfig
           sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
           if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y$' .config; then
-            echo "::error::HG5585F-CT 单一机型锁定校验失败！"
-            exit 1
+            echo "::error::HG5585F-CT 单一机型锁定校验失败！"; exit 1
           fi
           cat >> .config << 'EOF'
-          # --- PON 修复（按 HG5382A 保留；首次编译后验证光前端注册）---
+          # --- PON 修复 ---
           CONFIG_PACKAGE_kmod-airoha-paged-bosa=y
           CONFIG_PACKAGE_kmod-airoha-pon-frontend=y
           CONFIG_PACKAGE_kmod-airoha-xpon=y
@@ -255,7 +248,7 @@ jobs:
           CONFIG_PACKAGE_luci-app-homeproxy=y
           CONFIG_PACKAGE_sing-box=y
           # CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set
-          # --- curl / libcurl 依赖链 ---
+          # --- curl / libcurl ---
           CONFIG_PACKAGE_curl=y
           CONFIG_PACKAGE_libcurl=y
           CONFIG_PACKAGE_libidn2=y
@@ -269,30 +262,19 @@ jobs:
           # --- 工具 ---
           CONFIG_PACKAGE_ip-full=y
           CONFIG_PACKAGE_yq=y
-          # --- python3 ffi.h 修复 ---
           CONFIG_PACKAGE_libffi=y
-          # --- sing-box 链接 libcronet.so 兜底 ---
           CONFIG_PACKAGE_libcronet=y
-          # --- openwrt-iptv（核心驱动编入固件）---
+          # --- IPTV 核心驱动 ---
           CONFIG_PACKAGE_kmod-iptv=y
-          # --- omcproxy（IGMPv3/MLDv2 组播代理，IPTV 推荐）---
+          # --- omcproxy ---
           CONFIG_PACKAGE_omcproxy=y
           CONFIG_PACKAGE_luci-app-omcproxy=y
-          # --- 独立软件包，不参与固件编译（固件编译成功后再单独尝试）---
+          # --- 独立包不参与固件 ---
           # CONFIG_PACKAGE_luci-app-iptv is not set
           # CONFIG_PACKAGE_luci-app-airoha-npu is not set
+          # CONFIG_PACKAGE_luci-app-airoha-soc is not set
           EOF
-          for pkg in kmod-airoha-paged-bosa kmod-airoha-pon-frontend kmod-airoha-xpon \
-                     mihomo-meta nikki luci-app-nikki luci-app-homeproxy \
-                     sing-box curl libcurl libgnutls \
-                     kmod-iptv omcproxy luci-app-omcproxy; do
-            if ! grep -q "^CONFIG_PACKAGE_${pkg}=y$" .config; then
-              echo "::warning::${pkg} 未在 .config 中 =y（可能被依赖折叠），继续构建"
-            else
-              echo ">>> 已锁定 ${pkg}"
-            fi
-          done
-          echo ">>> 固件配置完成（luci-app-iptv 与 luci-app-airoha-npu 均不参与固件编译）"
+          echo ">>> 固件配置完成"
 
       - name: 下载源码软件包 (容错)
         working-directory: ./ponwrt
@@ -301,7 +283,7 @@ jobs:
           export GO111MODULE=on
           make download -j"$(nproc)" || true
           find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
-          make download -j1 V=s || { echo "::warning::仍有软件包下载失败，编译阶段会再尝试"; }
+          make download -j1 V=s || { echo "::warning::仍有下载失败"; }
           find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
 
       - name: 执行固件编译 (Compile Firmware)
@@ -317,106 +299,89 @@ jobs:
           make package/libs/libffi/compile -j"$(nproc)" V=s || true
           set -o pipefail
           make -j"$(nproc)" 2>&1 | tee logs/build.log || \
-            (echo ">>> 并行编译失败，回退单线程重编" && make -j1 V=s 2>&1 | tee -a logs/build.log)
+            (echo ">>> 并行编译失败，回退单线程" && make -j1 V=s 2>&1 | tee -a logs/build.log)
 
-      # ===== 产物过滤：HG5585F-CT =====
       - name: 整理产物 (Collect Firmware)
         run: |
           mkdir -p ./firmware_out
           find ponwrt/bin/targets/airoha/an7581/ -type f \( \
-            -iname '*hg5585f-ct*.bin' -o \
-            -iname '*hg5585f-ct*.ubi' -o \
-            -iname '*hg5585f-ct*.itb' -o \
-            -name '*.buildinfo' -o \
-            -name 'profiles.json' \
+            -iname '*hg5585f-ct*.bin' -o -iname '*hg5585f-ct*.ubi' -o \
+            -iname '*hg5585f-ct*.itb' -o -name '*.buildinfo' -o -name 'profiles.json' \
           \) -exec cp -f {} ./firmware_out/ \;
           (
             cd ./firmware_out
             shopt -s nullglob nocaseglob
             files=( *hg5585f-ct*.bin *hg5585f-ct*.ubi *hg5585f-ct*.itb )
-            if [ "${#files[@]}" -eq 0 ]; then
-              echo "::error::firmware_out 内没有 HG5585F-CT 固件映像"
-              exit 1
-            fi
+            if [ "${#files[@]}" -eq 0 ]; then echo "::error::无固件映像"; exit 1; fi
             sha256sum "${files[@]}" > sha256sums
-            echo "===== 最终产物 ====="
             ls -lh
           )
 
-      # ===== 固件编译成功后，单独尝试编译独立软件包（失败不影响固件）=====
       - name: 尝试编译独立软件包（失败不影响固件）
         working-directory: ./ponwrt
         run: |
           set +e
-          echo "=============================================="
-          echo ">>> 固件已编译完成，开始尝试编译独立软件包"
-          echo ">>> 注意：以下任何失败都不会影响固件发布"
-          echo "=============================================="
+          echo ">>> 固件编译完成，开始尝试独立包"
+          echo ">>> 任何失败均不影响固件"
 
-          # 1) 修改配置，将两个独立包设为 =m
+          # 配置独立包为 =m
           sed -i 's|^# CONFIG_PACKAGE_luci-app-iptv is not set$|CONFIG_PACKAGE_luci-app-iptv=m|' .config
           sed -i 's|^# CONFIG_PACKAGE_luci-app-airoha-npu is not set$|CONFIG_PACKAGE_luci-app-airoha-npu=m|' .config
+          sed -i 's|^# CONFIG_PACKAGE_luci-app-airoha-soc is not set$|CONFIG_PACKAGE_luci-app-airoha-soc=m|' .config
           make defconfig >/dev/null 2>&1
 
-          # 2) 单独下载源码（失败不中断）
-          echo ">>> 下载 luci-app-iptv 源码"
-          make package/luci-app-iptv/download V=s 2>&1 | tail -5 || echo "::warning::luci-app-iptv 源码下载失败（不影响固件）"
-          echo ">>> 下载 luci-app-airoha-npu 源码"
-          make package/luci-app-airoha-npu/download V=s 2>&1 | tail -5 || echo "::warning::luci-app-airoha-npu 源码下载失败（不影响固件）"
-
-          # 3) 单独编译 luci-app-iptv
-          echo ">>> 尝试编译 luci-app-iptv"
+          # --- luci-app-iptv ---
+          echo ">>> 下载 luci-app-iptv"
+          make package/luci-app-iptv/download V=s 2>&1 | tail -3 || echo "::warning::iptv 下载失败"
+          echo ">>> 编译 luci-app-iptv"
           make package/luci-app-iptv/compile -j"$(nproc)" V=s 2>&1 | tee logs/iptv-pkg.log | tail -20
-          if [ ${PIPESTATUS[0]} -ne 0 ]; then
-            echo "::warning::luci-app-iptv 编译失败（不影响固件）"
-          else
-            echo ">>> luci-app-iptv 编译成功"
+          [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::luci-app-iptv 编译失败（不影响固件）" || echo ">>> luci-app-iptv 成功"
+
+          # --- airoha NPU/SOC 状态页（自动探测包名）---
+          NPU_PKG=""
+          if ./scripts/feeds list -n 2>/dev/null | grep -q '^luci-app-airoha-npu$'; then
+            NPU_PKG="luci-app-airoha-npu"
+          elif ./scripts/feeds list -n 2>/dev/null | grep -q '^luci-app-airoha-soc$'; then
+            NPU_PKG="luci-app-airoha-soc"
+            echo "::warning::npu 包名已变更为 soc，将使用 soc 编译"
+          elif [ -d "package/luci-app-airoha-npu" ]; then
+            NPU_PKG="luci-app-airoha-npu"
+            echo ">>> 通过 package/ 目录检测到 luci-app-airoha-npu"
           fi
 
-          # 4) 单独编译 luci-app-airoha-npu
-          echo ">>> 尝试编译 luci-app-airoha-npu"
-          make package/luci-app-airoha-npu/compile -j"$(nproc)" V=s 2>&1 | tee logs/npu-pkg.log | tail -20
-          if [ ${PIPESTATUS[0]} -ne 0 ]; then
-            echo "::warning::luci-app-airoha-npu 编译失败（不影响固件）"
+          if [ -n "$NPU_PKG" ]; then
+            echo ">>> 编译 $NPU_PKG"
+            make package/$NPU_PKG/download V=s 2>&1 | tail -3 || echo "::warning::$NPU_PKG 下载失败"
+            make package/$NPU_PKG/compile -j"$(nproc)" V=s 2>&1 | tee logs/npu-pkg.log | tail -20
+            [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::$NPU_PKG 编译失败（不影响固件）" || echo ">>> $NPU_PKG 成功"
           else
-            echo ">>> luci-app-airoha-npu 编译成功"
+            echo "::warning::未检测到 airoha-npu/soc 包，跳过"
           fi
 
-          # 5) 确保本步骤永远成功
-          echo ">>> 独立软件包编译尝试结束（无论成败，固件不受影响）"
+          echo ">>> 独立包编译尝试结束"
           exit 0
 
-      # ===== 保留全部软件包 =====
-      - name: 打包全部软件包 (Pack all packages, incl. m modules)
+      - name: 打包全部软件包
         if: always()
         working-directory: ./ponwrt
         run: |
           mkdir -p ../ipk_out
-          if [ -d bin/packages ] && [ -n "$(find bin/packages \( -name '*.apk' -o -name '*.ipk' \) | head -1)" ]; then
-            tar --zstd -cf ../ipk_out/ipk-packages.tar.zst bin/packages || true
-          fi
-          if [ -d bin/targets/airoha/an7581/packages ] && [ -n "$(find bin/targets/airoha/an7581/packages \( -name '*.apk' -o -name '*.ipk' \) | head -1)" ]; then
-            tar --zstd -cf ../ipk_out/ipk-target.tar.zst bin/targets/airoha/an7581/packages || true
-          fi
-          echo "===== ipk_out 内容 ====="
+          for d in bin/packages bin/targets/airoha/an7581/packages; do
+            if [ -d "$d" ] && [ -n "$(find "$d" \( -name '*.apk' -o -name '*.ipk' \) | head -1)" ]; then
+              tar --zstd -cf ../ipk_out/$(basename "$d").tar.zst "$d" || true
+            fi
+          done
           ls -la ../ipk_out || true
 
-      - name: 收集独立软件包（如编译成功）
+      - name: 收集独立软件包（如成功）
         if: always()
         working-directory: ./ponwrt
         run: |
           mkdir -p ../ipk_out
-          for pkg in luci-app-iptv luci-app-airoha-npu; do
+          for pkg in luci-app-iptv luci-app-airoha-npu luci-app-airoha-soc; do
             found=0
-            while IFS= read -r -d '' f; do
-              cp -f "$f" ../ipk_out/
-              found=1
-            done < <(find bin -name "${pkg}*.apk" -print0)
-            if [ "$found" -eq 1 ]; then
-              echo ">>> 已收集 ${pkg} 独立包"
-            else
-              echo "::notice::${pkg} 独立包未生成（可能编译失败），跳过"
-            fi
+            while IFS= read -r -d '' f; do cp -f "$f" ../ipk_out/; found=1; done < <(find bin -name "${pkg}*.apk" -print0)
+            [ "$found" -eq 1 ] && echo ">>> 已收集 $pkg" || echo "::notice::$pkg 未生成，跳过"
           done
           ls -lh ../ipk_out/luci-app-*.apk 2>/dev/null || true
 
@@ -440,8 +405,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # ===== 准备预发布文件 =====
-      - name: 准备预发布文件 (Prepare pre-release assets)
+      - name: 准备预发布文件
         if: success()
         run: |
           rm -rf release_out
@@ -449,57 +413,32 @@ jobs:
           cp -f firmware_out/* release_out/ 2>/dev/null || true
           cp -f ipk_out/*.tar.zst release_out/ 2>/dev/null || true
           cp -f ipk_out/*.apk release_out/ 2>/dev/null || true
-
           cd release_out
           shopt -s nullglob
           files=( *)
-          if [ "${#files[@]}" -eq 0 ]; then
-            echo "::error::release_out 内没有可预发布文件"
-            exit 1
-          fi
-
+          [ "${#files[@]}" -eq 0 ] && { echo "::error::无可发布文件"; exit 1; }
           sha256sum "${files[@]}" > SHA256SUMS
-          echo "===== 预发布文件 ====="
           ls -lh
-          echo "===== SHA256SUMS ====="
-          cat SHA256SUMS
 
-      # ===== 预发布到 GitHub Releases =====
-      - name: 创建 GitHub 预发布 (Create GitHub pre-release)
+      - name: 创建 GitHub 预发布
         if: success()
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: hg5585f-ct-${{ github.run_number }}-${{ github.run_attempt }}
           name: PonWrt HG5585F-CT 集成版预发布 #${{ github.run_number }}
           prerelease: true
+          make_latest: false
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
-            本 Release 为 PonWrt HG5585F-CT 集成版自动预发布。
-
-            包含：
-            - HG5585F-CT 固件镜像（bin/ubi/itb 等）
-            - 全部软件包压缩包（ipk-packages.tar.zst / ipk-target.tar.zst，如生成）
-            - 独立 luci-app-iptv 软件包（如编译成功）
-            - 独立 luci-app-airoha-npu 软件包（如编译成功）
-            - SHA256SUMS 校验和
-
-            集成内容：
-            - mihomo（nikki）+ sing-box（homeproxy）共存
-            - openwrt-iptv 核心驱动（kmod-iptv）
-            - omcproxy + luci-app-omcproxy
-            - PON 修复包与 GPON 补丁（按 HG5382A 保留）
-
-            注意：独立软件包为附加产物，编译失败不会影响固件。
-            这是预发布（pre-release），仅用于测试验证，不建议直接作为稳定版分发。
-            首次刷入后请检查 dmesg 中光前端 provider 是否正常注册。
-          files: |
-            release_out/*
+            PonWrt HG5585F-CT 集成版自动预发布。
+            包含固件镜像、软件包压缩包、独立 luci-app-iptv / airoha-npu（如编译成功）及 SHA256SUMS。
+            注意：这是预发布，仅用于测试验证。
+          files: release_out/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ===== 失败时显式保存三卷缓存 =====
-      - name: 失败时保存 toolchain+host 缓存
+      - name: 失败时保存缓存
         if: failure()
         continue-on-error: true
         uses: actions/cache/save@v4
@@ -507,31 +446,10 @@ jobs:
           path: |
             ponwrt/staging_dir/toolchain-*
             ponwrt/staging_dir/host
-          key: hg5585f-toolchain-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
+            ponwrt/staging_dir/target-aarch64_cortex-a53_musl
+          key: hg5585f-cache-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
 
-      - name: 失败时保存 staging target 缓存
-        if: failure()
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: ponwrt/staging_dir/target-aarch64_cortex-a53_musl
-          key: hg5585f-stage-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
-
-      - name: 失败时保存慢包 build_dir 缓存
-        if: failure()
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ponwrt/build_dir/hostpkg/golang-*
-            ponwrt/build_dir/target-aarch64_cortex-a53_musl/python3-*
-            ponwrt/build_dir/target-aarch64_cortex-a53_musl/golang-*
-            ponwrt/build_dir/target-aarch64_cortex-a53_musl/sing-box-*
-            ponwrt/build_dir/target-aarch64_cortex-a53_musl/libcronet-*
-            ponwrt/build_dir/target-aarch64_cortex-a53_musl/openssl-*
-          key: hg5585f-slow-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config', 'ponwrt/feeds.conf.default') }}
-
-      - name: 上传编译配置与日志 (诊断用)
+      - name: 上传编译配置与日志
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -539,7 +457,6 @@ jobs:
           path: |
             ponwrt/.config
             ponwrt/feeds.conf.default
-            ponwrt/target/linux/airoha/dts/
             ponwrt/logs/
           if-no-files-found: ignore
           include-hidden-files: true
