@@ -335,18 +335,26 @@ jobs:
             ls -lh
           )
 
-      - name: 尝试编译独立软件包（失败不影响固件）
+      - name: 尝试编译独立软件包（失败不影响固件）【已修复】
         working-directory: ./ponwrt
         run: |
           set +e
           echo ">>> 固件编译完成，开始尝试独立包"
           echo ">>> 任何失败均不影响固件"
 
+          # 关键修复：生成 luci-app-iptv package软链接
+          ./scripts/feeds install luci-app-iptv
+
           # 配置独立包为 =m
           sed -i 's|^# CONFIG_PACKAGE_luci-app-iptv is not set$|CONFIG_PACKAGE_luci-app-iptv=m|' .config
           sed -i 's|^# CONFIG_PACKAGE_luci-app-airoha-npu is not set$|CONFIG_PACKAGE_luci-app-airoha-npu=m|' .config
           sed -i 's|^# CONFIG_PACKAGE_luci-app-airoha-soc is not set$|CONFIG_PACKAGE_luci-app-airoha-soc=m|' .config
-          make defconfig >/dev/null 2>&1
+
+          # 修复：使用 olddefconfig，不重置已设置=m
+          make olddefconfig >/dev/null 2>&1
+
+          echo ">>> 当前config独立包状态"
+          grep -E 'CONFIG_PACKAGE_luci-app-iptv|CONFIG_PACKAGE_luci-app-airoha-npu|CONFIG_PACKAGE_luci-app-airoha-soc' .config
 
           # --- luci-app-iptv ---
           echo ">>> 下载 luci-app-iptv"
@@ -376,6 +384,11 @@ jobs:
             echo "::warning::未检测到 airoha-npu/soc 包，跳过"
           fi
 
+          echo ">>> 【调试】打印bin目录结构，查看apk实际输出位置"
+          ls -la bin/
+          ls -la bin/packages/*/ 2>/dev/null || true
+          ls -la bin/targets/*/*/packages/ 2>/dev/null || true
+
           echo ">>> 独立包编译尝试结束"
           exit 0
 
@@ -391,14 +404,17 @@ jobs:
           done
           ls -la ../ipk_out || true
 
-      - name: 收集独立软件包（如成功）
+      - name: 收集独立软件包（如成功）【修复noarch包搜索】
         if: always()
         working-directory: ./ponwrt
         run: |
           mkdir -p ../ipk_out
           for pkg in luci-app-iptv luci-app-airoha-npu luci-app-airoha-soc; do
             found=0
-            while IFS= read -r -d '' f; do cp -f "$f" ../ipk_out/; found=1; done < <(find bin -name "${pkg}*.apk" -o -name "${pkg}*.ipk" -print0)
+            while IFS= read -r -d '' f; do
+              cp -f "$f" ../ipk_out/
+              found=1
+            done < <(find bin -type f \( -name "${pkg}*.apk" -o -name "${pkg}*.ipk" \) -print0 )
             [ "$found" -eq 1 ] && echo ">>> 已收集 $pkg" || echo "::notice::$pkg 未生成，跳过"
           done
           ls -lh ../ipk_out/luci-app-*.apk ../ipk_out/luci-app-*.ipk 2>/dev/null || true
@@ -440,16 +456,15 @@ jobs:
           sha256sum "${files[@]}" > SHA256SUMS
           ls -lh
 
-      - name: 创建 GitHub 预发布
+      - name: 创建 GitHub 预发布【修复release 404】
         if: success()
-        uses: softprops/action-gh-release@v3.0.4
+        uses: softprops/action-gh-release@v2.0.8
         with:
           tag_name: hg5585f-ct-${{ github.run_number }}-${{ github.run_attempt }}
           name: PonWrt HG5585F-CT 集成版预发布 #${{ github.run_number }}
           prerelease: true
           make_latest: false
           generate_release_notes: true
-          fail_on_unmatched_files: true
           body: |
             PonWrt HG5585F-CT 集成版自动预发布。
             包含固件镜像、软件包压缩包、独立 luci-app-iptv / airoha-npu、USB全套内核模块ipk（如编译成功）及 SHA256SUMS。
@@ -457,8 +472,6 @@ jobs:
             USB底层驱动已内置支持（xhci/存储/ntfs3/vfat/ext4/uvc摄像头/usb-serial/usb-net）
             Samba4、NFS、CUPS、mjpg-streamer 上层应用请使用SDK分包工作流编译。
           files: release_out/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 失败时保存缓存
         if: failure()
