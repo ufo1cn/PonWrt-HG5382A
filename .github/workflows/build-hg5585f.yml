@@ -2,20 +2,13 @@
 # 编译 PonWrt HG5585F 电信版集成版固件
 # （mihomo + sing-box 共存 + IPTV 驱动 + omcproxy + PON 修复 + GPON 补丁 + Releases 预发布）
 # ----------------------------------------------------------------------------
-# 基于 HG5382A 工作流修改，差异点：
-#   - 目标设备改为 fiberhome_hg5585f-ct（HG5585F 电信版）
-#   - 产物过滤、cache key、artifact 名称统一加 hg5585f 前缀
-#   - 新增 openwrt-iptv feed（kmod-iptv + luci-app-iptv）
-#   - 新增 omcproxy / luci-app-omcproxy（IGMP/MLD 组播代理，IPTV 推荐）
-#   - luci-app-iptv / luci-app-airoha-npu 作为独立软件包单独编译，失败不影响固件
-#   - luci-app-iptv 已移除与 kmod-iptv 冲突的文件安装
-#   - airoha-npu 改为直接克隆到 package/ 目录，避免 feeds 方式解析失败
-#   - 预发布到 GitHub Releases（prerelease=true，不覆盖正式版）
-#   - 修复：softprops/action-gh-release 固定 @v3.0.4
-#   - 修复：luci-app-airoha-npu 克隆后删除嵌套子目录，解决编译报错
-#   - 修复：收集包同时支持 *.ipk / *.apk
+# 重要约定：新增第三方软件/库前，先核查上游仓库 README、Makefile、依赖、submodule、平台支持
+#  1. 优先使用上游推荐的 feed 方式；
+#  2. 若 clone 到 package/，自动检测并同步 git submodule；
+#  3. 内核模块 kmod 必须和固件一起编译（=m / =y）；
+#  4. 普通luci应用、daemon、上层服务，优先走SDK分包编译；
 # ============================================================================
-name: 编译 PonWrt HG5585F 电信版固件 (mihomo + sing-box + IPTV + omcproxy + GPON)
+name: 编译 PonWrt HG5585F 电信版固件 (mihomo + sing-box + IPTV + omcproxy + GPON + USB)
 on:
   workflow_dispatch:
   push:
@@ -149,11 +142,16 @@ jobs:
             sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile || true
           fi
 
-      - name: 将 luci-app-airoha-npu 克隆到 package 目录（清理嵌套目录）
+      - name: 将 luci-app-airoha-npu 克隆到 package 目录 + 自动同步子模块
         working-directory: ./ponwrt
         run: |
           rm -rf package/luci-app-airoha-npu
           git clone --depth=1 https://github.com/rchen14b/luci-app-airoha-npu.git package/luci-app-airoha-npu
+          # 通用子模块检测逻辑：存在 .gitmodules 就自动拉取
+          if [ -f package/luci-app-airoha-npu/.gitmodules ]; then
+            echo ">>> 检测到子模块，开始同步 submodule"
+            git -C package/luci-app-airoha-npu submodule update --init --recursive --depth=1
+          fi
           rm -rf package/luci-app-airoha-npu/.git package/luci-app-airoha-npu/.github package/luci-app-airoha-npu/screenshots
           rm -rf package/luci-app-airoha-npu/luci-app-airoha-npu
           echo ">>> luci-app-airoha-npu 已克隆到 package/ 目录，嵌套目录已删除"
@@ -274,6 +272,21 @@ jobs:
           # --- omcproxy ---
           CONFIG_PACKAGE_omcproxy=y
           CONFIG_PACKAGE_luci-app-omcproxy=y
+          # ========== USB 底层模块（=m，开启内核支持，供后续SDK编译上层共享/摄像头） ==========
+          CONFIG_PACKAGE_kmod-usb-xhci=m
+          CONFIG_PACKAGE_kmod-usb-storage=m
+          CONFIG_PACKAGE_kmod-usb-storage-extras=m
+          CONFIG_PACKAGE_kmod-fs-ext4=m
+          CONFIG_PACKAGE_kmod-fs-vfat=m
+          CONFIG_PACKAGE_kmod-fs-ntfs3=m
+          CONFIG_PACKAGE_block-mount=m
+          CONFIG_PACKAGE_usbutils=m
+          # USB摄像头 UVC / V4L2
+          CONFIG_PACKAGE_kmod-video-v4l2=m
+          CONFIG_PACKAGE_kmod-video-uvc=m
+          # 可选扩展：USB串口、USB网卡
+          CONFIG_PACKAGE_kmod-usb-serial=m
+          CONFIG_PACKAGE_kmod-usb-net=m
           # --- 独立包不参与固件 ---
           # CONFIG_PACKAGE_luci-app-iptv is not set
           # CONFIG_PACKAGE_luci-app-airoha-npu is not set
@@ -439,8 +452,10 @@ jobs:
           fail_on_unmatched_files: true
           body: |
             PonWrt HG5585F-CT 集成版自动预发布。
-            包含固件镜像、软件包压缩包、独立 luci-app-iptv / airoha-npu（如编译成功）及 SHA256SUMS。
+            包含固件镜像、软件包压缩包、独立 luci-app-iptv / airoha-npu、USB全套内核模块ipk（如编译成功）及 SHA256SUMS。
             注意：这是预发布，仅用于测试验证。
+            USB底层驱动已内置支持（xhci/存储/ntfs3/vfat/ext4/uvc摄像头/usb-serial/usb-net）
+            Samba4、NFS、CUPS、mjpg-streamer 上层应用请使用SDK分包工作流编译。
           files: release_out/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -466,5 +481,4 @@ jobs:
             ponwrt/feeds.conf.default
             ponwrt/logs/
           if-no-files-found: ignore
-          include-hidden-files: true
           retention-days: 3
