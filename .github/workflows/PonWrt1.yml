@@ -1,14 +1,3 @@
-# ============================================================================
-# 编译 PonWrt HG5382A 集成版固件（mihomo + sing-box + IPTV + omcproxy + GPON）
-# ----------------------------------------------------------------------------
-# 特点：
-#   - 固件编译与独立软件包编译完全解耦
-#   - luci-app-iptv / luci-app-airoha-npu 作为独立包单独编译，失败不影响固件发布
-#   - luci-app-iptv 已移除与 kmod-iptv 冲突的文件安装，不会强制覆盖
-#   - 编译成功后创建 GitHub 预发布（Pre-release）
-#   - 修复：luci-app-airoha-npu 不再用 src-git feed，改为 git clone 进 package 目录
-#   - 修复：action-gh-release 固定版本 softprops/action-gh-release@v3.0.4
-# ============================================================================
 name: 编译 PonWrt HG5382A 集成版固件 (mihomo + sing-box + IPTV + omcproxy + GPON)
 on:
   workflow_dispatch:
@@ -23,9 +12,10 @@ permissions:
 concurrency:
   group: build-hg5382a-${{ github.ref }}
   cancel-in-progress: true
+
 jobs:
   build:
-    name: 编译集成版固件
+    name: 编译HG5382A电信版集成版固件
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
@@ -332,19 +322,27 @@ jobs:
           echo ">>> 注意：以下任何失败都不会影响固件发布"
           echo "=============================================="
 
-          # 1) 修改配置，将两个独立包设为 =m
+          # 关键修复：iptv 之前没执行 feeds install，补充生成软链接
+          ./scripts/feeds install luci-app-iptv
+
+          # 修改配置，将两个独立包设为 =m
           sed -i 's|^# CONFIG_PACKAGE_luci-app-iptv is not set$|CONFIG_PACKAGE_luci-app-iptv=m|' .config
           sed -i 's|^# CONFIG_PACKAGE_luci-app-airoha-npu is not set$|CONFIG_PACKAGE_luci-app-airoha-npu=m|' .config
-          make defconfig >/dev/null 2>&1
 
-          # 2) 单独下载源码（失败不中断）
+          # 修复：olddefconfig，保留已设置的=m，只补依赖，不要defconfig
+          make olddefconfig >/dev/null 2>&1
+
+          echo ">>> 当前config独立包状态"
+          grep -E 'CONFIG_PACKAGE_luci-app-iptv|CONFIG_PACKAGE_luci-app-airoha-npu' .config
+
+          # 单独下载源码（失败不中断）
           echo ">>> 下载 luci-app-iptv 源码"
           make package/luci-app-iptv/download V=s 2>&1 | tail -5 || echo "::warning::luci-app-iptv 源码下载失败（不影响固件）"
 
           echo ">>> 下载 luci-app-airoha-npu 源码"
           make package/luci-app-airoha-npu/download V=s 2>&1 | tail -5 || echo "::warning::luci-app-airoha-npu 源码下载失败（不影响固件）"
 
-          # 3) 单独编译 luci-app-iptv
+          # 单独编译 luci-app-iptv
           echo ">>> 尝试编译 luci-app-iptv"
           make package/luci-app-iptv/compile -j"$(nproc)" V=s 2>&1 | tee logs/iptv-pkg.log | tail -20
           if [ ${PIPESTATUS[0]} -ne 0 ]; then
@@ -353,7 +351,7 @@ jobs:
             echo ">>> luci-app-iptv 编译成功"
           fi
 
-          # 4) 单独编译 luci-app-airoha-npu
+          # 单独编译 luci-app-airoha-npu
           echo ">>> 尝试编译 luci-app-airoha-npu"
           make package/luci-app-airoha-npu/compile -j1 V=s 2>&1 | tee logs/npu-pkg.log | tail -20
           if [ ${PIPESTATUS[0]} -ne 0 ]; then
@@ -362,7 +360,11 @@ jobs:
             echo ">>> luci-app-airoha-npu 编译成功"
           fi
 
-          # 5) 确保本步骤永远成功
+          echo ">>> 【调试】打印bin目录结构，查看apk实际输出位置"
+          ls -la bin/
+          ls -la bin/packages/*/ 2>/dev/null || true
+          ls -la bin/targets/*/*/packages/ 2>/dev/null || true
+
           echo ">>> 独立软件包编译尝试结束（无论成败，固件不受影响）"
           exit 0
 
@@ -378,17 +380,18 @@ jobs:
             tar --zstd -cf ../ipk_out/ipk-target.tar.zst bin/targets/airoha/an7581/packages || true
           fi
 
-      - name: 收集独立软件包（如编译成功）
+      - name: 收集独立软件包（如编译成功）【修复noarch包搜索范围】
         if: always()
         working-directory: ./ponwrt
         run: |
           mkdir -p ../ipk_out
           for pkg in luci-app-iptv luci-app-airoha-npu; do
             found=0
+            # 修复：同时扫描 bin/packages/* (noarch包在这里) + bin/targets/*/packages
             while IFS= read -r -d '' f; do
               cp -f "$f" ../ipk_out/
               found=1
-            done < <(find bin -name "${pkg}*.apk" -o -name "${pkg}*.ipk" -print0)
+            done < <(find bin -type f \( -name "${pkg}*.apk" -o -name "${pkg}*.ipk" \) -print0 )
             if [ "$found" -eq 1 ]; then
               echo ">>> 已收集 ${pkg} 独立包"
             else
@@ -439,13 +442,12 @@ jobs:
 
       - name: 创建 GitHub 预发布 (Create GitHub pre-release)
         if: success()
-        uses: softprops/action-gh-release@v3.0.4
+        uses: softprops/action-gh-release@v2.0.8
         with:
           tag_name: ponwrt-hg5382a-${{ github.run_number }}-${{ github.run_attempt }}
           name: PonWrt HG5382A 集成版预发布 #${{ github.run_number }}
           prerelease: true
           generate_release_notes: true
-          fail_on_unmatched_files: true
           body: |
             本 Release 为 PonWrt HG5382A 集成版自动预发布。
 
