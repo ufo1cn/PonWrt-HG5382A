@@ -6,6 +6,8 @@
 #   - luci-app-iptv / luci-app-airoha-npu 作为独立包单独编译，失败不影响固件发布
 #   - luci-app-iptv 已移除与 kmod-iptv 冲突的文件安装，不会强制覆盖
 #   - 编译成功后创建 GitHub 预发布（Pre-release）
+#   - 修复：luci-app-airoha-npu 不再用 src-git feed，改为 git clone 进 package 目录
+#   - 修复：action-gh-release 固定版本 softprops/action-gh-release@v3.0.4
 # ============================================================================
 name: 编译 PonWrt HG5382A 集成版固件 (mihomo + sing-box + IPTV + omcproxy + GPON)
 on:
@@ -74,7 +76,7 @@ jobs:
           git -C ponwrt checkout --detach FETCH_HEAD
           echo ">>> PonWrt pinned: $SOURCE_REF"
 
-      - name: 加入外挂来源 (nikki + homeproxy + openwrt-iptv + airoha-npu)
+      - name: 加入外挂来源 (nikki + homeproxy + openwrt-iptv)
         working-directory: ./ponwrt
         run: |
           if [ ! -f feeds.conf.default ]; then touch feeds.conf.default; fi
@@ -83,9 +85,16 @@ jobs:
           echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
           echo 'src-git homeproxy https://github.com/immortalwrt/homeproxy.git;master' >> feeds.conf.default
           echo 'src-git iptv https://github.com/yveming/openwrt-iptv.git' >> feeds.conf.default
-          echo 'src-git airoha_npu https://github.com/rchen14b/luci-app-airoha-npu.git;main' >> feeds.conf.default
           dos2unix feeds.conf.default 2>/dev/null || true
           tail -n 10 feeds.conf.default
+
+      - name: 注入 luci-app-airoha-npu 到 package 目录（修复原 feed 嵌套目录报错）
+        working-directory: ./ponwrt
+        run: |
+          git clone --depth 1 https://github.com/rchen14b/luci-app-airoha-npu.git package/luci-app-airoha-npu
+          rm -rf package/luci-app-airoha-npu/.git package/luci-app-airoha-npu/.github package/luci-app-airoha-npu/screenshots
+          rm -rf package/luci-app-airoha-npu/luci-app-airoha-npu
+          echo ">>> luci-app-airoha-npu 注入完成，已删除嵌套旧目录"
 
       - name: 缓存下载软件包 (Cache dl)
         uses: actions/cache@v4
@@ -346,7 +355,7 @@ jobs:
 
           # 4) 单独编译 luci-app-airoha-npu
           echo ">>> 尝试编译 luci-app-airoha-npu"
-          make package/luci-app-airoha-npu/compile -j"$(nproc)" V=s 2>&1 | tee logs/npu-pkg.log | tail -20
+          make package/luci-app-airoha-npu/compile -j1 V=s 2>&1 | tee logs/npu-pkg.log | tail -20
           if [ ${PIPESTATUS[0]} -ne 0 ]; then
             echo "::warning::luci-app-airoha-npu 编译失败（不影响固件）"
           else
@@ -379,14 +388,14 @@ jobs:
             while IFS= read -r -d '' f; do
               cp -f "$f" ../ipk_out/
               found=1
-            done < <(find bin -name "${pkg}*.apk" -print0)
+            done < <(find bin -name "${pkg}*.apk" -o -name "${pkg}*.ipk" -print0)
             if [ "$found" -eq 1 ]; then
               echo ">>> 已收集 ${pkg} 独立包"
             else
               echo "::notice::${pkg} 独立包未生成（可能编译失败），跳过"
             fi
           done
-          ls -lh ../ipk_out/luci-app-*.apk 2>/dev/null || true
+          ls -lh ../ipk_out/luci-app-*.apk ../ipk_out/luci-app-*.ipk 2>/dev/null || true
 
       - name: 上传固件 (Upload Artifact)
         if: success()
@@ -405,6 +414,7 @@ jobs:
           path: |
             ./ipk_out/*.tar.zst
             ./ipk_out/*.apk
+            ./ipk_out/*.ipk
           if-no-files-found: warn
           retention-days: 14
 
@@ -416,6 +426,7 @@ jobs:
           cp -f firmware_out/* release_out/ 2>/dev/null || true
           cp -f ipk_out/*.tar.zst release_out/ 2>/dev/null || true
           cp -f ipk_out/*.apk release_out/ 2>/dev/null || true
+          cp -f ipk_out/*.ipk release_out/ 2>/dev/null || true
           cd release_out
           shopt -s nullglob
           files=( *)
@@ -428,7 +439,7 @@ jobs:
 
       - name: 创建 GitHub 预发布 (Create GitHub pre-release)
         if: success()
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@v3.0.4
         with:
           tag_name: ponwrt-hg5382a-${{ github.run_number }}-${{ github.run_attempt }}
           name: PonWrt HG5382A 集成版预发布 #${{ github.run_number }}
