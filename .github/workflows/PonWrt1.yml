@@ -428,12 +428,11 @@ jobs:
 
       - name: 创建 GitHub 预发布 (Create GitHub pre-release)
         if: success()
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ponwrt-hg5382a-${{ github.run_number }}-${{ github.run_attempt }}
           name: PonWrt HG5382A 集成版预发布 #${{ github.run_number }}
           prerelease: true
-          make_latest: false
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
