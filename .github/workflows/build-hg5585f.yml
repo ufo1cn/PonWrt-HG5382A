@@ -144,11 +144,12 @@ jobs:
       # 3. squeezelite：给 SQUEEZELITE_WMA 添加 depends on BUILD_PATENTED（上游提交 10c087a9）
       # 4. mihomo：主配置禁用 mihomo-alpha（独立包阶段再切换）
       # ============================================================================
-      - name: 修复上游 Kconfig 递归依赖 ✅【基于上游提交精准修补，失败即报错】
+      - name: 修复上游 Kconfig 递归依赖 ✅【精准修补，失败即报错】
         working-directory: ./ponwrt
         run: |
           set -e
 
+          # ---------- 1. qt5base：在 choice 块中添加 depends on PACKAGE_qt5base-gui ----------
           QT5_CONFIG="feeds/video/frameworks/qt5/qt5base/Config.in"
           if [ -f "$QT5_CONFIG" ]; then
             echo ">>> 修复 qt5base: $QT5_CONFIG"
@@ -183,6 +184,7 @@ jobs:
             exit 1
           fi
 
+          # ---------- 2. fwknop：menu 级 depends 放宽为 PACKAGE_fwknopd || PACKAGE_fwknop ----------
           FWKNOP_CONFIG="feeds/packages/net/fwknop/Config.in"
           if [ -f "$FWKNOP_CONFIG" ]; then
             echo ">>> 修复 fwknop: $FWKNOP_CONFIG"
@@ -198,27 +200,26 @@ jobs:
             exit 1
           fi
 
+          # ---------- 3. squeezelite：给 SQUEEZELITE_WMA 添加 depends on BUILD_PATENTED ----------
           SQZ_MK="feeds/packages/sound/squeezelite/Makefile"
           if [ -f "$SQZ_MK" ]; then
             echo ">>> 修复 squeezelite: $SQZ_MK"
-            if ! grep -A3 '^config SQUEEZELITE_WMA$' "$SQZ_MK" | grep -q 'depends on BUILD_PATENTED'; then
-              python3 - "$SQZ_MK" << 'PYEOF'
-          import sys
-          path = sys.argv[1]
-          with open(path, 'r') as f:
-              lines = f.readlines()
-          out = []
-          for line in lines:
-              out.append(line)
-              if line.strip() == 'config SQUEEZELITE_WMA':
-                  out.append('\t\tdepends on BUILD_PATENTED\n')
-          with open(path, 'w') as f:
-              f.writelines(out)
-          PYEOF
-            fi
+            # 使用 awk 在 config SQUEEZELITE_WMA 的 bool 行之后插入 depends on BUILD_PATENTED
+            # 匹配不依赖行首/行尾锚定，兼容 Tab/空格/CRLF
+            awk '
+              /config[[:space:]]+SQUEEZELITE_WMA/ { in_block=1 }
+              in_block && /bool[[:space:]]+"WMA\/ALAC decode support"/ {
+                print
+                print "\t\tdepends on BUILD_PATENTED"
+                in_block=0
+                next
+              }
+              { print }
+            ' "$SQZ_MK" > "${SQZ_MK}.tmp" && mv "${SQZ_MK}.tmp" "$SQZ_MK"
+
             echo ">>> SQUEEZELITE_WMA 配置块校验："
-            grep -A4 '^config SQUEEZELITE_WMA$' "$SQZ_MK"
-            if ! grep -A4 '^config SQUEEZELITE_WMA$' "$SQZ_MK" | grep -q 'depends on BUILD_PATENTED'; then
+            grep -A5 'SQUEEZELITE_WMA' "$SQZ_MK"
+            if ! grep -A5 'SQUEEZELITE_WMA' "$SQZ_MK" | grep -q 'depends on BUILD_PATENTED'; then
               echo "::error::squeezelite BUILD_PATENTED 依赖插入失败"
               exit 1
             fi
@@ -227,6 +228,7 @@ jobs:
             exit 1
           fi
 
+          # ---------- 4. mihomo：Makefile 层清理（主配置层禁用 alpha 是根本手段） ----------
           echo ">>> mihomo 递归依赖由主配置段禁用 mihomo-alpha 解决"
           find feeds/nikki -name 'Makefile' -path '*mihomo*' -exec sed -i \
             -e 's/+PACKAGE_mihomo-meta//g' \
@@ -418,16 +420,19 @@ jobs:
           make download -j1 V=s || { echo "::warning::仍有下载失败"; }
           find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
 
-      - name: 检查上次构建状态并精准清理缓存
+      - name: 检查上次构建状态并精准清理缓存 ✅【失败时只删必要文件，成功时保留缓存】
         working-directory: ./ponwrt
         run: |
           if [ -f staging_dir/.build_success ]; then
             echo ">>> 上次构建成功，保留缓存，仅清理 tmp"
             rm -rf tmp
+            echo ">>> 已保留：staging_dir（含 stamp）、dl/、toolchain、host、build_dir"
           else
-            echo ">>> 上次构建失败或无成功标记，精准清理"
+            echo ">>> 上次构建失败或无成功标记，精准清理（不删除 dl/ 与工具链）"
             rm -rf staging_dir/target-aarch64_cortex-a53_musl/stamp
             rm -rf tmp
+            echo ">>> 已清理：staging_dir/target-*/stamp、tmp"
+            echo ">>> 已保留：dl/、staging_dir/toolchain-*、staging_dir/host、build_dir 下的包源码"
           fi
           rm -f staging_dir/.build_success
 
@@ -445,12 +450,13 @@ jobs:
           make -j"$(nproc)" 2>&1 | tee logs/build.log || \
             (echo ">>> 并行编译失败，回退单线程" && make -j1 V=s 2>&1 | tee -a logs/build.log)
 
-      - name: 标记构建成功
+      - name: 标记构建成功 ✅【写入成功标记，供下次判断】
         if: success()
         working-directory: ./ponwrt
         run: |
           mkdir -p staging_dir
           touch staging_dir/.build_success
+          echo ">>> 已写入构建成功标记 staging_dir/.build_success"
 
       - name: 整理产物 (Collect Firmware)
         run: |
@@ -472,7 +478,8 @@ jobs:
         working-directory: ./ponwrt
         run: |
           set +e
-          echo ">>> 开始尝试独立包"
+          echo ">>> 固件编译完成，开始尝试独立包"
+          echo ">>> 任何失败均不影响固件"
 
           ./scripts/feeds install luci-app-iptv luci-app-blueaudio luci-app-btsp luci-app-camlive kmod-usb-serial-ch341 ser2net4 luci-app-ser2net4
 
@@ -524,33 +531,39 @@ jobs:
             echo "::warning::未检测到 airoha-npu/soc 包，跳过"
           fi
 
-          echo ">>> 编译 luci-app-blueaudio"
+          echo ">>> 下载 luci-app-blueaudio"
           make package/luci-app-blueaudio/download V=s 2>&1 | tail -3 || echo "::warning::luci-app-blueaudio 下载失败"
+          echo ">>> 编译 luci-app-blueaudio"
           make package/luci-app-blueaudio/compile -j"$(nproc)" V=s 2>&1 | tee logs/blueaudio-pkg.log | tail -20
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::luci-app-blueaudio 编译失败（不影响固件）" || echo ">>> luci-app-blueaudio 成功"
 
-          echo ">>> 编译 luci-app-btsp"
+          echo ">>> 下载 luci-app-btsp"
           make package/luci-app-btsp/download V=s 2>&1 | tail -3 || echo "::warning::luci-app-btsp 下载失败"
+          echo ">>> 编译 luci-app-btsp"
           make package/luci-app-btsp/compile -j"$(nproc)" V=s 2>&1 | tee logs/btsp-pkg.log | tail -20
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::luci-app-btsp 编译失败（不影响固件）" || echo ">>> luci-app-btsp 成功"
 
-          echo ">>> 编译 luci-app-camlive"
+          echo ">>> 下载 luci-app-camlive"
           make package/luci-app-camlive/download V=s 2>&1 | tail -3 || echo "::warning::luci-app-camlive 下载失败"
+          echo ">>> 编译 luci-app-camlive"
           make package/luci-app-camlive/compile -j"$(nproc)" V=s 2>&1 | tee logs/camlive-pkg.log | tail -20
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::luci-app-camlive 编译失败（不影响固件）" || echo ">>> luci-app-camlive 成功"
 
-          echo ">>> 编译 kmod-usb-serial-ch341"
+          echo ">>> 下载 kmod-usb-serial-ch341"
           make package/kmod-usb-serial-ch341/download V=s 2>&1 | tail -3 || echo "::warning::kmod-usb-serial-ch341 下载失败"
+          echo ">>> 编译 kmod-usb-serial-ch341"
           make package/kmod-usb-serial-ch341/compile -j"$(nproc)" V=s 2>&1 | tee logs/ch341-pkg.log | tail -20
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::kmod-usb-serial-ch341 编译失败（不影响固件）" || echo ">>> kmod-usb-serial-ch341 成功"
 
-          echo ">>> 编译 ser2net4"
+          echo ">>> 下载 ser2net4"
           make package/ser2net4/download V=s 2>&1 | tail -3 || echo "::warning::ser2net4 下载失败"
+          echo ">>> 编译 ser2net4"
           make package/ser2net4/compile -j"$(nproc)" V=s 2>&1 | tee logs/ser2net4-pkg.log | tail -20
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::ser2net4 编译失败（不影响固件）" || echo ">>> ser2net4 成功"
 
-          echo ">>> 编译 luci-app-ser2net4"
+          echo ">>> 下载 luci-app-ser2net4"
           make package/luci-app-ser2net4/download V=s 2>&1 | tail -3 || echo "::warning::luci-app-ser2net4 下载失败"
+          echo ">>> 编译 luci-app-ser2net4"
           make package/luci-app-ser2net4/compile -j"$(nproc)" V=s 2>&1 | tee logs/luci-ser2net4-pkg.log | tail -20
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::luci-app-ser2net4 编译失败（不影响固件）" || echo ">>> luci-app-ser2net4 成功"
 
@@ -571,27 +584,33 @@ jobs:
 
           # ============================================================
           # mihomo 双变体分阶段独立编译
+          # 说明：两者在 Kconfig 中相互声明依赖，同一时刻只能激活一个。
+          #   阶段 1：当前 .config 中 mihomo-meta=y，先编译 meta 的 ipk。
+          #   阶段 2：切换到 mihomo-alpha=m 且禁用 mihomo-meta，打破循环，再编译 alpha 的 ipk。
+          #   阶段 3：编译结束后切回 meta=y，保持 .config 与固件一致。
           # ============================================================
-          echo ">>> 阶段 1：编译 mihomo-meta 独立 ipk"
+          echo ">>> ============ 阶段 1：编译 mihomo-meta 独立 ipk ============"
+          grep -E 'CONFIG_PACKAGE_mihomo-(meta|alpha)' .config || true
           make package/feeds/nikki/mihomo-meta/compile -j"$(nproc)" V=s 2>&1 | tee logs/mihomo-meta-pkg.log | tail -20
-          [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::mihomo-meta 独立包编译失败" || echo ">>> mihomo-meta 独立包成功"
+          [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::mihomo-meta 独立包编译失败（不影响固件）" || echo ">>> mihomo-meta 独立包成功"
 
-          echo ">>> 阶段 2：切换到 mihomo-alpha 并编译"
+          echo ">>> ============ 阶段 2：切换到 mihomo-alpha 并编译 ============"
           sed -i 's|^CONFIG_PACKAGE_mihomo-meta=y$|# CONFIG_PACKAGE_mihomo-meta is not set|' .config
           sed -i 's|^# CONFIG_PACKAGE_mihomo-alpha is not set$|CONFIG_PACKAGE_mihomo-alpha=m|' .config
           make olddefconfig >/dev/null 2>&1
           echo ">>> 切换后 mihomo 状态："
           grep -E 'CONFIG_PACKAGE_mihomo-(meta|alpha)' .config || true
           make package/feeds/nikki/mihomo-alpha/compile -j"$(nproc)" V=s 2>&1 | tee logs/mihomo-alpha-pkg.log | tail -20
-          [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::mihomo-alpha 独立包编译失败" || echo ">>> mihomo-alpha 独立包成功"
+          [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::mihomo-alpha 独立包编译失败（不影响固件）" || echo ">>> mihomo-alpha 独立包成功"
 
-          echo ">>> 阶段 3：恢复 .config 为 meta=y 状态"
+          echo ">>> ============ 阶段 3：恢复 .config 为 meta=y 状态 ============"
           sed -i 's|^# CONFIG_PACKAGE_mihomo-meta is not set$|CONFIG_PACKAGE_mihomo-meta=y|' .config
           sed -i 's|^CONFIG_PACKAGE_mihomo-alpha=m$|# CONFIG_PACKAGE_mihomo-alpha is not set|' .config
           make olddefconfig >/dev/null 2>&1
+          echo ">>> 恢复后 mihomo 状态："
           grep -E 'CONFIG_PACKAGE_mihomo-(meta|alpha)' .config || true
 
-          echo ">>> 【调试】bin 目录结构"
+          echo ">>> 【调试】打印bin目录结构，查看apk实际输出位置"
           ls -la bin/ || true
           ls -la bin/packages/*/ 2>/dev/null || true
           ls -la bin/targets/*/*/packages/ 2>/dev/null || true
