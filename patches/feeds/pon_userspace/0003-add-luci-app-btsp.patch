@@ -1,0 +1,343 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Self <self@local>
+Date: Thu, 13 Nov 2026 00:00:00 +0800
+Subject: [PATCH 0003] add luci-app-btsp: bluetooth SPP RFCOMM serial manager
+
+Add luci ui for bluetooth rfcomm spp (HC05/JDY-31).
+Support scan, bind, unbind, auto start on boot.
+No custom kernel patch, pure luci + procd service.
+Depends: bluez-daemon, bluez-utils, kmod-bluetooth
+
+---
+ feeds/pon_userspace/luci-app-btsp/Makefile                                 | 31 +++++
+ feeds/pon_userspace/luci-app-btsp/root/etc/init.d/btsp                     | 94 +++++++++++++++
+ feeds/pon_userspace/luci-app-btsp/root/etc/uci-defaults/99-btsp-defaults   | 13 +++
+ feeds/pon_userspace/luci-app-btsp/root/usr/share/luci/menu.d/luci-app-btsp.json | 11 ++
+ feeds/pon_userspace/luci-app-btsp/root/www/luci-app-btsp/btsp.lua          | 187 +++++++++++++++++++++++++++++
+ 5 files changed, 336 insertions(+)
+ create mode 100644 feeds/pon_userspace/luci-app-btsp/Makefile
+ create mode 100755 feeds/pon_userspace/luci-app-btsp/root/etc/init.d/btsp
+ create mode 100644 feeds/pon_userspace/luci-app-btsp/root/etc/uci-defaults/99-btsp-defaults
+ create mode 100644 feeds/pon_userspace/luci-app-btsp/root/usr/share/luci/menu.d/luci-app-btsp.json
+ create mode 100644 feeds/pon_userspace/luci-app-btsp/root/www/luci-app-btsp/btsp.lua
+
+diff --git a/feeds/pon_userspace/luci-app-btsp/Makefile b/feeds/pon_userspace/luci-app-btsp/Makefile
+new file mode 100644
+index 0000000..a0d4174
+--- /dev/null
++++ b/feeds/pon_userspace/luci-app-btsp/Makefile
+@@ -0,0 +1,31 @@
++include $(TOPDIR)/rules.mk
++
++PKG_NAME:=luci-app-btsp
++PKG_VERSION:=1.0
++PKG_RELEASE:=1
++
++PKG_MAINTAINER:=Self
++PKG_LICENSE:=GPLv3
++
++LUCI_TITLE:=Bluetooth SPP RFCOMM Serial Manager
++LUCI_DESCRIPTION:=LuCI page for bluetooth RFCOMM SPP serial port (HC05/JDY-31)
++LUCI_DEPENDS:=+luci-base +bluez-daemon +bluez-utils +kmod-bluetooth
++LUCI_PKGARCH:=all
++
++define Package/luci-app-btsp/conffiles
++/etc/config/btsp
++endef
++
++define Package/luci-app-btsp/install
++	$(INSTALL_DIR) $(1)/etc/init.d
++	$(INSTALL_BIN) ./root/etc/init.d/btsp $(1)/etc/init.d/btsp
++
++	$(INSTALL_DIR) $(1)/etc/uci-defaults
++	$(INSTALL_BIN) ./root/etc/uci-defaults/99-btsp-defaults $(1)/etc/uci-defaults/99-btsp-defaults
++
++	$(INSTALL_DIR) $(1)/usr/share/luci/menu.d
++	$(INSTALL_DATA) ./root/usr/share/luci/menu.d/luci-app-btsp.json $(1)/usr/share/luci/menu.d/luci-app-btsp.json
++
++	$(INSTALL_DIR) $(1)/www/luci-app-btsp
++	$(INSTALL_DATA) ./root/www/luci-app-btsp/btsp.lua $(1)/www/luci-app-btsp/btsp.lua
++endef
++
++include $(TOPDIR)/feeds/luci/luci.mk
++
+diff --git a/feeds/pon_userspace/luci-app-btsp/root/etc/init.d/btsp b/feeds/pon_userspace/luci-app-btsp/root/etc/init.d/btsp
+new file mode 100755
+index 0000000..7142376
+--- /dev/null
++++ b/feeds/pon_userspace/luci-app-btsp/root/etc/init.d/btsp
+@@ -0,0 +1,94 @@
++#!/bin/sh /etc/rc.common
++
++USE_PROCD=1
++START=95
++STOP=05
++
++btsp_start() {
++	config_load btsp
++	config_get enable global enable 0
++	[ "$enable" != "1" ] && return 0
++
++	config_get mac global mac ""
++	config_get channel global channel 1
++	config_get dev global dev "/dev/rfcomm0"
++
++	[ -z "$mac" ] && return 0
++
++	# kill old rfcomm
++	pkill -f "rfcomm bind $dev" 2>/dev/null
++
++	procd_open_instance
++	procd_set_param command /usr/bin/rfcomm bind "$dev" "$mac" "$channel"
++	procd_set_param respawn
++	procd_set_param stdout 1
++	procd_set_param stderr 1
++	procd_close_instance
++}
++
++btsp_stop() {
++	procd_stop
++	config_load btsp
++	config_get dev global dev "/dev/rfcomm0"
++	rfcomm release "$dev" 2>/dev/null
++	pkill -f "rfcomm bind $dev" 2>/dev/null
++}
++
++btsp_status() {
++	config_load btsp
++	config_get dev global dev "/dev/rfcomm0"
++	if rfcomm | grep -q "$dev"; then
++		echo "running"
++	else
++		echo "stopped"
++	fi
++}
++
++start_service() {
++	btsp_start
++}
++
++stop_service() {
++	btsp_stop
++}
++
++service_triggers() {
++	procd_add_reload_trigger "btsp"
++}
++
++reload_service() {
++	stop_service
++	start_service
++}
++
++action_scan() {
++	bluetoothctl scan on &
++	sleep 4
++	bluetoothctl devices
++	bluetoothctl scan off
++}
++
++action_pair() {
++	local mac="$1"
++	[ -z "$mac" ] && return 1
++	bluetoothctl pair "$mac"
++	bluetoothctl trust "$mac"
++}
++
++action_bind() {
++	local dev="$1"
++	local mac="$2"
++	local ch="$3"
++	rfcomm bind "$dev" "$mac" "$ch"
++}
++
++action_release() {
++	local dev="$1"
++	rfcomm release "$dev"
++}
++
++case "$1" in
++	scan) action_scan ;;
++	pair) action_pair "$2" ;;
++	bind) action_bind "$2" "$3" "$4" ;;
++	release) action_release "$2" ;;
++	status) btsp_status ;;
++esac
++
++return 0
+diff --git a/feeds/pon_userspace/luci-app-btsp/root/etc/uci-defaults/99-btsp-defaults b/feeds/pon_userspace/luci-app-btsp/root/etc/uci-defaults/99-btsp-defaults
+new file mode 100644
+index 0000000..2088888
+--- /dev/null
++++ b/feeds/pon_userspace/luci-app-btsp/root/etc/uci-defaults/99-btsp-defaults
+@@ -0,0 +1,13 @@
++#!/bin/sh
++
++uci -q get btsp.global >/dev/null || {
++	uci set btsp.global=btsp
++	uci set btsp.global.enable=0
++	uci set btsp.global.mac=""
++	uci set btsp.global.channel=1
++	uci set btsp.global.dev="/dev/rfcomm0"
++	uci commit btsp
++}
++
++exit 0
+diff --git a/feeds/pon_userspace/luci-app-btsp/root/usr/share/luci/menu.d/luci-app-btsp.json b/feeds/pon_userspace/luci-app-btsp/root/usr/share/luci/menu.d/luci-app-btsp.json
+new file mode 100644
+index 0000000..d316222
+--- /dev/null
++++ b/feeds/pon_userspace/luci-app-btsp/root/usr/share/luci/menu.d/luci-app-btsp.json
+@@ -0,0 +1,11 @@
++{
++	"luci-app-btsp": {
++		"title": "蓝牙串口SPP",
++		"order": 90,
++		"action": {
++			"type": "view",
++			"path": "btsp"
++		},
++		"depends": { "acl": "luci-app-btsp" }
++	}
++}
+diff --git a/feeds/pon_userspace/luci-app-btsp/root/www/luci-app-btsp/btsp.lua b/feeds/pon_userspace/luci-app-btsp/root/www/luci-app-btsp/btsp.lua
+new file mode 100644
+index 0000000..3411111
+--- /dev/null
++++ b/feeds/pon_userspace/luci-app-btsp/root/www/luci-app-btsp/btsp.lua
+@@ -0,0 +1,187 @@
++local uci = require "luci.model.uci".cursor()
++local sys = require "luci.sys"
++local http = require "luci.http"
++local util = require "luci.util"
++
++local page = "btsp"
++local title = "蓝牙串口 SPP(RFCOMM)"
++
++http.header("Cache-Control", "no-cache")
++http.prepare_content("text/html; charset=utf-8")
++
++local function html_head()
++	print([[
++<!DOCTYPE html>
++<html>
++<head>
++<meta charset="utf-8">
++<title>]]..title..[[</title>
++<link rel="stylesheet" href="/luci-static/bootstrap/cascade.css">
++<style>.wrap{padding:15px;}.log{background:#111;color:#0f0;padding:8px;font-family:monospace;white-space:pre-wrap;max-height:240px;overflow:auto;}</style>
++</head>
++<body class="wrap">
++<h2>]]..title..[[</h2>
++]])
++end
++
++local function html_foot()
++	print([[</body></html>]])
++end
++
++local function get_cfg()
++	local c = {}
++	c.enable = uci:get("btsp","global","enable") or "0"
++	c.mac = uci:get("btsp","global","mac") or ""
++	c.channel = uci:get("btsp","global","channel") or "1"
++	c.dev = uci:get("btsp","global","dev") or "/dev/rfcomm0"
++	c.status = sys.exec("/etc/init.d/btsp status")
++	return c
++end
++
++local function save_cfg()
++	if http.formvalue("save") then
++		uci:set("btsp","global","enable", http.formvalue("enable") or "0")
++		uci:set("btsp","global","mac", http.formvalue("mac") or "")
++		uci:set("btsp","global","channel", http.formvalue("channel") or "1")
++		uci:set("btsp","global","dev", http.formvalue("dev") or "/dev/rfcomm0")
++		uci:commit("btsp")
++	end
++end
++
++local function action_run()
++	local act = http.formvalue("action")
++	if act == "scan" then
++		return sys.exec("/etc/init.d/btsp scan")
++	elseif act == "pair" then
++		local m = http.formvalue("pairmac")
++		return sys.exec("/etc/init.d/btsp pair "..util.shellquote(m))
++	elseif act == "start" then
++		sys.exec("/etc/init.d/btsp start")
++		return "Started"
++	elseif act == "stop" then
++		sys.exec("/etc/init.d/btsp stop")
++		return "Stopped"
++	end
++	return ""
++end
++
++save_cfg()
++local action_out = action_run()
++local cfg = get_cfg()
++
++html_head()
++print([[
++<form method="post">
++<fieldset>
++<legend>基础配置</legend>
++<div class="cbi-section">
++<div class="cbi-row">
++<label>开机自动启用：</label>
++<input type="checkbox" name="enable" value="1" ]]..(cfg.enable=="1" and "checked" or "")..[[>
++</div>
++<div class="cbi-row">
++<label>蓝牙MAC地址：</label>
++<input type="text" name="mac" value="]]..cfg.mac..[[" placeholder="AA:BB:CC:DD:EE:FF">
++</div>
++<div class="cbi-row">
++<label>RFCOMM通道号(一般1)：</label>
++<input type="number" name="channel" value="]]..cfg.channel..[[" min="1" max="30">
++</div>
++<div class="cbi-row">
++<label>虚拟串口设备：</label>
++<select name="dev">
++<option value="/dev/rfcomm0" ]]..(cfg.dev=="/dev/rfcomm0" and "selected" or "")..[[>/dev/rfcomm0</option>
++<option value="/dev/rfcomm1" ]]..(cfg.dev=="/dev/rfcomm1" and "selected" or "")..[[>/dev/rfcomm1</option>
++<option value="/dev/rfcomm2" ]]..(cfg.dev=="/dev/rfcomm2" and "selected" or "")..[[>/dev/rfcomm2</option>
++<option value="/dev/rfcomm3" ]]..(cfg.dev=="/dev/rfcomm3" and "selected" or "")..[[>/dev/rfcomm3</option>
++</select>
++</div>
++<div class="cbi-row">
++<input type="submit" name="save" value="保存配置" class="btn cbi-button-action">
++</div>
++</div>
++</fieldset>
++</form>
++
++<fieldset>
++<legend>控制</legend>
++<form method="post">
++<p>当前状态：<strong>]]..cfg.status..[[</strong></p>
++<button type="submit" name="action" value="start" class="btn cbi-button-positive">启动RFCOMM</button>
++<button type="submit" name="action" value="stop" class="btn cbi-button-negative">停止RFCOMM</button>
++</form>
++</fieldset>
++
++<fieldset>
++<legend>扫描与配对</legend>
++<form method="post">
++<button type="submit" name="action" value="scan" class="btn cbi-button-action">扫描蓝牙设备（4秒）</button>
++</form>
++<div class="log">]]..action_out..[[</div>
++<form method="post">
++<input type="text" name="pairmac" placeholder="填入扫描出来的MAC">
++<button type="submit" name="action" value="pair" class="btn cbi-button-action">配对+信任设备</button>
++</form>
++</fieldset>
++
++<div class="alert alert-info">
++说明：适用于HC05/JDY-31这类蓝牙串口模块；绑定成功后 /dev/rfcommX 等同于普通串口，可给串口服务器、mqtt、脚本使用。<br>
++注意：新版bluez5的rfcomm命令部分版本缺失，如报错rfcomm not found，需要额外安装 bluez-compat 包。
++</div>
++]])
++
++html_foot()
+--
+2.49.0
