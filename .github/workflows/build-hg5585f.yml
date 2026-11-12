@@ -100,10 +100,6 @@ jobs:
           restore-keys: |
             hg5585f-toolchain-
 
-      # ============================================================================
-      # 修复：staging 缓存改为 restore + save 分离，key 带 run_id，确保失败时也能保存最新状态
-      # 这样下次运行能准确恢复"上次实际状态"，配合 .build_success 标记实现精准清理。
-      # ============================================================================
       - name: 恢复 staging 缓存 (Restore staging cache) ✅【修复：restore 独立，key 带 run_id】
         uses: actions/cache/restore@v4
         with:
@@ -143,12 +139,69 @@ jobs:
             sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile || true
           fi
 
+      # ============================================================================
+      # 修复上游 Feed 中的 Kconfig 递归依赖（qt5base / fwknop / mihomo）
+      # 1. qt5base：在 Config.in 的 OPENGL choice 块中添加 depends on PACKAGE_qt5base-gui
+      # 2. fwknop：移除 FWKNOPD_GPG 对 PACKAGE_fwknopd 的依赖，打破 select 链
+      # 3. mihomo：后续配置中显式禁用 mihomo-alpha，仅保留 mihomo-meta
+      # ============================================================================
+      - name: 修复上游 Kconfig 递归依赖 ✅【qt5base / fwknop / mihomo】
+        working-directory: ./ponwrt
+        run: |
+          echo ">>> 修复 mihomo 递归依赖（Makefile 层面，双保险）"
+          find feeds/nikki -name 'Makefile' -path '*mihomo*' -exec sed -i \
+            -e 's/+PACKAGE_mihomo-meta//g' \
+            -e 's/+PACKAGE_mihomo-alpha//g' {} + 2>/dev/null || true
+          find feeds/packages -name 'Makefile' -path '*mihomo*' -exec sed -i \
+            -e 's/+PACKAGE_mihomo-meta//g' \
+            -e 's/+PACKAGE_mihomo-alpha//g' {} + 2>/dev/null || true
+
+          echo ">>> 修复 qt5base 递归依赖：OPENGL choice 仅依赖 qt5base-gui"
+          QT5_CONFIG=$(find feeds/video -path '*qt5base/Config.in' -type f 2>/dev/null | head -1)
+          if [ -n "$QT5_CONFIG" ]; then
+            echo ">>> 找到 $QT5_CONFIG，在 OPENGL choice 块中插入 depends on PACKAGE_qt5base-gui"
+            awk '
+              /^[[:space:]]*choice[[:space:]]*$/ { in_choice=1; choice_buf=$0 "\n"; next }
+              in_choice {
+                choice_buf = choice_buf $0 "\n"
+                if (/^[[:space:]]*endchoice[[:space:]]*$/) {
+                  if (choice_buf ~ /BUILD_qt5base-gui_OPENGL/ && choice_buf !~ /depends on PACKAGE_qt5base-gui/) {
+                    sub(/^[[:space:]]*choice[[:space:]]*$/,
+                        "choice\n\t\tdepends on PACKAGE_qt5base-gui", choice_buf)
+                  }
+                  printf "%s", choice_buf
+                  in_choice=0
+                }
+                next
+              }
+              { print }
+            ' "$QT5_CONFIG" > "${QT5_CONFIG}.tmp" && mv "${QT5_CONFIG}.tmp" "$QT5_CONFIG"
+            grep -n -A2 'choice' "$QT5_CONFIG" | head -10
+          else
+            echo "::warning::未找到 qt5base/Config.in，跳过 qt5base 递归依赖修复"
+          fi
+
+          echo ">>> 修复 fwknop 递归依赖：移除 FWKNOPD_GPG 对 PACKAGE_fwknopd 的依赖"
+          FWKNOP_CONFIG=$(find feeds/packages -path '*fwknop/Config.in' -type f 2>/dev/null | head -1)
+          if [ -n "$FWKNOP_CONFIG" ]; then
+            sed -i '/config FWKNOPD_GPG/,/^config /{/depends on PACKAGE_fwknopd/d}' "$FWKNOP_CONFIG"
+            echo ">>> 已处理 $FWKNOP_CONFIG"
+          else
+            echo "::warning::未找到 fwknop/Config.in，尝试修改 luci-app-fwknopd 依赖"
+            FWK_LUCI_MK=$(find feeds/luci -path '*luci-app-fwknopd/Makefile' -type f 2>/dev/null | head -1)
+            if [ -n "$FWK_LUCI_MK" ]; then
+              sed -i 's/+FWKNOPD_GPG//g' "$FWK_LUCI_MK"
+              echo ">>> 已从 $FWK_LUCI_MK 移除 +FWKNOPD_GPG 依赖"
+            fi
+          fi
+
+          echo ">>> 递归依赖修复完成（mihomo-alpha 将在主配置段禁用，独立编译阶段再单独切换）"
+
       - name: 将 luci-app-airoha-npu 克隆到 package 目录 + 自动同步子模块
         working-directory: ./ponwrt
         run: |
           rm -rf package/luci-app-airoha-npu
           git clone --depth=1 https://github.com/rchen14b/luci-app-airoha-npu.git package/luci-app-airoha-npu
-          # 通用子模块检测逻辑：存在 .gitmodules 就自动拉取
           if [ -f package/luci-app-airoha-npu/.gitmodules ]; then
             echo ">>> 检测到子模块，开始同步 submodule"
             git -C package/luci-app-airoha-npu submodule update --init --recursive --depth=1
@@ -156,8 +209,6 @@ jobs:
           rm -rf package/luci-app-airoha-npu/.git package/luci-app-airoha-npu/.github package/luci-app-airoha-npu/screenshots
           rm -rf package/luci-app-airoha-npu/luci-app-airoha-npu
           echo ">>> luci-app-airoha-npu 已克隆到 package/ 目录，嵌套目录已删除"
-          # 说明：luci-app-airoha-npu 是标准 LuCI 包，包名由 luci.mk 根据目录名隐式生成，
-          # 其 Makefile 中没有 PKG_NAME 是正常的。此处改为检查 LUCI_TITLE，避免误报警告。
           echo ">>> 当前 Makefile 中的 LUCI_TITLE:"
           grep -m1 'LUCI_TITLE' package/luci-app-airoha-npu/Makefile || echo "::warning::未找到 LUCI_TITLE"
 
@@ -205,24 +256,18 @@ jobs:
             https://raw.githubusercontent.com/openwrt/openwrt/master/package/libs/libffi/Makefile
           grep -q 'PKG_NAME:=libffi' package/libs/libffi/Makefile && echo ">>> libffi 注入成功" || exit 1
 
-      - name: 生成并锁定 HG5585F-CT 配置 ✅【修复：defconfig 重建基础配置，显式启用 DEBUG_FS】
+      - name: 生成并锁定 HG5585F-CT 配置 ✅【defconfig 重建基础，显式启用 DEBUG_FS，禁用 mihomo-alpha】
         working-directory: ./ponwrt
         run: |
           rm -rf tmp
-          # 1. 合并基础配置，生成初始 .config
           perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
-
-          # 2. 关键修复：用 defconfig 强制生成与 Kconfig 完全一致的新 .config
-          #    这会消除因手动追加导致的"out of sync"冲突，使后续 olddefconfig 不会失败。
           make defconfig
 
-          # 3. 删除冲突的自动生成符号，锁定单一机型
           sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
           sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
           sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
           sed -i '/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
 
-          # 4. 注入基础自定义配置
           cat >> .config << 'EOF'
           # CONFIG_TARGET_ALL_PROFILES is not set
           # CONFIG_TARGET_MULTI_PROFILE is not set
@@ -237,7 +282,6 @@ jobs:
           # CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set
           EOF
 
-          # 5. 注入全部自定义内核/软件包配置（包含 DEBUG_FS 修复）
           cat >> .config << 'EOF'
           # --- PON 修复 ---
           CONFIG_PACKAGE_kmod-airoha-paged-bosa=y
@@ -253,6 +297,9 @@ jobs:
           CONFIG_PACKAGE_kmod-dummy=y
           # --- mihomo ---
           CONFIG_PACKAGE_mihomo-meta=y
+          # 显式禁用 mihomo-alpha，打破与 mihomo-meta 的 Kconfig 循环依赖
+          # 注意：mihomo-alpha 将在"尝试编译独立软件包"阶段最后单独切换编译
+          # CONFIG_PACKAGE_mihomo-alpha is not set
           CONFIG_PACKAGE_nikki=y
           CONFIG_PACKAGE_luci-app-nikki=y
           CONFIG_PACKAGE_luci-i18n-nikki-zh-cn=y
@@ -281,7 +328,7 @@ jobs:
           # --- omcproxy ---
           CONFIG_PACKAGE_omcproxy=y
           CONFIG_PACKAGE_luci-app-omcproxy=y
-          # ========== USB 底层模块（=m，开启内核支持，供后续SDK编译上层共享/摄像头） ==========
+          # ========== USB 底层模块（=m） ==========
           CONFIG_PACKAGE_kmod-usb-xhci=m
           CONFIG_PACKAGE_kmod-usb-storage=m
           CONFIG_PACKAGE_kmod-usb-storage-extras=m
@@ -290,21 +337,16 @@ jobs:
           CONFIG_PACKAGE_kmod-fs-ntfs3=m
           CONFIG_PACKAGE_block-mount=m
           CONFIG_PACKAGE_usbutils=m
-          # USB摄像头 UVC / V4L2
           CONFIG_PACKAGE_kmod-video-v4l2=m
           CONFIG_PACKAGE_kmod-video-uvc=m
-          # 可选扩展：USB串口、USB网卡
           CONFIG_PACKAGE_kmod-usb-serial=m
           CONFIG_PACKAGE_kmod-usb-net=m
-          # --- USB 二合一无线网卡驱动（独立IPK，不打包进固件） ---
-          # rtw88 驱动 RTL8821CU / RTL8822BU 二合一网卡（WiFi+蓝牙，5G+2.4G）
           CONFIG_PACKAGE_kmod-rtw88=m
           CONFIG_PACKAGE_kmod-rtw88-usb=m
           CONFIG_PACKAGE_kmod-rtw88-8822c=m
           CONFIG_PACKAGE_kmod-rtw88-8822cu=m
           CONFIG_PACKAGE_usb-modeswitch=m
           CONFIG_PACKAGE_usb-modeswitch-data=m
-          # RTL8723BU (RTL8723B USB) 二合一网卡第三方驱动（仅2.4G，WiFi+蓝牙）
           CONFIG_PACKAGE_kmod-rtl8723bu=m
           # --- 独立包不参与固件 ---
           # CONFIG_PACKAGE_luci-app-iptv is not set
@@ -318,31 +360,25 @@ jobs:
           # CONFIG_PACKAGE_luci-app-ser2net4 is not set
 
           # ============================================================
-          # 修复：直接显式开启内核 DEBUG_FS 及相关调试功能
-          # 依据：luci-app-airoha-npu 的 PPE 流表依赖 CONFIG_KERNEL_DEBUG_FS；
-          #       Frame Engine / 超频功能依赖 busybox devmem。
-          # 说明：CONFIG_KERNEL_DEBUG_FS 是 OpenWrt 内核 Kconfig 独立布尔项，
-          #       不依赖在 target/linux/airoha 下能否找到文本型 CONFIG_DEBUG_FS=y，
-          #       因此放弃自动检测，直接写入最稳妥。
+          # 显式开启内核 DEBUG_FS 及调试功能
           # ============================================================
           CONFIG_KERNEL_DEBUG_FS=y
           CONFIG_KERNEL_DEVMEM=y
           CONFIG_BUSYBOX_CONFIG_DEVMEM=y
           EOF
 
-          # 6. 最后运行 olddefconfig，让 Kconfig 统一校验追加项依赖
           make olddefconfig
 
-          # 7. 校验单一机型锁定
           sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
           if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y$' .config; then
             echo "::error::HG5585F-CT 单一机型锁定校验失败！"; exit 1
           fi
 
-          # 8. 调试输出：确认 DEBUG_FS 等关键选项已生效
           echo "==== 校验关键内核模块与调试选项 ===="
           grep -E 'CONFIG_KERNEL_DEBUG_FS|CONFIG_KERNEL_DEVMEM|CONFIG_BUSYBOX_CONFIG_DEVMEM' .config || true
           grep -E 'CONFIG_PACKAGE_kmod-nft-tproxy|CONFIG_PACKAGE_kmod-tun|CONFIG_PACKAGE_kmod-iptv|CONFIG_PACKAGE_kmod-usb-xhci' .config
+          echo "==== 校验 mihomo-alpha 已禁用 ===="
+          grep 'mihomo-alpha' .config || echo ">>> mihomo-alpha 未出现在 .config 中（已禁用，将在独立包阶段切换）"
           echo ">>> 固件配置完成"
 
       - name: 下载源码软件包 (容错)
@@ -355,33 +391,20 @@ jobs:
           make download -j1 V=s || { echo "::warning::仍有下载失败"; }
           find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
 
-      # ============================================================================
-      # 修复：编译前检查上次构建状态。
-      # - 上次成功（存在 .build_success）：保留全部缓存，仅清理 tmp，避免全量重编。
-      # - 上次失败（无标记）：只删除最可能损坏的部分（全局 stamp + tmp），
-      #   不删除 dl/、toolchain、host、build_dir 下的包源码，做到"只删必要的"。
-      # 编译结束后统一写入/不写入 .build_success，供下次判断。
-      # ============================================================================
-      - name: 检查上次构建状态并精准清理缓存 ✅【新增：失败时只删必要文件，成功时保留缓存】
+      - name: 检查上次构建状态并精准清理缓存 ✅【失败时只删必要文件，成功时保留缓存】
         working-directory: ./ponwrt
         run: |
           if [ -f staging_dir/.build_success ]; then
             echo ">>> 上次构建成功，保留缓存，仅清理 tmp"
             rm -rf tmp
-            echo ">>> 已保留：staging_dir（含 stamp）、dl/、toolchain、host、build_dir"
           else
             echo ">>> 上次构建失败或无成功标记，精准清理（不删除 dl/ 与工具链）"
-            # 删除全局 stamp，强制 OpenWrt 重新检查包依赖状态
             rm -rf staging_dir/target-aarch64_cortex-a53_musl/stamp
-            # 删除 tmp 临时目录
             rm -rf tmp
-            echo ">>> 已清理：staging_dir/target-*/stamp、tmp"
-            echo ">>> 已保留：dl/、staging_dir/toolchain-*、staging_dir/host、build_dir 下的包源码"
           fi
-          # 删除旧标记，等待本次编译成功后重新写入
           rm -f staging_dir/.build_success
 
-      - name: 执行固件编译 (Compile Firmware) ✅【修复：移除无条件的 stamp 删除】
+      - name: 执行固件编译 (Compile Firmware)
         working-directory: ./ponwrt
         run: |
           export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
@@ -390,20 +413,17 @@ jobs:
           export GOENV=off
           export GOTOOLCHAIN=local
           mkdir -p logs
-          # 注意：不再无条件删除 staging_dir/target-*/stamp，
-          # 是否清理由上一"检查上次构建状态"步骤按需决定，避免每次全量重编。
           make package/libs/libffi/compile -j"$(nproc)" V=s || true
           set -o pipefail
           make -j"$(nproc)" 2>&1 | tee logs/build.log || \
             (echo ">>> 并行编译失败，回退单线程" && make -j1 V=s 2>&1 | tee -a logs/build.log)
 
-      - name: 标记构建成功 ✅【新增：写入成功标记，供下次判断】
+      - name: 标记构建成功 ✅【写入成功标记，供下次判断】
         if: success()
         working-directory: ./ponwrt
         run: |
           mkdir -p staging_dir
           touch staging_dir/.build_success
-          echo ">>> 已写入构建成功标记 staging_dir/.build_success"
 
       - name: 整理产物 (Collect Firmware)
         run: |
@@ -421,17 +441,15 @@ jobs:
             ls -lh
           )
 
-      - name: 尝试编译独立软件包（失败不影响固件）【新增 ch341 + ser2net4全套】
+      - name: 尝试编译独立软件包（失败不影响固件）✅【末尾新增 mihomo-meta + mihomo-alpha 分阶段独立编译】
         working-directory: ./ponwrt
         run: |
           set +e
           echo ">>> 固件编译完成，开始尝试独立包"
           echo ">>> 任何失败均不影响固件"
 
-          # 关键修复：生成 luci-app-iptv / blueaudio / btsp / camlive / ch341 / ser2net4 package软链接
           ./scripts/feeds install luci-app-iptv luci-app-blueaudio luci-app-btsp luci-app-camlive kmod-usb-serial-ch341 ser2net4 luci-app-ser2net4
 
-          # 配置独立包为 =m
           sed -i 's|^# CONFIG_PACKAGE_luci-app-iptv is not set$|CONFIG_PACKAGE_luci-app-iptv=m|' .config
           sed -i 's|^# CONFIG_PACKAGE_luci-app-airoha-npu is not set$|CONFIG_PACKAGE_luci-app-airoha-npu=m|' .config
           sed -i 's|^# CONFIG_PACKAGE_luci-app-airoha-soc is not set$|CONFIG_PACKAGE_luci-app-airoha-soc=m|' .config
@@ -445,25 +463,21 @@ jobs:
           sed -i 's|^# CONFIG_PACKAGE_usb-modeswitch is not set$|CONFIG_PACKAGE_usb-modeswitch=m|' .config
           sed -i 's|^# CONFIG_PACKAGE_usb-modeswitch-data is not set$|CONFIG_PACKAGE_usb-modeswitch-data=m|' .config
           sed -i 's|^# CONFIG_PACKAGE_kmod-rtl8723bu is not set$|CONFIG_PACKAGE_kmod-rtl8723bu=m|' .config
-          # 新增：CH341驱动 + ser2net4全套
           sed -i 's|^# CONFIG_PACKAGE_kmod-usb-serial-ch341 is not set$|CONFIG_PACKAGE_kmod-usb-serial-ch341=m|' .config
           sed -i 's|^# CONFIG_PACKAGE_ser2net4 is not set$|CONFIG_PACKAGE_ser2net4=m|' .config
           sed -i 's|^# CONFIG_PACKAGE_luci-app-ser2net4 is not set$|CONFIG_PACKAGE_luci-app-ser2net4=m|' .config
 
-          # 修复：使用 olddefconfig，不重置已设置=m
           make olddefconfig >/dev/null 2>&1
 
           echo ">>> 当前config独立包状态"
           grep -E 'CONFIG_PACKAGE_luci-app-iptv|CONFIG_PACKAGE_luci-app-airoha-npu|CONFIG_PACKAGE_luci-app-airoha-soc|CONFIG_PACKAGE_luci-app-blueaudio|CONFIG_PACKAGE_luci-app-btsp|CONFIG_PACKAGE_luci-app-camlive|CONFIG_PACKAGE_kmod-rtw88|CONFIG_PACKAGE_kmod-rtl8723bu|CONFIG_PACKAGE_kmod-usb-serial-ch341|CONFIG_PACKAGE_ser2net4|CONFIG_PACKAGE_luci-app-ser2net4' .config
 
-          # --- luci-app-iptv ---
           echo ">>> 下载 luci-app-iptv"
           make package/luci-app-iptv/download V=s 2>&1 | tail -3 || echo "::warning::iptv 下载失败"
           echo ">>> 编译 luci-app-iptv"
           make package/luci-app-iptv/compile -j"$(nproc)" V=s 2>&1 | tee logs/iptv-pkg.log | tail -20
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::luci-app-iptv 编译失败（不影响固件）" || echo ">>> luci-app-iptv 成功"
 
-          # --- airoha NPU/SOC 状态页（自动探测包名）---
           NPU_PKG=""
           if ./scripts/feeds list -n 2>/dev/null | grep -q '^luci-app-airoha-npu$'; then
             NPU_PKG="luci-app-airoha-npu"
@@ -484,35 +498,30 @@ jobs:
             echo "::warning::未检测到 airoha-npu/soc 包，跳过"
           fi
 
-          # --- luci-app-blueaudio 蓝牙音频切换 ---
           echo ">>> 下载 luci-app-blueaudio"
           make package/luci-app-blueaudio/download V=s 2>&1 | tail -3 || echo "::warning::luci-app-blueaudio 下载失败"
           echo ">>> 编译 luci-app-blueaudio"
           make package/luci-app-blueaudio/compile -j"$(nproc)" V=s 2>&1 | tee logs/blueaudio-pkg.log | tail -20
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::luci-app-blueaudio 编译失败（不影响固件）" || echo ">>> luci-app-blueaudio 成功"
 
-          # --- luci-app-btsp ---
           echo ">>> 下载 luci-app-btsp"
           make package/luci-app-btsp/download V=s 2>&1 | tail -3 || echo "::warning::luci-app-btsp 下载失败"
           echo ">>> 编译 luci-app-btsp"
           make package/luci-app-btsp/compile -j"$(nproc)" V=s 2>&1 | tee logs/btsp-pkg.log | tail -20
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::luci-app-btsp 编译失败（不影响固件）" || echo ">>> luci-app-btsp 成功"
 
-          # --- luci-app-camlive 摄像头直播 ---
           echo ">>> 下载 luci-app-camlive"
           make package/luci-app-camlive/download V=s 2>&1 | tail -3 || echo "::warning::luci-app-camlive 下载失败"
           echo ">>> 编译 luci-app-camlive"
           make package/luci-app-camlive/compile -j"$(nproc)" V=s 2>&1 | tee logs/camlive-pkg.log | tail -20
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::luci-app-camlive 编译失败（不影响固件）" || echo ">>> luci-app-camlive 成功"
 
-          # --- CH340 CH341 串口驱动 kmod-usb-serial-ch341 ---
           echo ">>> 下载 kmod-usb-serial-ch341"
           make package/kmod-usb-serial-ch341/download V=s 2>&1 | tail -3 || echo "::warning::kmod-usb-serial-ch341 下载失败"
           echo ">>> 编译 kmod-usb-serial-ch341"
           make package/kmod-usb-serial-ch341/compile -j"$(nproc)" V=s 2>&1 | tee logs/ch341-pkg.log | tail -20
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::kmod-usb-serial-ch341 编译失败（不影响固件）" || echo ">>> kmod-usb-serial-ch341 成功"
 
-          # --- ser2net4 + luci-app-ser2net4 串口转网络全套 ---
           echo ">>> 下载 ser2net4"
           make package/ser2net4/download V=s 2>&1 | tail -3 || echo "::warning::ser2net4 下载失败"
           echo ">>> 编译 ser2net4"
@@ -525,7 +534,6 @@ jobs:
           make package/luci-app-ser2net4/compile -j"$(nproc)" V=s 2>&1 | tee logs/luci-ser2net4-pkg.log | tail -20
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::luci-app-ser2net4 编译失败（不影响固件）" || echo ">>> luci-app-ser2net4 成功"
 
-          # --- rtw88 驱动 RTL8821CU / RTL8822BU 无线网卡驱动 + usb-modeswitch ---
           echo ">>> 编译 rtw88 系列驱动"
           make package/kernel/rtw88/download V=s 2>&1 | tail -3 || echo "::warning::rtw88 下载失败"
           make package/kernel/rtw88/compile -j"$(nproc)" V=s 2>&1 | tee logs/rtw88-pkg.log | tail -20
@@ -535,11 +543,44 @@ jobs:
           make package/feeds/packages/usb-modeswitch/compile -j"$(nproc)" V=s 2>&1 | tee logs/usb-modeswitch-pkg.log | tail -20
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::usb-modeswitch 编译失败（不影响固件）" || echo ">>> usb-modeswitch 成功"
 
-          # --- rtl8723bu 第三方网卡驱动 ---
           echo ">>> 编译 rtl8723bu 驱动"
           make package/kernel/rtl8723bu/download V=s 2>&1 | tail -3 || echo "::warning::rtl8723bu 下载失败"
           make package/kernel/rtl8723bu/compile -j"$(nproc)" V=s 2>&1 | tee logs/rtl8723bu-pkg.log | tail -20
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::rtl8723bu 驱动编译失败（不影响固件）" || echo ">>> rtl8723bu 驱动成功"
+
+          # ============================================================
+          # 新增：分阶段编译 mihomo-meta 与 mihomo-alpha 的独立 ipk
+          # 说明：两者在 Kconfig 中相互声明依赖，同一时刻只能激活一个。
+          #   阶段 1：当前 .config 中 mihomo-meta=y，先编译 meta 的 ipk。
+          #   阶段 2：切换到 mihomo-alpha=m 且禁用 mihomo-meta，打破循环，再编译 alpha 的 ipk。
+          #   阶段 3：编译结束后切回 meta=y，保持 .config 与固件一致。
+          # ============================================================
+          echo ">>> ============ 阶段 1：编译 mihomo-meta 独立 ipk ============"
+          echo ">>> 当前 mihomo-meta 配置状态："
+          grep -E 'CONFIG_PACKAGE_mihomo-(meta|alpha)' .config || true
+          make package/feeds/nikki/mihomo-meta/compile -j"$(nproc)" V=s 2>&1 | tee logs/mihomo-meta-pkg.log | tail -20
+          META_RC=${PIPESTATUS[0]}
+          [ $META_RC -ne 0 ] && echo "::warning::mihomo-meta 独立包编译失败（不影响固件）" || echo ">>> mihomo-meta 独立包成功"
+
+          echo ">>> ============ 阶段 2：切换到 mihomo-alpha 并编译 ============"
+          # 禁用 mihomo-meta，启用 mihomo-alpha，切断循环依赖
+          sed -i 's|^CONFIG_PACKAGE_mihomo-meta=y$|# CONFIG_PACKAGE_mihomo-meta is not set|' .config
+          sed -i 's|^# CONFIG_PACKAGE_mihomo-alpha is not set$|CONFIG_PACKAGE_mihomo-alpha=m|' .config
+          make olddefconfig >/dev/null 2>&1
+          echo ">>> 切换后 mihomo 配置状态："
+          grep -E 'CONFIG_PACKAGE_mihomo-(meta|alpha)' .config || true
+          make package/feeds/nikki/mihomo-alpha/compile -j"$(nproc)" V=s 2>&1 | tee logs/mihomo-alpha-pkg.log | tail -20
+          ALPHA_RC=${PIPESTATUS[0]}
+          [ $ALPHA_RC -ne 0 ] && echo "::warning::mihomo-alpha 独立包编译失败（不影响固件）" || echo ">>> mihomo-alpha 独立包成功"
+
+          echo ">>> ============ 阶段 3：恢复 .config 为 meta=y 状态 ============"
+          # 恢复主配置：mihomo-meta=y，mihomo-alpha 禁用，与固件镜像保持一致
+          sed -i 's|^CONFIG_PACKAGE_mihomo-meta=y$|CONFIG_PACKAGE_mihomo-meta=y|' .config
+          sed -i 's|^# CONFIG_PACKAGE_mihomo-meta is not set$|CONFIG_PACKAGE_mihomo-meta=y|' .config
+          sed -i 's|^CONFIG_PACKAGE_mihomo-alpha=m$|# CONFIG_PACKAGE_mihomo-alpha is not set|' .config
+          make olddefconfig >/dev/null 2>&1
+          echo ">>> 恢复后 mihomo 配置状态："
+          grep -E 'CONFIG_PACKAGE_mihomo-(meta|alpha)' .config || true
 
           echo ">>> 【调试】打印bin目录结构，查看apk实际输出位置"
           ls -la bin/
@@ -561,12 +602,12 @@ jobs:
           done
           ls -la ../ipk_out || true
 
-      - name: 收集独立软件包（如成功）【修复noarch包搜索 + 新增ch341 + ser2net4】
+      - name: 收集独立软件包（如成功）✅【pkg_list 新增 mihomo-meta + mihomo-alpha】
         if: always()
         working-directory: ./ponwrt
         run: |
           mkdir -p ../ipk_out
-          pkg_list="luci-app-iptv luci-app-airoha-npu luci-app-airoha-soc luci-app-blueaudio luci-app-btsp luci-app-camlive kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822c kmod-rtw88-8822cu usb-modeswitch usb-modeswitch-data kmod-rtl8723bu kmod-usb-serial-ch341 ser2net4 luci-app-ser2net4"
+          pkg_list="luci-app-iptv luci-app-airoha-npu luci-app-airoha-soc luci-app-blueaudio luci-app-btsp luci-app-camlive kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822c kmod-rtw88-8822cu usb-modeswitch usb-modeswitch-data kmod-rtl8723bu kmod-usb-serial-ch341 ser2net4 luci-app-ser2net4 mihomo-meta mihomo-alpha"
           for pkg in $pkg_list; do
             found=0
             while IFS= read -r -d '' f; do
@@ -575,7 +616,7 @@ jobs:
             done < <(find bin -type f \( -name "${pkg}*.apk" -o -name "${pkg}*.ipk" \) -print0 )
             [ "$found" -eq 1 ] && echo ">>> 已收集 $pkg" || echo "::notice::$pkg 未生成，跳过"
           done
-          ls -lh ../ipk_out/luci-app-*.apk ../ipk_out/luci-app-*.ipk ../ipk_out/kmod-*.ipk ../ipk_out/usb-modeswitch*.ipk ../ipk_out/ser2net4*.ipk 2>/dev/null || true
+          ls -lh ../ipk_out/luci-app-*.apk ../ipk_out/luci-app-*.ipk ../ipk_out/kmod-*.ipk ../ipk_out/usb-modeswitch*.ipk ../ipk_out/ser2net4*.ipk ../ipk_out/mihomo-*.ipk 2>/dev/null || true
 
       - name: 上传固件 Artifact
         if: success()
@@ -614,7 +655,7 @@ jobs:
           sha256sum "${files[@]}" > SHA256SUMS
           ls -lh
 
-      - name: 创建 GitHub 预发布【更新说明：增加ch341、ser2net4全套】
+      - name: 创建 GitHub 预发布 ✅【说明新增 mihomo-meta / mihomo-alpha 双 ipk】
         if: success()
         uses: softprops/action-gh-release@v2.0.8
         with:
@@ -625,21 +666,16 @@ jobs:
           generate_release_notes: true
           body: |
             PonWrt HG5585F-CT 集成版自动预发布。
-            包含固件镜像、软件包压缩包、独立 luci-app-iptv / airoha-npu / luci-app-blueaudio(蓝牙音频切换) / luci-app-btsp / luci-app-camlive(摄像头直播)、
-            **CH340(CH341) USB串口驱动 kmod-usb-serial-ch341、ser2net4 + luci-app-ser2net4 串口转网络全套**、
-            USB全套内核模块ipk、RTL8821CU/RTL8723BU二合一无线网卡驱动ipk（如编译成功）及 SHA256SUMS。
-            注意：这是预发布，仅用于测试验证。
-            USB底层驱动已内置支持（xhci/存储/ntfs3/vfat/ext4/uvc摄像头/usb-serial/usb-net）
-            Samba4、NFS、CUPS、mjpg-streamer 上层应用请使用SDK分包工作流编译。
+            包含固件镜像、软件包压缩包、独立 luci-app-iptv / airoha-npu / luci-app-blueaudio / luci-app-btsp / luci-app-camlive、
+            CH340(CH341) USB串口驱动、ser2net4 + luci-app-ser2net4 全套、
+            USB内核模块 ipk、RTL8821CU/RTL8723BU 二合一无线网卡驱动 ipk，
+            **以及 mihomo-meta 与 mihomo-alpha 两个 Mihomo 内核变体的独立 ipk** 及 SHA256SUMS。
+            ⚠️ 注意：mihomo-meta 与 mihomo-alpha 在设备上互斥，安装时只能二选一；
+            固件镜像内置的是 mihomo-meta（稳定版），Alpha 版以独立 ipk 形式提供。
+            这是预发布，仅用于测试验证。
           files: release_out/*
 
-      # ============================================================================
-      # 修复：保存 staging 缓存。使用 always() 确保成功/失败都保存最新状态，
-      # 配合 key 带 run_id，下次运行能准确恢复本次实际状态（含/不含 .build_success），
-      # 从而实现"上次失败才精准清理，上次成功保留缓存"的逻辑。
-      # 不再单独使用"失败时保存缓存"步骤，避免 key 不一致导致状态错乱。
-      # ============================================================================
-      - name: 保存 staging 缓存 (Save staging cache) ✅【修复：always 运行，失败也保存】
+      - name: 保存 staging 缓存 (Save staging cache) ✅【always 运行，失败也保存】
         if: always()
         continue-on-error: true
         uses: actions/cache/save@v4
