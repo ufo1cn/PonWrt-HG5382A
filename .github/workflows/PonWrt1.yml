@@ -1,12 +1,6 @@
 name: 编译 PonWrt HG5382A 集成版固件 (mihomo + sing-box + IPTV + omcproxy + GPON)
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/**'
-      - 'patches/**'
-      - 'scripts/**'
 permissions:
   contents: write
 concurrency:
