@@ -138,18 +138,15 @@ jobs:
           fi
 
       # ============================================================================
-      # 修复上游 Kconfig 递归依赖（彻底切断四条循环边）
-      # 1. qt5base：choice 块内给 default 也加 if PACKAGE_qt5base-gui 条件
-      # 2. fwknop：同时修改 menu 级和 FWKNOPD_GPG 配置块内部的 depends
-      # 3. squeezelite：从 DEPENDS 中移除 +SQUEEZELITE_WMA_ALAC，并保留 BUILD_PATENTED
-      # 4. mihomo：从 Makefile 层面移除 alpha 与 meta 之间的相互 DEPENDS
+      # 修复上游 Kconfig 递归依赖（针对 qt5base / fwknop / mihomo 切断真实循环边）
+      # squeezelite 的循环已在上一轮修复中消除，无需重复处理。
       # ============================================================================
-      - name: 修复上游 Kconfig 递归依赖 ✅【彻底切断四条循环边，失败即报错】
+      - name: 修复上游 Kconfig 递归依赖 ✅【针对 qt5base / fwknop / mihomo 切断真实循环边】
         working-directory: ./ponwrt
         run: |
           set -e
 
-          # ---------- 1. qt5base：choice 块内给 default 也加上条件 ----------
+          # ---------- 1. qt5base：choice 块内同时给 depends 和 default 加条件 ----------
           QT5_CONFIG="feeds/video/frameworks/qt5/qt5base/Config.in"
           if [ -f "$QT5_CONFIG" ]; then
             echo ">>> 修复 qt5base: $QT5_CONFIG"
@@ -195,7 +192,7 @@ jobs:
             echo "::error::未找到 $QT5_CONFIG"; exit 1
           fi
 
-          # ---------- 2. fwknop：同时修改 menu 级和 FWKNOPD_GPG 内部的 depends ----------
+          # ---------- 2. fwknop：移除 FWKNOPD_GPG 内部的 depends on PACKAGE_fwknopd ----------
           FWKNOP_CONFIG="feeds/packages/net/fwknop/Config.in"
           if [ -f "$FWKNOP_CONFIG" ]; then
             echo ">>> 修复 fwknop: $FWKNOP_CONFIG"
@@ -215,59 +212,34 @@ jobs:
                   continue
               if in_gpg and stripped.startswith('config '):
                   in_gpg = False
-              if in_gpg and stripped.startswith('depends on PACKAGE_fwknopd') and '||' not in line:
-                  indent = line[:len(line) - len(line.lstrip())]
-                  out.append(indent + 'depends on PACKAGE_fwknopd || PACKAGE_fwknop\n')
-              else:
-                  out.append(line)
+              if in_gpg and stripped.startswith('depends on PACKAGE_fwknopd'):
+                  continue
+              out.append(line)
           with open(path, 'w') as f:
               f.writelines(out)
           PYEOF
-            echo ">>> fwknop 校验（menu 级 + FWKNOPD_GPG 内部）："
-            grep -n 'depends on PACKAGE_fwknop' "$FWKNOP_CONFIG"
-            if grep -A5 'config FWKNOPD_GPG' "$FWKNOP_CONFIG" | grep -q 'depends on PACKAGE_fwknopd$'; then
-              echo "::error::FWKNOPD_GPG 内部的 depends 仍未修正"
+            echo ">>> fwknop 校验："
+            grep -n 'depends on PACKAGE_fwknop' "$FWKNOP_CONFIG" || true
+            if grep -A6 'config FWKNOPD_GPG' "$FWKNOP_CONFIG" | grep -q 'depends on PACKAGE_fwknopd'; then
+              echo "::error::FWKNOPD_GPG 内部仍然残留 depends on PACKAGE_fwknopd"
               exit 1
             fi
           else
             echo "::error::未找到 $FWKNOP_CONFIG"; exit 1
           fi
 
-          # ---------- 3. squeezelite：从 DEPENDS 中移除 +SQUEEZELITE_WMA_ALAC，保留 BUILD_PATENTED ----------
-          SQZ_MK="feeds/packages/sound/squeezelite/Makefile"
-          if [ -f "$SQZ_MK" ]; then
-            echo ">>> 修复 squeezelite: $SQZ_MK"
-            # 移除 DEPENDS 行中对 SQUEEZELITE_WMA_ALAC 的引用（带 libffmpeg 后缀的）
-            sed -i 's/+SQUEEZELITE_WMA_ALAC:libffmpeg-audio-dec//g' "$SQZ_MK"
-            # 移除可能存在的裸 +SQUEEZELITE_WMA_ALAC
-            sed -i 's/+SQUEEZELITE_WMA_ALAC//g' "$SQZ_MK"
-            # 确保 SQUEEZELITE_WMA_ALAC / SQUEEZELITE_WMA 配置块有 BUILD_PATENTED 依赖
-            for cfg in SQUEEZELITE_WMA_ALAC SQUEEZELITE_WMA; do
-              if grep -q "config $cfg" "$SQZ_MK"; then
-                if ! grep -A3 "config $cfg" "$SQZ_MK" | grep -q 'BUILD_PATENTED'; then
-                  sed -i "/config $cfg/a\	depends on BUILD_PATENTED" "$SQZ_MK"
-                fi
-              fi
-            done
-            echo ">>> squeezelite DEPENDS 中是否仍有 SQUEEZELITE_WMA_ALAC："
-            grep 'DEPENDS.*SQUEEZELITE' "$SQZ_MK" || echo ">>> 已移除"
-            if grep -q 'DEPENDS.*SQUEEZELITE_WMA_ALAC' "$SQZ_MK"; then
-              echo "::error::DEPENDS 中仍存在 SQUEEZELITE_WMA_ALAC"
-              exit 1
-            fi
-          else
-            echo "::error::未找到 $SQZ_MK"; exit 1
-          fi
-
-          # ---------- 4. mihomo：从 Makefile 层面移除 alpha 与 meta 之间的相互 DEPENDS ----------
+          # ---------- 3. mihomo：从 Makefile 层面彻底移除 alpha 与 meta 的相互 DEPENDS ----------
           echo ">>> 修复 mihomo: 移除 mihomo-alpha 和 mihomo-meta 之间的相互依赖"
           for mk in $(find feeds/nikki -name 'Makefile' -path '*mihomo*' 2>/dev/null); do
             echo ">>> 处理 $mk"
             sed -i 's/+PACKAGE_mihomo-meta//g; s/+PACKAGE_mihomo-alpha//g' "$mk"
             sed -i 's/+mihomo-meta//g; s/+mihomo-alpha//g' "$mk"
+            sed -i 's/PROVIDES:=mihomo-meta mihomo-alpha/PROVIDES:=mihomo/g' "$mk"
+            sed -i 's/PROVIDES:=mihomo-alpha mihomo-meta/PROVIDES:=mihomo/g' "$mk"
           done
+          echo ">>> mihomo Makefile 修复完成"
 
-          echo ">>> 递归依赖边已彻底移除，准备重新生成配置"
+          echo ">>> 递归依赖边已针对性移除"
 
       - name: 将 luci-app-airoha-npu 克隆到 package 目录 + 自动同步子模块
         working-directory: ./ponwrt
@@ -617,10 +589,6 @@ jobs:
 
           # ============================================================
           # mihomo 双变体分阶段独立编译
-          # 说明：两者在 Kconfig 中相互声明依赖，同一时刻只能激活一个。
-          #   阶段 1：当前 .config 中 mihomo-meta=y，先编译 meta 的 ipk。
-          #   阶段 2：切换到 mihomo-alpha=m 且禁用 mihomo-meta，打破循环，再编译 alpha 的 ipk。
-          #   阶段 3：编译结束后切回 meta=y，保持 .config 与固件一致。
           # ============================================================
           echo ">>> ============ 阶段 1：编译 mihomo-meta 独立 ipk ============"
           grep -E 'CONFIG_PACKAGE_mihomo-(meta|alpha)' .config || true
