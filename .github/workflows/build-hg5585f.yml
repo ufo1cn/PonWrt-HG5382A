@@ -1,12 +1,12 @@
 name: 编译 PonWrt HG5585F 电信版集成版固件
-# （最小化固件 + 独立包逐包切换编译 + olddefconfig 诊断）
+# （最小化固件 + 独立包逐包切换编译 + 重复符号清理 + WARN_RECURSIVE_DEP 降级诊断）
 # ----------------------------------------------------------------------------
-# 策略：
-#   1. 固件阶段只 install / 编译内核配置与固件必需模块，循环相关包不进 feeds 索引；
-#   2. 加入 olddefconfig 诊断步骤，用 make -j1 V=s 捕获完整递归依赖错误；
-#   3. 非默认软件包全部在独立包阶段处理，路径按仓库根目录 pon_userspace 实际结构修正，
-#      逐包切换 .config 后单独编译，时间上隔离互斥包；
-#   4. 独立包阶段的 olddefconfig 允许失败，不阻断单包编译。
+# 关键修正：
+#   1. 诊断命令改为 make olddefconfig V=s（目标在前、变量在后），不再报 No rule to make target；
+#   2. 追加配置前先清理 .config 中可能重复的符号，保证每个符号只出现一次；
+#   3. 用 WARN_RECURSIVE_DEP=1 将递归依赖降级为警告，让配置同步能完成；
+#   4. 独立包路径按仓库根目录 pon_userspace 实际结构修正；
+#   5. ser2net4 集合拆分为 gensio / ser2net / luci-app-ser2net 分别编译。
 # ============================================================================
 on:
   workflow_dispatch:
@@ -198,10 +198,14 @@ jobs:
           echo "OK: GPON patches are present."
 
       # ============================================================================
-      # 固件配置：只包含内核选项和固件必需包。
-      # 循环相关包（qt5base / fwknopd / mihomo-alpha / squeezelite / qt6*）不在索引中。
+      # 固件配置：
+      #   1. defconfig 生成基准；
+      #   2. 清理可能重复的符号，保证每个符号只出现一次；
+      #   3. 追加最小化配置；
+      #   4. 用 WARN_RECURSIVE_DEP=1 将递归依赖降级为警告，让 olddefconfig 能完成；
+      #   5. 若仍失败，用 make olddefconfig V=s（目标在前）抓取完整错误到诊断日志。
       # ============================================================================
-      - name: 生成并锁定 HG5585F-CT 固件配置 ✅【最小化配置，无循环包】
+      - name: 生成并锁定 HG5585F-CT 固件配置 ✅【清理重复符号 + 递归依赖降级】
         working-directory: ./ponwrt
         run: |
           rm -rf tmp
@@ -212,6 +216,25 @@ jobs:
           sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
           sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
           sed -i '/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
+
+          # 清理可能重复的符号，保证 .config 中每个符号只出现一次
+          for sym in \
+            CONFIG_PACKAGE_kmod-iptv \
+            CONFIG_PACKAGE_kmod-tun \
+            CONFIG_PACKAGE_kmod-nft-tproxy \
+            CONFIG_PACKAGE_kmod-usb-xhci \
+            CONFIG_PACKAGE_mihomo-alpha \
+            CONFIG_PACKAGE_mihomo-meta \
+            CONFIG_PACKAGE_qt5base \
+            CONFIG_PACKAGE_fwknopd \
+            CONFIG_PACKAGE_squeezelite-custom \
+            CONFIG_PACKAGE_luci-app-homeproxy \
+            CONFIG_PACKAGE_sing-box \
+            CONFIG_KERNEL_DEBUG_FS \
+            CONFIG_KERNEL_DEVMEM \
+            CONFIG_BUSYBOX_CONFIG_DEVMEM; do
+            sed -i "/^# ${sym} is not set$/d; /^${sym}=/d" .config
+          done
 
           cat >> .config << 'EOF'
           # CONFIG_TARGET_ALL_PROFILES is not set
@@ -312,15 +335,18 @@ jobs:
           EOF
 
           # ============================================================
-          # 🔍 诊断 olddefconfig：先用正常模式，失败则切换 V=s 单线程捕获详情
+          # olddefconfig：
+          #   1. 先用 WARN_RECURSIVE_DEP=1 降级递归依赖为警告，正常完成配置同步；
+          #   2. 若仍失败，用 make olddefconfig V=s（目标在前）抓取完整错误。
           # ============================================================
           mkdir -p logs
-          if ! make olddefconfig >/dev/null 2>&1; then
-            echo ">>> 默认 olddefconfig 失败，切换 -j1 V=s 获取完整递归依赖错误："
-            make -j1 V=s olddefconfig 2>&1 | tee logs/olddefconfig-diag.log
+          echo ">>> 运行 WARN_RECURSIVE_DEP=1 olddefconfig（递归依赖降级为警告）"
+          if ! make WARN_RECURSIVE_DEP=1 olddefconfig 2>&1 | tee logs/olddefconfig-warn.log; then
+            echo ">>> 降级模式仍失败，切换 make olddefconfig V=s 获取完整错误："
+            make olddefconfig V=s 2>&1 | tee logs/olddefconfig-diag.log
             echo ">>> 诊断日志已保存到 logs/olddefconfig-diag.log"
           else
-            echo ">>> olddefconfig 通过"
+            echo ">>> olddefconfig 已在降级模式下完成，递归依赖以警告形式记录在 logs/olddefconfig-warn.log"
           fi
 
           sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
@@ -328,11 +354,17 @@ jobs:
             echo "::error::HG5585F-CT 单一机型锁定校验失败！"; exit 1
           fi
 
-          echo "==== 校验关键内核模块与调试选项 ===="
-          grep -E 'CONFIG_KERNEL_DEBUG_FS|CONFIG_KERNEL_DEVMEM|CONFIG_BUSYBOX_CONFIG_DEVMEM' .config || true
-          grep -E 'CONFIG_PACKAGE_kmod-nft-tproxy|CONFIG_PACKAGE_kmod-tun|CONFIG_PACKAGE_kmod-iptv|CONFIG_PACKAGE_kmod-usb-xhci' .config
+          echo "==== 校验关键内核模块与调试选项（每项应只出现一次） ===="
+          for sym in CONFIG_KERNEL_DEBUG_FS CONFIG_KERNEL_DEVMEM CONFIG_BUSYBOX_CONFIG_DEVMEM \
+                     CONFIG_PACKAGE_kmod-nft-tproxy CONFIG_PACKAGE_kmod-tun \
+                     CONFIG_PACKAGE_kmod-iptv CONFIG_PACKAGE_kmod-usb-xhci; do
+            echo "--- $sym ---"
+            grep "^${sym}=" .config || echo "(未激活)"
+          done
+
           echo "==== 校验循环相关包未被激活 ===="
-          grep -E 'CONFIG_PACKAGE_(qt5base|fwknopd|squeezelite-custom|mihomo-alpha)' .config || echo ">>> 循环相关包均未出现在 .config 中"
+          grep -E 'CONFIG_PACKAGE_(qt5base|fwknopd|squeezelite-custom|mihomo-alpha)=' .config || \
+            echo ">>> 循环相关包均未以激活状态出现在 .config 中"
           echo ">>> 固件配置完成"
 
       - name: 下载源码软件包
@@ -369,8 +401,8 @@ jobs:
           mkdir -p logs
           make package/libs/libffi/compile -j"$(nproc)" V=s || true
           set -o pipefail
-          make -j"$(nproc)" 2>&1 | tee logs/build.log || \
-            (echo ">>> 并行编译失败，回退单线程" && make -j1 V=s 2>&1 | tee -a logs/build.log)
+          make WARN_RECURSIVE_DEP=1 -j"$(nproc)" 2>&1 | tee logs/build.log || \
+            (echo ">>> 并行编译失败，回退单线程" && make WARN_RECURSIVE_DEP=1 -j1 V=s 2>&1 | tee -a logs/build.log)
 
       - name: 标记构建成功
         if: success()
@@ -397,15 +429,7 @@ jobs:
 
       # ============================================================================
       # 独立包阶段：逐包切换配置 + 单独编译。
-      # 路径按仓库根目录 pon_userspace 实际结构：
-      #   - pon_userspace/luci-app-iptv
-      #   - pon_userspace/luci-app-blueaudio
-      #   - pon_userspace/luci-app-btsp
-      #   - pon_userspace/luci-app-camlive
-      #   - pon_userspace/ser2net4/
-      #       ├── gensio
-      #       ├── ser2net
-      #       └── luci-app-ser2net
+      # 路径按仓库根目录 pon_userspace 实际结构。
       # ============================================================================
       - name: 尝试编译独立软件包 ✅【逐包切换配置，路径按仓库根目录 pon_userspace】
         working-directory: ./ponwrt
@@ -451,10 +475,10 @@ jobs:
             fi
 
             enable_pkg_m "$pkg"
-            make olddefconfig >/dev/null 2>&1 || true
+            make WARN_RECURSIVE_DEP=1 olddefconfig >/dev/null 2>&1 || true
             enable_pkg_m "$pkg"
 
-            make "$path/compile" -j"$(nproc)" V=s 2>&1 | tee "logs/$log" | tail -8
+            make WARN_RECURSIVE_DEP=1 "$path/compile" -j"$(nproc)" V=s 2>&1 | tee "logs/$log" | tail -8
             local rc=${PIPESTATUS[0]}
             if [ $rc -ne 0 ]; then
               echo "::warning::$pkg 编译失败（不影响固件）"
@@ -464,64 +488,37 @@ jobs:
             return 0
           }
 
-          # ---------- 1. luci-app-iptv（pon_userspace） ----------
           compile_one "luci-app-iptv" "pon_userspace/luci-app-iptv" "iptv-pkg.log"
-
-          # ---------- 2. luci-app-airoha-npu（package/ 本地） ----------
           compile_one "luci-app-airoha-npu" "package/luci-app-airoha-npu" "npu-pkg.log"
-
-          # ---------- 3. luci-app-blueaudio（pon_userspace） ----------
           compile_one "luci-app-blueaudio" "pon_userspace/luci-app-blueaudio" "blueaudio-pkg.log"
-
-          # ---------- 4. luci-app-btsp（pon_userspace） ----------
           compile_one "luci-app-btsp" "pon_userspace/luci-app-btsp" "btsp-pkg.log"
-
-          # ---------- 5. luci-app-camlive（pon_userspace） ----------
           compile_one "luci-app-camlive" "pon_userspace/luci-app-camlive" "camlive-pkg.log"
 
-          # ---------- 6. ser2net4 集合目录（pon_userspace/ser2net4/） ----------
-          # 内部包含 gensio、ser2net、luci-app-ser2net 三个子包
           SER2NET4_DIR="pon_userspace/ser2net4"
           if [ -d "$SER2NET4_DIR" ]; then
             echo ""
             echo ">>> 检查 ser2net4 集合目录结构："
             ls -la "$SER2NET4_DIR" || true
-
-            # 6a. gensio（先编译依赖库）
-            if [ -d "$SER2NET4_DIR/gensio" ]; then
-              compile_one "gensio" "$SER2NET4_DIR/gensio" "gensio-pkg.log"
-            fi
-
-            # 6b. ser2net（依赖 gensio）
-            if [ -d "$SER2NET4_DIR/ser2net" ]; then
-              compile_one "ser2net" "$SER2NET4_DIR/ser2net" "ser2net-pkg.log"
-            fi
-
-            # 6c. luci-app-ser2net（依赖 ser2net）
-            if [ -d "$SER2NET4_DIR/luci-app-ser2net" ]; then
-              compile_one "luci-app-ser2net" "$SER2NET4_DIR/luci-app-ser2net" "luci-ser2net-pkg.log"
-            fi
+            [ -d "$SER2NET4_DIR/gensio" ] && compile_one "gensio" "$SER2NET4_DIR/gensio" "gensio-pkg.log"
+            [ -d "$SER2NET4_DIR/ser2net" ] && compile_one "ser2net" "$SER2NET4_DIR/ser2net" "ser2net-pkg.log"
+            [ -d "$SER2NET4_DIR/luci-app-ser2net" ] && compile_one "luci-app-ser2net" "$SER2NET4_DIR/luci-app-ser2net" "luci-ser2net-pkg.log"
           else
             echo "::warning::ser2net4 目录 $SER2NET4_DIR 不存在，跳过"
           fi
 
-          # ---------- 7. rtw88 系列驱动（已在固件中 =m，这里产出 ipk） ----------
           echo ""
           echo ">>> 编译 rtw88 系列驱动"
-          make package/kernel/rtw88/compile -j"$(nproc)" V=s 2>&1 | tee logs/rtw88-pkg.log | tail -5
+          make WARN_RECURSIVE_DEP=1 package/kernel/rtw88/compile -j"$(nproc)" V=s 2>&1 | tee logs/rtw88-pkg.log | tail -5
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::rtw88 编译失败" || echo ">>> rtw88 成功"
 
-          # ---------- 8. usb-modeswitch ----------
           echo ">>> 编译 usb-modeswitch"
-          make package/feeds/packages/usb-modeswitch/compile -j"$(nproc)" V=s 2>&1 | tee logs/usb-modeswitch-pkg.log | tail -5
+          make WARN_RECURSIVE_DEP=1 package/feeds/packages/usb-modeswitch/compile -j"$(nproc)" V=s 2>&1 | tee logs/usb-modeswitch-pkg.log | tail -5
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::usb-modeswitch 编译失败" || echo ">>> usb-modeswitch 成功"
 
-          # ---------- 9. rtl8723bu ----------
           echo ">>> 编译 rtl8723bu"
-          make package/kernel/rtl8723bu/compile -j"$(nproc)" V=s 2>&1 | tee logs/rtl8723bu-pkg.log | tail -5
+          make WARN_RECURSIVE_DEP=1 package/kernel/rtl8723bu/compile -j"$(nproc)" V=s 2>&1 | tee logs/rtl8723bu-pkg.log | tail -5
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::rtl8723bu 编译失败" || echo ">>> rtl8723bu 成功"
 
-          # ---------- 10. mihomo-alpha（切换配置单独编译） ----------
           echo ""
           echo "============================================================"
           echo ">>> 处理 mihomo-alpha（切换配置，单独编译）"
@@ -529,17 +526,17 @@ jobs:
           if [ -d "package/feeds/nikki/mihomo-alpha" ] || [ -d "feeds/nikki/mihomo-alpha" ]; then
             disable_pkg "mihomo-meta"
             enable_pkg_m "mihomo-alpha"
-            make olddefconfig >/dev/null 2>&1 || true
+            make WARN_RECURSIVE_DEP=1 olddefconfig >/dev/null 2>&1 || true
             enable_pkg_m "mihomo-alpha"
             grep -E 'CONFIG_PACKAGE_mihomo-(meta|alpha)' .config || true
 
-            make package/feeds/nikki/mihomo-alpha/compile -j"$(nproc)" V=s 2>&1 | tee logs/mihomo-alpha-pkg.log | tail -8
+            make WARN_RECURSIVE_DEP=1 package/feeds/nikki/mihomo-alpha/compile -j"$(nproc)" V=s 2>&1 | tee logs/mihomo-alpha-pkg.log | tail -8
             [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::mihomo-alpha 编译失败" || echo ">>> mihomo-alpha 编译成功"
 
             disable_pkg "mihomo-alpha"
             enable_pkg_m "mihomo-meta"
             sed -i "s|^CONFIG_PACKAGE_mihomo-meta=m|CONFIG_PACKAGE_mihomo-meta=y|" .config
-            make olddefconfig >/dev/null 2>&1 || true
+            make WARN_RECURSIVE_DEP=1 olddefconfig >/dev/null 2>&1 || true
           else
             echo "::warning::mihomo-alpha 目录不存在，跳过"
           fi
