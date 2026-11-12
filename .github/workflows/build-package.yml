@@ -7,11 +7,6 @@
 name: SDK 分包编译 IPK
 on:
   workflow_dispatch:
-  workflow_run:
-    workflows: ["编译 PonWrt HG5585F 电信版固件 (mihomo + sing-box + IPTV + omcproxy + GPON + USB)"]
-    types: [completed]
-    branches: [main]
-
 permissions:
   contents: write
 concurrency:
