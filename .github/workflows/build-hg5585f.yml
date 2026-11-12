@@ -132,6 +132,8 @@ jobs:
           ./scripts/feeds install -a
           # 额外安装 pon_userspace 下新增三个luci包
           ./scripts/feeds install luci-app-blueaudio luci-app-btsp luci-app-camlive
+          # 新增：ser2net4、luci-app-ser2net4、ch341串口驱动
+          ./scripts/feeds install ser2net4 luci-app-ser2net4 kmod-usb-serial-ch341
           if [ -f feeds/luci/collections/luci/Makefile ]; then
             sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile || true
           fi
@@ -298,6 +300,9 @@ jobs:
           # CONFIG_PACKAGE_luci-app-blueaudio is not set
           # CONFIG_PACKAGE_luci-app-btsp is not set
           # CONFIG_PACKAGE_luci-app-camlive is not set
+          # CONFIG_PACKAGE_kmod-usb-serial-ch341 is not set
+          # CONFIG_PACKAGE_ser2net4 is not set
+          # CONFIG_PACKAGE_luci-app-ser2net4 is not set
           EOF
           echo ">>> 固件配置完成"
 
@@ -342,15 +347,15 @@ jobs:
             ls -lh
           )
 
-      - name: 尝试编译独立软件包（失败不影响固件）【已修复】
+      - name: 尝试编译独立软件包（失败不影响固件）【新增 ch341 + ser2net4全套】
         working-directory: ./ponwrt
         run: |
           set +e
           echo ">>> 固件编译完成，开始尝试独立包"
           echo ">>> 任何失败均不影响固件"
 
-          # 关键修复：生成 luci-app-iptv / blueaudio / btsp / camlive package软链接
-          ./scripts/feeds install luci-app-iptv luci-app-blueaudio luci-app-btsp luci-app-camlive
+          # 关键修复：生成 luci-app-iptv / blueaudio / btsp / camlive / ch341 / ser2net4 package软链接
+          ./scripts/feeds install luci-app-iptv luci-app-blueaudio luci-app-btsp luci-app-camlive kmod-usb-serial-ch341 ser2net4 luci-app-ser2net4
 
           # 配置独立包为 =m
           sed -i 's|^# CONFIG_PACKAGE_luci-app-iptv is not set$|CONFIG_PACKAGE_luci-app-iptv=m|' .config
@@ -366,12 +371,16 @@ jobs:
           sed -i 's|^# CONFIG_PACKAGE_usb-modeswitch is not set$|CONFIG_PACKAGE_usb-modeswitch=m|' .config
           sed -i 's|^# CONFIG_PACKAGE_usb-modeswitch-data is not set$|CONFIG_PACKAGE_usb-modeswitch-data=m|' .config
           sed -i 's|^# CONFIG_PACKAGE_kmod-rtl8723bu is not set$|CONFIG_PACKAGE_kmod-rtl8723bu=m|' .config
+          # 新增：CH341驱动 + ser2net4全套
+          sed -i 's|^# CONFIG_PACKAGE_kmod-usb-serial-ch341 is not set$|CONFIG_PACKAGE_kmod-usb-serial-ch341=m|' .config
+          sed -i 's|^# CONFIG_PACKAGE_ser2net4 is not set$|CONFIG_PACKAGE_ser2net4=m|' .config
+          sed -i 's|^# CONFIG_PACKAGE_luci-app-ser2net4 is not set$|CONFIG_PACKAGE_luci-app-ser2net4=m|' .config
 
           # 修复：使用 olddefconfig，不重置已设置=m
           make olddefconfig >/dev/null 2>&1
 
           echo ">>> 当前config独立包状态"
-          grep -E 'CONFIG_PACKAGE_luci-app-iptv|CONFIG_PACKAGE_luci-app-airoha-npu|CONFIG_PACKAGE_luci-app-airoha-soc|CONFIG_PACKAGE_luci-app-blueaudio|CONFIG_PACKAGE_luci-app-btsp|CONFIG_PACKAGE_luci-app-camlive|CONFIG_PACKAGE_kmod-rtw88|CONFIG_PACKAGE_kmod-rtl8723bu' .config
+          grep -E 'CONFIG_PACKAGE_luci-app-iptv|CONFIG_PACKAGE_luci-app-airoha-npu|CONFIG_PACKAGE_luci-app-airoha-soc|CONFIG_PACKAGE_luci-app-blueaudio|CONFIG_PACKAGE_luci-app-btsp|CONFIG_PACKAGE_luci-app-camlive|CONFIG_PACKAGE_kmod-rtw88|CONFIG_PACKAGE_kmod-rtl8723bu|CONFIG_PACKAGE_kmod-usb-serial-ch341|CONFIG_PACKAGE_ser2net4|CONFIG_PACKAGE_luci-app-ser2net4' .config
 
           # --- luci-app-iptv ---
           echo ">>> 下载 luci-app-iptv"
@@ -422,6 +431,26 @@ jobs:
           make package/luci-app-camlive/compile -j"$(nproc)" V=s 2>&1 | tee logs/camlive-pkg.log | tail -20
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::luci-app-camlive 编译失败（不影响固件）" || echo ">>> luci-app-camlive 成功"
 
+          # --- CH340 CH341 串口驱动 kmod-usb-serial-ch341 ---
+          echo ">>> 下载 kmod-usb-serial-ch341"
+          make package/kmod-usb-serial-ch341/download V=s 2>&1 | tail -3 || echo "::warning::kmod-usb-serial-ch341 下载失败"
+          echo ">>> 编译 kmod-usb-serial-ch341"
+          make package/kmod-usb-serial-ch341/compile -j"$(nproc)" V=s 2>&1 | tee logs/ch341-pkg.log | tail -20
+          [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::kmod-usb-serial-ch341 编译失败（不影响固件）" || echo ">>> kmod-usb-serial-ch341 成功"
+
+          # --- ser2net4 + luci-app-ser2net4 串口转网络全套 ---
+          echo ">>> 下载 ser2net4"
+          make package/ser2net4/download V=s 2>&1 | tail -3 || echo "::warning::ser2net4 下载失败"
+          echo ">>> 编译 ser2net4"
+          make package/ser2net4/compile -j"$(nproc)" V=s 2>&1 | tee logs/ser2net4-pkg.log | tail -20
+          [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::ser2net4 编译失败（不影响固件）" || echo ">>> ser2net4 成功"
+
+          echo ">>> 下载 luci-app-ser2net4"
+          make package/luci-app-ser2net4/download V=s 2>&1 | tail -3 || echo "::warning::luci-app-ser2net4 下载失败"
+          echo ">>> 编译 luci-app-ser2net4"
+          make package/luci-app-ser2net4/compile -j"$(nproc)" V=s 2>&1 | tee logs/luci-ser2net4-pkg.log | tail -20
+          [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::luci-app-ser2net4 编译失败（不影响固件）" || echo ">>> luci-app-ser2net4 成功"
+
           # --- rtw88 驱动 RTL8821CU / RTL8822BU 无线网卡驱动 + usb-modeswitch ---
           echo ">>> 编译 rtw88 系列驱动"
           make package/kernel/rtw88/download V=s 2>&1 | tail -3 || echo "::warning::rtw88 下载失败"
@@ -458,12 +487,12 @@ jobs:
           done
           ls -la ../ipk_out || true
 
-      - name: 收集独立软件包（如成功）【修复noarch包搜索】
+      - name: 收集独立软件包（如成功）【修复noarch包搜索 + 新增ch341 + ser2net4】
         if: always()
         working-directory: ./ponwrt
         run: |
           mkdir -p ../ipk_out
-          pkg_list="luci-app-iptv luci-app-airoha-npu luci-app-airoha-soc luci-app-blueaudio luci-app-btsp luci-app-camlive kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822c kmod-rtw88-8822cu usb-modeswitch usb-modeswitch-data kmod-rtl8723bu"
+          pkg_list="luci-app-iptv luci-app-airoha-npu luci-app-airoha-soc luci-app-blueaudio luci-app-btsp luci-app-camlive kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822c kmod-rtw88-8822cu usb-modeswitch usb-modeswitch-data kmod-rtl8723bu kmod-usb-serial-ch341 ser2net4 luci-app-ser2net4"
           for pkg in $pkg_list; do
             found=0
             while IFS= read -r -d '' f; do
@@ -472,7 +501,7 @@ jobs:
             done < <(find bin -type f \( -name "${pkg}*.apk" -o -name "${pkg}*.ipk" \) -print0 )
             [ "$found" -eq 1 ] && echo ">>> 已收集 $pkg" || echo "::notice::$pkg 未生成，跳过"
           done
-          ls -lh ../ipk_out/luci-app-*.apk ../ipk_out/luci-app-*.ipk ../ipk_out/kmod-*.ipk ../ipk_out/usb-modeswitch*.ipk 2>/dev/null || true
+          ls -lh ../ipk_out/luci-app-*.apk ../ipk_out/luci-app-*.ipk ../ipk_out/kmod-*.ipk ../ipk_out/usb-modeswitch*.ipk ../ipk_out/ser2net4*.ipk 2>/dev/null || true
 
       - name: 上传固件 Artifact
         if: success()
@@ -511,7 +540,7 @@ jobs:
           sha256sum "${files[@]}" > SHA256SUMS
           ls -lh
 
-      - name: 创建 GitHub 预发布【修复release 404】
+      - name: 创建 GitHub 预发布【更新说明：增加ch341、ser2net4全套】
         if: success()
         uses: softprops/action-gh-release@v2.0.8
         with:
@@ -522,7 +551,9 @@ jobs:
           generate_release_notes: true
           body: |
             PonWrt HG5585F-CT 集成版自动预发布。
-            包含固件镜像、软件包压缩包、独立 luci-app-iptv / airoha-npu / luci-app-blueaudio(蓝牙音频切换) / luci-app-btsp / luci-app-camlive(摄像头直播)、USB全套内核模块ipk、RTL8821CU/RTL8723BU二合一无线网卡驱动ipk（如编译成功）及 SHA256SUMS。
+            包含固件镜像、软件包压缩包、独立 luci-app-iptv / airoha-npu / luci-app-blueaudio(蓝牙音频切换) / luci-app-btsp / luci-app-camlive(摄像头直播)、
+            **CH340(CH341) USB串口驱动 kmod-usb-serial-ch341、ser2net4 + luci-app-ser2net4 串口转网络全套**、
+            USB全套内核模块ipk、RTL8821CU/RTL8723BU二合一无线网卡驱动ipk（如编译成功）及 SHA256SUMS。
             注意：这是预发布，仅用于测试验证。
             USB底层驱动已内置支持（xhci/存储/ntfs3/vfat/ext4/uvc摄像头/usb-serial/usb-net）
             Samba4、NFS、CUPS、mjpg-streamer 上层应用请使用SDK分包工作流编译。
