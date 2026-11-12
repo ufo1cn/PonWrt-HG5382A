@@ -1,10 +1,12 @@
 name: 编译 PonWrt HG5585F 电信版集成版固件
-# （最小化固件 + 独立包阶段逐包切换配置编译，彻底规避 Kconfig 循环依赖）
+# （最小化固件 + 独立包逐包切换编译 + olddefconfig 诊断）
 # ----------------------------------------------------------------------------
 # 策略：
 #   1. 固件阶段只 install / 编译内核配置与固件必需模块，循环相关包不进 feeds 索引；
-#   2. 非默认软件包全部在独立包阶段处理，逐包切换 .config 后单独编译，时间上隔离互斥包；
-#   3. 独立包阶段的 olddefconfig 允许失败，不阻断单包编译。
+#   2. 加入 olddefconfig 诊断步骤，用 make -j1 V=s 捕获完整递归依赖错误；
+#   3. 非默认软件包全部在独立包阶段处理，路径按仓库根目录 pon_userspace 实际结构修正，
+#      逐包切换 .config 后单独编译，时间上隔离互斥包；
+#   4. 独立包阶段的 olddefconfig 允许失败，不阻断单包编译。
 # ============================================================================
 on:
   workflow_dispatch:
@@ -119,9 +121,6 @@ jobs:
           restore-keys: |
             hg5585f-slow-
 
-      # ============================================================================
-      # 先注入 libffi，再执行 feeds install，避免 feeds 依赖索引时找不到 libffi
-      # ============================================================================
       - name: 注入 libffi 包（在 feeds install 之前）
         working-directory: ./ponwrt
         run: |
@@ -130,10 +129,6 @@ jobs:
             https://raw.githubusercontent.com/openwrt/openwrt/master/package/libs/libffi/Makefile
           grep -q 'PKG_NAME:=libffi' package/libs/libffi/Makefile && echo ">>> libffi 注入成功" || exit 1
 
-      # ============================================================================
-      # 最小化 feeds install：只安装固件必需包。
-      # 循环相关包（qt5base / fwknopd / mihomo-alpha / squeezelite / qt6*）不 install。
-      # ============================================================================
       - name: 更新 Feeds 并最小化安装 ✅【只装固件必需包，循环包不进索引】
         working-directory: ./ponwrt
         run: |
@@ -142,7 +137,6 @@ jobs:
             find feeds/nikki -name Makefile -exec sed -i -E 's/[[:space:]]*\+yq\b//g' {} + || true
           fi
 
-          # 固件必需的内核驱动 / 基础包
           ./scripts/feeds install \
             kmod-airoha-paged-bosa kmod-airoha-pon-frontend kmod-airoha-xpon \
             airoha-ponctl airoha-pond \
@@ -155,16 +149,14 @@ jobs:
             kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822c kmod-rtw88-8822cu \
             usb-modeswitch usb-modeswitch-data kmod-rtl8723bu
 
-          # 固件内置的代理核心（仅 mihomo-meta，不装 mihomo-alpha）
           ./scripts/feeds install mihomo-meta nikki luci-app-nikki luci-i18n-nikki-zh-cn
 
-          # 基础工具
           ./scripts/feeds install curl libcurl libidn2 libnghttp2 libpsl \
             libgnutls libtasn1 libunistring nettle gmp \
             ip-full yq libcronet \
             luci-app-ttyd luci-app-ddns ddns-scripts openssh-sftp-server
 
-          echo ">>> 最小化 feeds install 完成（循环相关包均未安装）"
+          echo ">>> 最小化 feeds install 完成"
 
       - name: 将 luci-app-airoha-npu 克隆到 package 目录
         working-directory: ./ponwrt
@@ -181,8 +173,8 @@ jobs:
       - name: 预修改 luci-app-iptv Makefile（独立包阶段再 install）
         working-directory: ./ponwrt
         run: |
-          if [ -f feeds/pon_userspace/luci-app-iptv/Makefile ]; then
-            MK="feeds/pon_userspace/luci-app-iptv/Makefile"
+          if [ -f pon_userspace/luci-app-iptv/Makefile ]; then
+            MK="pon_userspace/luci-app-iptv/Makefile"
             cp -f "$MK" "$MK.orig"
             sed -i 's/+kmod-iptv/kmod-iptv/g' "$MK"
             sed -i '/\/etc\/config\/iptv/d' "$MK"
@@ -207,7 +199,7 @@ jobs:
 
       # ============================================================================
       # 固件配置：只包含内核选项和固件必需包。
-      # 循环相关包（qt5base / fwknopd / mihomo-alpha / squeezelite）不在索引中。
+      # 循环相关包（qt5base / fwknopd / mihomo-alpha / squeezelite / qt6*）不在索引中。
       # ============================================================================
       - name: 生成并锁定 HG5585F-CT 固件配置 ✅【最小化配置，无循环包】
         working-directory: ./ponwrt
@@ -301,8 +293,9 @@ jobs:
           # CONFIG_PACKAGE_luci-app-btsp is not set
           # CONFIG_PACKAGE_luci-app-camlive is not set
           # CONFIG_PACKAGE_kmod-usb-serial-ch341 is not set
-          # CONFIG_PACKAGE_ser2net4 is not set
-          # CONFIG_PACKAGE_luci-app-ser2net4 is not set
+          # CONFIG_PACKAGE_ser2net is not set
+          # CONFIG_PACKAGE_gensio is not set
+          # CONFIG_PACKAGE_luci-app-ser2net is not set
           # CONFIG_PACKAGE_qt5base is not set
           # CONFIG_PACKAGE_fwknopd is not set
           # CONFIG_PACKAGE_squeezelite-custom is not set
@@ -318,7 +311,17 @@ jobs:
           CONFIG_BUSYBOX_CONFIG_DEVMEM=y
           EOF
 
-          make olddefconfig
+          # ============================================================
+          # 🔍 诊断 olddefconfig：先用正常模式，失败则切换 V=s 单线程捕获详情
+          # ============================================================
+          mkdir -p logs
+          if ! make olddefconfig >/dev/null 2>&1; then
+            echo ">>> 默认 olddefconfig 失败，切换 -j1 V=s 获取完整递归依赖错误："
+            make -j1 V=s olddefconfig 2>&1 | tee logs/olddefconfig-diag.log
+            echo ">>> 诊断日志已保存到 logs/olddefconfig-diag.log"
+          else
+            echo ">>> olddefconfig 通过"
+          fi
 
           sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
           if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y$' .config; then
@@ -394,22 +397,26 @@ jobs:
 
       # ============================================================================
       # 独立包阶段：逐包切换配置 + 单独编译。
-      # 每处理一个包之前先切换 .config，让 Kconfig 在当前时刻只面对一个变体，
-      # 从时间上隔离互斥包，避免触发全局循环。olddefconfig 允许失败。
+      # 路径按仓库根目录 pon_userspace 实际结构：
+      #   - pon_userspace/luci-app-iptv
+      #   - pon_userspace/luci-app-blueaudio
+      #   - pon_userspace/luci-app-btsp
+      #   - pon_userspace/luci-app-camlive
+      #   - pon_userspace/ser2net4/
+      #       ├── gensio
+      #       ├── ser2net
+      #       └── luci-app-ser2net
       # ============================================================================
-      - name: 尝试编译独立软件包 ✅【逐包切换配置，时间隔离循环】
+      - name: 尝试编译独立软件包 ✅【逐包切换配置，路径按仓库根目录 pon_userspace】
         working-directory: ./ponwrt
         run: |
           set +e
           echo ">>> 开始独立包编译（逐包切换配置）"
 
-          # 备份固件 .config，独立包阶段结束后不恢复也没关系，产物已收集
           cp .config .config.firmware
 
-          # ---------- 辅助函数 ----------
           enable_pkg_m() {
             local pkg="$1"
-            # 如果配置项存在，改为 =m；如果不存在，追加
             if grep -q "CONFIG_PACKAGE_${pkg} is not set" .config; then
               sed -i "s|^# CONFIG_PACKAGE_${pkg} is not set|CONFIG_PACKAGE_${pkg}=m|" .config
             elif grep -q "^CONFIG_PACKAGE_${pkg}=y" .config; then
@@ -435,34 +442,18 @@ jobs:
 
             echo ""
             echo "============================================================"
-            echo ">>> 处理独立包: $pkg"
+            echo ">>> 处理独立包: $pkg  (路径: $path)"
             echo "============================================================"
 
-            # 如果 package 目录不存在，尝试 feeds install
             if [ ! -d "$path" ]; then
-              echo ">>> 尝试 feeds install $pkg"
-              ./scripts/feeds install "$pkg" >/dev/null 2>&1 || {
-                echo "::warning::$pkg 无法 install（feed 中不存在），跳过"
-                return 0
-              }
-            fi
-
-            # 确保目录存在
-            if [ ! -d "$path" ]; then
-              echo "::warning::$pkg 的 package 目录不存在，跳过"
+              echo "::warning::$pkg 的目录 $path 不存在，跳过"
               return 0
             fi
 
-            # 切换配置：目标包 =m，其他可能循环的同族包禁用
             enable_pkg_m "$pkg"
-
-            # olddefconfig 容忍失败
             make olddefconfig >/dev/null 2>&1 || true
-
-            # 再次确保配置项（olddefconfig 可能重置）
             enable_pkg_m "$pkg"
 
-            # 单独编译
             make "$path/compile" -j"$(nproc)" V=s 2>&1 | tee "logs/$log" | tail -8
             local rc=${PIPESTATUS[0]}
             if [ $rc -ne 0 ]; then
@@ -473,63 +464,78 @@ jobs:
             return 0
           }
 
-          # ---------- 1. luci-app-iptv（在 pon_userspace） ----------
-          compile_one "luci-app-iptv" "package/feeds/pon_userspace/luci-app-iptv" "iptv-pkg.log"
+          # ---------- 1. luci-app-iptv（pon_userspace） ----------
+          compile_one "luci-app-iptv" "pon_userspace/luci-app-iptv" "iptv-pkg.log"
 
-          # ---------- 2. luci-app-airoha-npu（在 package/ 本地） ----------
+          # ---------- 2. luci-app-airoha-npu（package/ 本地） ----------
           compile_one "luci-app-airoha-npu" "package/luci-app-airoha-npu" "npu-pkg.log"
 
-          # ---------- 3. luci-app-blueaudio（可能不存在） ----------
-          compile_one "luci-app-blueaudio" "package/feeds/pon_userspace/luci-app-blueaudio" "blueaudio-pkg.log"
+          # ---------- 3. luci-app-blueaudio（pon_userspace） ----------
+          compile_one "luci-app-blueaudio" "pon_userspace/luci-app-blueaudio" "blueaudio-pkg.log"
 
-          # ---------- 4. luci-app-btsp（可能不存在） ----------
-          compile_one "luci-app-btsp" "package/feeds/pon_userspace/luci-app-btsp" "btsp-pkg.log"
+          # ---------- 4. luci-app-btsp（pon_userspace） ----------
+          compile_one "luci-app-btsp" "pon_userspace/luci-app-btsp" "btsp-pkg.log"
 
-          # ---------- 5. luci-app-camlive（可能不存在） ----------
-          compile_one "luci-app-camlive" "package/feeds/pon_userspace/luci-app-camlive" "camlive-pkg.log"
+          # ---------- 5. luci-app-camlive（pon_userspace） ----------
+          compile_one "luci-app-camlive" "pon_userspace/luci-app-camlive" "camlive-pkg.log"
 
-          # ---------- 6. kmod-usb-serial-ch341（可能不存在） ----------
-          compile_one "kmod-usb-serial-ch341" "package/kernel/kmod-usb-serial-ch341" "ch341-pkg.log"
+          # ---------- 6. ser2net4 集合目录（pon_userspace/ser2net4/） ----------
+          # 内部包含 gensio、ser2net、luci-app-ser2net 三个子包
+          SER2NET4_DIR="pon_userspace/ser2net4"
+          if [ -d "$SER2NET4_DIR" ]; then
+            echo ""
+            echo ">>> 检查 ser2net4 集合目录结构："
+            ls -la "$SER2NET4_DIR" || true
 
-          # ---------- 7. ser2net4 + luci-app-ser2net4（可能不存在） ----------
-          compile_one "ser2net4" "package/feeds/packages/ser2net4" "ser2net4-pkg.log"
-          compile_one "luci-app-ser2net4" "package/feeds/luci/luci-app-ser2net4" "luci-ser2net4-pkg.log"
+            # 6a. gensio（先编译依赖库）
+            if [ -d "$SER2NET4_DIR/gensio" ]; then
+              compile_one "gensio" "$SER2NET4_DIR/gensio" "gensio-pkg.log"
+            fi
 
-          # ---------- 8. rtw88 系列驱动（已在固件中 =m，这里产出 ipk） ----------
+            # 6b. ser2net（依赖 gensio）
+            if [ -d "$SER2NET4_DIR/ser2net" ]; then
+              compile_one "ser2net" "$SER2NET4_DIR/ser2net" "ser2net-pkg.log"
+            fi
+
+            # 6c. luci-app-ser2net（依赖 ser2net）
+            if [ -d "$SER2NET4_DIR/luci-app-ser2net" ]; then
+              compile_one "luci-app-ser2net" "$SER2NET4_DIR/luci-app-ser2net" "luci-ser2net-pkg.log"
+            fi
+          else
+            echo "::warning::ser2net4 目录 $SER2NET4_DIR 不存在，跳过"
+          fi
+
+          # ---------- 7. rtw88 系列驱动（已在固件中 =m，这里产出 ipk） ----------
           echo ""
           echo ">>> 编译 rtw88 系列驱动"
           make package/kernel/rtw88/compile -j"$(nproc)" V=s 2>&1 | tee logs/rtw88-pkg.log | tail -5
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::rtw88 编译失败" || echo ">>> rtw88 成功"
 
-          # ---------- 9. usb-modeswitch ----------
+          # ---------- 8. usb-modeswitch ----------
           echo ">>> 编译 usb-modeswitch"
           make package/feeds/packages/usb-modeswitch/compile -j"$(nproc)" V=s 2>&1 | tee logs/usb-modeswitch-pkg.log | tail -5
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::usb-modeswitch 编译失败" || echo ">>> usb-modeswitch 成功"
 
-          # ---------- 10. rtl8723bu ----------
+          # ---------- 9. rtl8723bu ----------
           echo ">>> 编译 rtl8723bu"
           make package/kernel/rtl8723bu/compile -j"$(nproc)" V=s 2>&1 | tee logs/rtl8723bu-pkg.log | tail -5
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::rtl8723bu 编译失败" || echo ">>> rtl8723bu 成功"
 
-          # ---------- 11. mihomo-alpha（切换配置单独编译） ----------
-          # 原理：在同一时刻只让 alpha 处于激活状态，Kconfig 不会看到 meta/alpha 的循环。
+          # ---------- 10. mihomo-alpha（切换配置单独编译） ----------
           echo ""
           echo "============================================================"
           echo ">>> 处理 mihomo-alpha（切换配置，单独编译）"
           echo "============================================================"
           if [ -d "package/feeds/nikki/mihomo-alpha" ] || [ -d "feeds/nikki/mihomo-alpha" ]; then
-            # 禁用 meta，启用 alpha
             disable_pkg "mihomo-meta"
             enable_pkg_m "mihomo-alpha"
             make olddefconfig >/dev/null 2>&1 || true
-            # 再次确保 alpha 激活
             enable_pkg_m "mihomo-alpha"
             grep -E 'CONFIG_PACKAGE_mihomo-(meta|alpha)' .config || true
 
             make package/feeds/nikki/mihomo-alpha/compile -j"$(nproc)" V=s 2>&1 | tee logs/mihomo-alpha-pkg.log | tail -8
             [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::mihomo-alpha 编译失败" || echo ">>> mihomo-alpha 编译成功"
 
-            # 恢复固件配置（meta=y，alpha 禁用）
             disable_pkg "mihomo-alpha"
             enable_pkg_m "mihomo-meta"
             sed -i "s|^CONFIG_PACKAGE_mihomo-meta=m|CONFIG_PACKAGE_mihomo-meta=y|" .config
@@ -559,12 +565,12 @@ jobs:
           done
           ls -la ../ipk_out || true
 
-      - name: 收集独立软件包 ✅【含 mihomo-meta / mihomo-alpha】
+      - name: 收集独立软件包
         if: always()
         working-directory: ./ponwrt
         run: |
           mkdir -p ../ipk_out
-          pkg_list="luci-app-iptv luci-app-airoha-npu luci-app-blueaudio luci-app-btsp luci-app-camlive kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822c kmod-rtw88-8822cu usb-modeswitch usb-modeswitch-data kmod-rtl8723bu kmod-usb-serial-ch341 ser2net4 luci-app-ser2net4 mihomo-meta mihomo-alpha"
+          pkg_list="luci-app-iptv luci-app-airoha-npu luci-app-blueaudio luci-app-btsp luci-app-camlive gensio ser2net luci-app-ser2net kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822c kmod-rtw88-8822cu usb-modeswitch usb-modeswitch-data kmod-rtl8723bu mihomo-meta mihomo-alpha"
           for pkg in $pkg_list; do
             found=0
             while IFS= read -r -d '' f; do
@@ -612,7 +618,7 @@ jobs:
           sha256sum "${files[@]}" > SHA256SUMS
           ls -lh
 
-      - name: 创建 GitHub 预发布 ✅【固件最小化 + 独立包逐包切换编译】
+      - name: 创建 GitHub 预发布
         if: success()
         uses: softprops/action-gh-release@v2.0.8
         with:
@@ -622,12 +628,12 @@ jobs:
           make_latest: false
           generate_release_notes: true
           body: |
-            PonWrt HG5585F-CT 集成版自动预发布（最小化固件 + 独立包逐包切换编译策略）。
+            PonWrt HG5585F-CT 集成版自动预发布（最小化固件 + 独立包逐包切换编译）。
             固件镜像内置：PON 修复、透明代理内核模块、mihomo-meta（稳定版）、IPTV 驱动、omcproxy、USB 底层驱动。
-            独立 ipk：luci-app-iptv、luci-app-airoha-npu、RTL8821CU/RTL8723BU 网卡驱动、usb-modeswitch，
+            独立 ipk：luci-app-iptv、luci-app-airoha-npu、luci-app-blueaudio、luci-app-btsp、luci-app-camlive、
+            gensio、ser2net、luci-app-ser2net、RTL8821CU/RTL8723BU 网卡驱动、usb-modeswitch，
             以及可选产出的 mihomo-alpha 独立 ipk（与 meta 互斥，设备上只能二选一安装）。
             ⚠️ homeproxy / sing-box 因 feed 索引缺失未纳入本次构建。
-            ⚠️ 当前 feed 中不存在的包（blueaudio / btsp / camlive / ser2net4 / ch341 等）已尝试 install，失败自动跳过。
           files: release_out/*
 
       - name: 保存 staging 缓存
