@@ -151,8 +151,10 @@ jobs:
           rm -rf package/luci-app-airoha-npu/.git package/luci-app-airoha-npu/.github package/luci-app-airoha-npu/screenshots
           rm -rf package/luci-app-airoha-npu/luci-app-airoha-npu
           echo ">>> luci-app-airoha-npu 已克隆到 package/ 目录，嵌套目录已删除"
-          echo ">>> 当前 Makefile 中的 PKG_NAME:"
-          grep -m1 'PKG_NAME' package/luci-app-airoha-npu/Makefile || echo "::warning::未找到 PKG_NAME"
+          # 说明：luci-app-airoha-npu 是标准 LuCI 包，包名由 luci.mk 根据目录名隐式生成，
+          # 其 Makefile 中没有 PKG_NAME 是正常的。此处改为检查 LUCI_TITLE，避免误报警告。
+          echo ">>> 当前 Makefile 中的 LUCI_TITLE:"
+          grep -m1 'LUCI_TITLE' package/luci-app-airoha-npu/Makefile || echo "::warning::未找到 LUCI_TITLE"
 
       - name: 修正 luci-app-iptv 打包定义（独立包且不覆盖 kmod-iptv）
         working-directory: ./ponwrt
@@ -198,18 +200,20 @@ jobs:
             https://raw.githubusercontent.com/openwrt/openwrt/master/package/libs/libffi/Makefile
           grep -q 'PKG_NAME:=libffi' package/libs/libffi/Makefile && echo ">>> libffi 注入成功" || exit 1
 
-      - name: 生成并锁定 HG5585F-CT 配置 ✅【修复时序：先olddefconfig，后追加自定义配置】
+      - name: 生成并锁定 HG5585F-CT 配置 ✅【修复时序：先注入全部配置，最后统一 olddefconfig】
         working-directory: ./ponwrt
         run: |
           rm -rf tmp
-          # 合并两份基础配置
+          # 1. 合并两份基础配置
           perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
-          # 先对齐基础配置（olddefconfig，不粗暴重置）
-          make olddefconfig
+
+          # 2. 删除冲突的自动生成符号
           sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
           sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
           sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
           sed -i '/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
+
+          # 3. 注入基础自定义配置
           cat >> .config << 'EOF'
           # CONFIG_TARGET_ALL_PROFILES is not set
           # CONFIG_TARGET_MULTI_PROFILE is not set
@@ -223,7 +227,8 @@ jobs:
           CONFIG_PACKAGE_openssh-sftp-server=y
           # CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set
           EOF
-          # 追加全部自定义内核/软件包配置
+
+          # 4. 注入全部自定义内核/软件包配置（包含 DEBUG_FS 相关修复）
           cat >> .config << 'EOF'
           # --- PON 修复 ---
           CONFIG_PACKAGE_kmod-airoha-paged-bosa=y
@@ -303,13 +308,38 @@ jobs:
           # CONFIG_PACKAGE_ser2net4 is not set
           # CONFIG_PACKAGE_luci-app-ser2net4 is not set
           EOF
-          # 校验单一机型锁定
+
+          # 5. 自动检测目标内核是否支持 DEBUG_FS，并开启对应 OpenWrt 内核选项
+          #    依据：luci-app-airoha-npu 上游 Makefile 明确要求 CONFIG_KERNEL_DEBUG_FS
+          #    用于 PPE 流表；Frame Engine 与超频功能还依赖 busybox devmem。
+          KERNEL_DEBUG_FS_SUPPORTED=""
+          if grep -Rhs '^CONFIG_DEBUG_FS=y' target/linux/airoha/ 2>/dev/null | head -1 | grep -q .; then
+            KERNEL_DEBUG_FS_SUPPORTED="yes"
+          fi
+          if [ -n "$KERNEL_DEBUG_FS_SUPPORTED" ]; then
+            echo ">>> 检测到目标内核支持 DEBUG_FS，开启 CONFIG_KERNEL_DEBUG_FS=y"
+            echo "CONFIG_KERNEL_DEBUG_FS=y" >> .config
+          else
+            echo "::warning::未在 target/linux/airoha 下检测到 CONFIG_DEBUG_FS=y，仍尝试开启 CONFIG_KERNEL_DEBUG_FS=y"
+            echo "CONFIG_KERNEL_DEBUG_FS=y" >> .config
+          fi
+          # 上游 luci-app-airoha-npu 的 Frame Engine / 超频功能依赖 devmem
+          echo "CONFIG_KERNEL_DEVMEM=y" >> .config
+          echo "CONFIG_BUSYBOX_CONFIG_DEVMEM=y" >> .config
+
+          # 6. ✅ 关键修正：在所有配置注入完毕后，统一运行 olddefconfig
+          #    让 Kconfig 系统一次性校验所有新增符号的依赖关系，避免后期追加的选项被静默重置。
+          make olddefconfig
+
+          # 7. 校验单一机型锁定
           sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
           if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y$' .config; then
             echo "::error::HG5585F-CT 单一机型锁定校验失败！"; exit 1
           fi
-          # 【调试输出】打印几个关键内核配置确认写入成功
-          echo "==== 校验关键内核模块配置 ===="
+
+          # 8. 调试输出：确认 DEBUG_FS 等关键选项已生效
+          echo "==== 校验关键内核模块与调试选项 ===="
+          grep -E 'CONFIG_KERNEL_DEBUG_FS|CONFIG_KERNEL_DEVMEM|CONFIG_BUSYBOX_CONFIG_DEVMEM' .config || true
           grep -E 'CONFIG_PACKAGE_kmod-nft-tproxy|CONFIG_PACKAGE_kmod-tun|CONFIG_PACKAGE_kmod-iptv|CONFIG_PACKAGE_kmod-usb-xhci' .config
           echo ">>> 固件配置完成"
 
