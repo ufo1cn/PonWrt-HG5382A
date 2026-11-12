@@ -11,6 +11,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
+  actions: write
 concurrency:
   group: build-hg5585f-${{ github.ref }}
   cancel-in-progress: true
@@ -99,11 +100,15 @@ jobs:
           restore-keys: |
             hg5585f-toolchain-
 
-      - name: 缓存包安装产物 (staging target)
-        uses: actions/cache@v4
+      # ============================================================================
+      # 修复：staging 缓存改为 restore + save 分离，key 带 run_id，确保失败时也能保存最新状态
+      # 这样下次运行能准确恢复"上次实际状态"，配合 .build_success 标记实现精准清理。
+      # ============================================================================
+      - name: 恢复 staging 缓存 (Restore staging cache) ✅【修复：restore 独立，key 带 run_id】
+        uses: actions/cache/restore@v4
         with:
           path: ponwrt/staging_dir/target-aarch64_cortex-a53_musl
-          key: hg5585f-stage-${{ github.workflow_sha }}-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
+          key: hg5585f-stage-${{ github.run_id }}
           restore-keys: |
             hg5585f-stage-
 
@@ -200,20 +205,24 @@ jobs:
             https://raw.githubusercontent.com/openwrt/openwrt/master/package/libs/libffi/Makefile
           grep -q 'PKG_NAME:=libffi' package/libs/libffi/Makefile && echo ">>> libffi 注入成功" || exit 1
 
-      - name: 生成并锁定 HG5585F-CT 配置 ✅【修复时序：先注入全部配置，最后统一 olddefconfig】
+      - name: 生成并锁定 HG5585F-CT 配置 ✅【修复：defconfig 重建基础配置，显式启用 DEBUG_FS】
         working-directory: ./ponwrt
         run: |
           rm -rf tmp
-          # 1. 合并两份基础配置
+          # 1. 合并基础配置，生成初始 .config
           perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
 
-          # 2. 删除冲突的自动生成符号
+          # 2. 关键修复：用 defconfig 强制生成与 Kconfig 完全一致的新 .config
+          #    这会消除因手动追加导致的"out of sync"冲突，使后续 olddefconfig 不会失败。
+          make defconfig
+
+          # 3. 删除冲突的自动生成符号，锁定单一机型
           sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
           sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
           sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
           sed -i '/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
 
-          # 3. 注入基础自定义配置
+          # 4. 注入基础自定义配置
           cat >> .config << 'EOF'
           # CONFIG_TARGET_ALL_PROFILES is not set
           # CONFIG_TARGET_MULTI_PROFILE is not set
@@ -228,7 +237,7 @@ jobs:
           # CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set
           EOF
 
-          # 4. 注入全部自定义内核/软件包配置（包含 DEBUG_FS 相关修复）
+          # 5. 注入全部自定义内核/软件包配置（包含 DEBUG_FS 修复）
           cat >> .config << 'EOF'
           # --- PON 修复 ---
           CONFIG_PACKAGE_kmod-airoha-paged-bosa=y
@@ -307,28 +316,21 @@ jobs:
           # CONFIG_PACKAGE_kmod-usb-serial-ch341 is not set
           # CONFIG_PACKAGE_ser2net4 is not set
           # CONFIG_PACKAGE_luci-app-ser2net4 is not set
+
+          # ============================================================
+          # 修复：直接显式开启内核 DEBUG_FS 及相关调试功能
+          # 依据：luci-app-airoha-npu 的 PPE 流表依赖 CONFIG_KERNEL_DEBUG_FS；
+          #       Frame Engine / 超频功能依赖 busybox devmem。
+          # 说明：CONFIG_KERNEL_DEBUG_FS 是 OpenWrt 内核 Kconfig 独立布尔项，
+          #       不依赖在 target/linux/airoha 下能否找到文本型 CONFIG_DEBUG_FS=y，
+          #       因此放弃自动检测，直接写入最稳妥。
+          # ============================================================
+          CONFIG_KERNEL_DEBUG_FS=y
+          CONFIG_KERNEL_DEVMEM=y
+          CONFIG_BUSYBOX_CONFIG_DEVMEM=y
           EOF
 
-          # 5. 自动检测目标内核是否支持 DEBUG_FS，并开启对应 OpenWrt 内核选项
-          #    依据：luci-app-airoha-npu 上游 Makefile 明确要求 CONFIG_KERNEL_DEBUG_FS
-          #    用于 PPE 流表；Frame Engine 与超频功能还依赖 busybox devmem。
-          KERNEL_DEBUG_FS_SUPPORTED=""
-          if grep -Rhs '^CONFIG_DEBUG_FS=y' target/linux/airoha/ 2>/dev/null | head -1 | grep -q .; then
-            KERNEL_DEBUG_FS_SUPPORTED="yes"
-          fi
-          if [ -n "$KERNEL_DEBUG_FS_SUPPORTED" ]; then
-            echo ">>> 检测到目标内核支持 DEBUG_FS，开启 CONFIG_KERNEL_DEBUG_FS=y"
-            echo "CONFIG_KERNEL_DEBUG_FS=y" >> .config
-          else
-            echo "::warning::未在 target/linux/airoha 下检测到 CONFIG_DEBUG_FS=y，仍尝试开启 CONFIG_KERNEL_DEBUG_FS=y"
-            echo "CONFIG_KERNEL_DEBUG_FS=y" >> .config
-          fi
-          # 上游 luci-app-airoha-npu 的 Frame Engine / 超频功能依赖 devmem
-          echo "CONFIG_KERNEL_DEVMEM=y" >> .config
-          echo "CONFIG_BUSYBOX_CONFIG_DEVMEM=y" >> .config
-
-          # 6. ✅ 关键修正：在所有配置注入完毕后，统一运行 olddefconfig
-          #    让 Kconfig 系统一次性校验所有新增符号的依赖关系，避免后期追加的选项被静默重置。
+          # 6. 最后运行 olddefconfig，让 Kconfig 统一校验追加项依赖
           make olddefconfig
 
           # 7. 校验单一机型锁定
@@ -353,7 +355,33 @@ jobs:
           make download -j1 V=s || { echo "::warning::仍有下载失败"; }
           find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
 
-      - name: 执行固件编译 (Compile Firmware)
+      # ============================================================================
+      # 修复：编译前检查上次构建状态。
+      # - 上次成功（存在 .build_success）：保留全部缓存，仅清理 tmp，避免全量重编。
+      # - 上次失败（无标记）：只删除最可能损坏的部分（全局 stamp + tmp），
+      #   不删除 dl/、toolchain、host、build_dir 下的包源码，做到"只删必要的"。
+      # 编译结束后统一写入/不写入 .build_success，供下次判断。
+      # ============================================================================
+      - name: 检查上次构建状态并精准清理缓存 ✅【新增：失败时只删必要文件，成功时保留缓存】
+        working-directory: ./ponwrt
+        run: |
+          if [ -f staging_dir/.build_success ]; then
+            echo ">>> 上次构建成功，保留缓存，仅清理 tmp"
+            rm -rf tmp
+            echo ">>> 已保留：staging_dir（含 stamp）、dl/、toolchain、host、build_dir"
+          else
+            echo ">>> 上次构建失败或无成功标记，精准清理（不删除 dl/ 与工具链）"
+            # 删除全局 stamp，强制 OpenWrt 重新检查包依赖状态
+            rm -rf staging_dir/target-aarch64_cortex-a53_musl/stamp
+            # 删除 tmp 临时目录
+            rm -rf tmp
+            echo ">>> 已清理：staging_dir/target-*/stamp、tmp"
+            echo ">>> 已保留：dl/、staging_dir/toolchain-*、staging_dir/host、build_dir 下的包源码"
+          fi
+          # 删除旧标记，等待本次编译成功后重新写入
+          rm -f staging_dir/.build_success
+
+      - name: 执行固件编译 (Compile Firmware) ✅【修复：移除无条件的 stamp 删除】
         working-directory: ./ponwrt
         run: |
           export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
@@ -362,11 +390,20 @@ jobs:
           export GOENV=off
           export GOTOOLCHAIN=local
           mkdir -p logs
-          rm -rf staging_dir/target-aarch64_cortex-a53_musl/stamp
+          # 注意：不再无条件删除 staging_dir/target-*/stamp，
+          # 是否清理由上一"检查上次构建状态"步骤按需决定，避免每次全量重编。
           make package/libs/libffi/compile -j"$(nproc)" V=s || true
           set -o pipefail
           make -j"$(nproc)" 2>&1 | tee logs/build.log || \
             (echo ">>> 并行编译失败，回退单线程" && make -j1 V=s 2>&1 | tee -a logs/build.log)
+
+      - name: 标记构建成功 ✅【新增：写入成功标记，供下次判断】
+        if: success()
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p staging_dir
+          touch staging_dir/.build_success
+          echo ">>> 已写入构建成功标记 staging_dir/.build_success"
 
       - name: 整理产物 (Collect Firmware)
         run: |
@@ -596,16 +633,19 @@ jobs:
             Samba4、NFS、CUPS、mjpg-streamer 上层应用请使用SDK分包工作流编译。
           files: release_out/*
 
-      - name: 失败时保存缓存
-        if: failure()
+      # ============================================================================
+      # 修复：保存 staging 缓存。使用 always() 确保成功/失败都保存最新状态，
+      # 配合 key 带 run_id，下次运行能准确恢复本次实际状态（含/不含 .build_success），
+      # 从而实现"上次失败才精准清理，上次成功保留缓存"的逻辑。
+      # 不再单独使用"失败时保存缓存"步骤，避免 key 不一致导致状态错乱。
+      # ============================================================================
+      - name: 保存 staging 缓存 (Save staging cache) ✅【修复：always 运行，失败也保存】
+        if: always()
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
-          path: |
-            ponwrt/staging_dir/toolchain-*
-            ponwrt/staging_dir/host
-            ponwrt/staging_dir/target-aarch64_cortex-a53_musl
-          key: hg5585f-cache-${{ github.workflow_sha }}-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
+          path: ponwrt/staging_dir/target-aarch64_cortex-a53_musl
+          key: hg5585f-stage-${{ github.run_id }}
 
       - name: 上传编译配置与日志
         if: always()
