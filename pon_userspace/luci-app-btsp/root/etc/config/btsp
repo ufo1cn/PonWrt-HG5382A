@@ -1,0 +1,5 @@
+config main
+    option enable '0'
+    option mac '00:00:00:00:00:00'
+    option baud '9600'
+    option port '5001'

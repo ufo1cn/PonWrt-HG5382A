@@ -1,0 +1,25 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+msgid "BlueALSA 蓝牙音频设置"
+msgstr "BlueALSA 蓝牙音频设置"
+
+msgid "切换A2DP立体声 / HFP免提（HFP支持耳机麦克风，音质降为单声道）"
+msgstr "切换A2DP立体声 / HFP免提（HFP支持耳机麦克风，音质降为单声道）"
+
+msgid "音频模式"
+msgstr "音频模式"
+
+msgid "A2DP 立体声（听歌，无麦克风）"
+msgstr "A2DP 立体声（听歌，无麦克风）"
+
+msgid "HFP AG 免提（支持耳机麦，单声道）"
+msgstr "HFP AG 免提（支持耳机麦，单声道）"
+
+msgid "Blue蓝牙音频"
+msgstr "Blue蓝牙音频"
+
+msgid "切换后自动重启BlueALSA；A2DP与HFP模式互斥，不能同时启用"
+msgstr "切换后自动重启BlueALSA；A2DP与HFP模式互斥，不能同时启用"

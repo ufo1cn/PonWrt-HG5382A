@@ -1,0 +1,5 @@
+config main
+    option enable '0'
+    option resolution '640x480'
+    option fps '15'
+    option rtsp_port '8554'
