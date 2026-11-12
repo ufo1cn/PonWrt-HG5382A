@@ -95,7 +95,7 @@ jobs:
           path: |
             ponwrt/staging_dir/toolchain-*
             ponwrt/staging_dir/host
-          key: hg5585f-toolchain-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
+          key: hg5585f-toolchain-${{ github.workflow_sha }}-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
           restore-keys: |
             hg5585f-toolchain-
 
@@ -103,7 +103,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ponwrt/staging_dir/target-aarch64_cortex-a53_musl
-          key: hg5585f-stage-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
+          key: hg5585f-stage-${{ github.workflow_sha }}-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
           restore-keys: |
             hg5585f-stage-
 
@@ -117,7 +117,7 @@ jobs:
             ponwrt/build_dir/target-aarch64_cortex-a53_musl/sing-box-*
             ponwrt/build_dir/target-aarch64_cortex-a53_musl/libcronet-*
             ponwrt/build_dir/target-aarch64_cortex-a53_musl/openssl-*
-          key: hg5585f-slow-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config', 'ponwrt/feeds.conf.default') }}
+          key: hg5585f-slow-${{ github.workflow_sha }}-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config', 'ponwrt/feeds.conf.default') }}
           restore-keys: |
             hg5585f-slow-
 
@@ -198,11 +198,14 @@ jobs:
             https://raw.githubusercontent.com/openwrt/openwrt/master/package/libs/libffi/Makefile
           grep -q 'PKG_NAME:=libffi' package/libs/libffi/Makefile && echo ">>> libffi 注入成功" || exit 1
 
-      - name: 生成并锁定 HG5585F-CT 配置
+      - name: 生成并锁定 HG5585F-CT 配置 ✅【修复时序：先olddefconfig，后追加自定义配置】
         working-directory: ./ponwrt
         run: |
           rm -rf tmp
+          # 合并两份基础配置
           perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
+          # 先对齐基础配置（olddefconfig，不粗暴重置）
+          make olddefconfig
           sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
           sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
           sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
@@ -220,11 +223,7 @@ jobs:
           CONFIG_PACKAGE_openssh-sftp-server=y
           # CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set
           EOF
-          make defconfig
-          sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
-          if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y$' .config; then
-            echo "::error::HG5585F-CT 单一机型锁定校验失败！"; exit 1
-          fi
+          # 追加全部自定义内核/软件包配置
           cat >> .config << 'EOF'
           # --- PON 修复 ---
           CONFIG_PACKAGE_kmod-airoha-paged-bosa=y
@@ -304,6 +303,14 @@ jobs:
           # CONFIG_PACKAGE_ser2net4 is not set
           # CONFIG_PACKAGE_luci-app-ser2net4 is not set
           EOF
+          # 校验单一机型锁定
+          sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
+          if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y$' .config; then
+            echo "::error::HG5585F-CT 单一机型锁定校验失败！"; exit 1
+          fi
+          # 【调试输出】打印几个关键内核配置确认写入成功
+          echo "==== 校验关键内核模块配置 ===="
+          grep -E 'CONFIG_PACKAGE_kmod-nft-tproxy|CONFIG_PACKAGE_kmod-tun|CONFIG_PACKAGE_kmod-iptv|CONFIG_PACKAGE_kmod-usb-xhci' .config
           echo ">>> 固件配置完成"
 
       - name: 下载源码软件包 (容错)
@@ -465,7 +472,7 @@ jobs:
           echo ">>> 编译 rtl8723bu 驱动"
           make package/kernel/rtl8723bu/download V=s 2>&1 | tail -3 || echo "::warning::rtl8723bu 下载失败"
           make package/kernel/rtl8723bu/compile -j"$(nproc)" V=s 2>&1 | tee logs/rtl8723bu-pkg.log | tail -20
-          [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::rtl8723bu 编译失败（不影响固件）" || echo ">>> rtl8723bu 驱动成功"
+          [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::rtl8723bu 驱动编译失败（不影响固件）" || echo ">>> rtl8723bu 驱动成功"
 
           echo ">>> 【调试】打印bin目录结构，查看apk实际输出位置"
           ls -la bin/
@@ -568,7 +575,7 @@ jobs:
             ponwrt/staging_dir/toolchain-*
             ponwrt/staging_dir/host
             ponwrt/staging_dir/target-aarch64_cortex-a53_musl
-          key: hg5585f-cache-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
+          key: hg5585f-cache-${{ github.workflow_sha }}-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
 
       - name: 上传编译配置与日志
         if: always()
