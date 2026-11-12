@@ -138,64 +138,93 @@ jobs:
           fi
 
       # ============================================================================
-      # 修复上游 Kconfig 递归依赖（精准修补，已验证）
-      # 1. qt5base：在 Config.in 的 OPENGL choice 块内插入 depends on PACKAGE_qt5base-gui
-      # 2. fwknop：将 menu 级 depends 改为 PACKAGE_fwknopd || PACKAGE_fwknop
-      # 3. squeezelite：给 SQUEEZELITE_WMA_ALAC（或 SQUEEZELITE_WMA）添加 depends on BUILD_PATENTED
-      # 4. mihomo：主配置层禁用 mihomo-alpha（独立包阶段再切换编译）
+      # 修复上游 Kconfig 递归依赖（基于上游提交精准修补，失败即报错）
+      # 1. qt5base：在 choice 块中添加 depends on PACKAGE_qt5base-gui（上游提交 1668ab74cf）
+      # 2. fwknop：menu 级 depends 改为 PACKAGE_fwknopd || PACKAGE_fwknop（上游提交 5f5248be7d）
+      # 3. squeezelite：给 SQUEEZELITE_WMA 添加 depends on BUILD_PATENTED（上游提交 10c087a9）
+      # 4. mihomo：主配置禁用 mihomo-alpha（独立包阶段再切换）
       # ============================================================================
-      - name: 修复上游 Kconfig 递归依赖 ✅【精准修补 qt5base / fwknop / squeezelite】
+      - name: 修复上游 Kconfig 递归依赖 ✅【基于上游提交精准修补，失败即报错】
         working-directory: ./ponwrt
         run: |
           set -e
 
-          QT5_CONFIG=$(find feeds/video -path '*qt5base/Config.in' -type f | head -1)
-          if [ -n "$QT5_CONFIG" ]; then
+          QT5_CONFIG="feeds/video/frameworks/qt5/qt5base/Config.in"
+          if [ -f "$QT5_CONFIG" ]; then
             echo ">>> 修复 qt5base: $QT5_CONFIG"
-            awk '
-              /^[[:space:]]*choice[[:space:]]*$/ { in_choice = 1; print; next }
-              in_choice {
-                if ($0 ~ /depends on PACKAGE_qt5base-gui/) { print; in_choice = 0; next }
-                if ($0 ~ /^[[:space:]]*config[[:space:]]/ || $0 ~ /^[[:space:]]*endchoice[[:space:]]*$/) {
-                  if (!inserted) { print "\t\tdepends on PACKAGE_qt5base-gui"; inserted = 1 }
-                  print
-                  if ($0 ~ /^[[:space:]]*endchoice[[:space:]]*$/) { in_choice = 0; inserted = 0 }
-                  next
-                }
-                print; next
-              }
-              { print }
-            ' "$QT5_CONFIG" > "${QT5_CONFIG}.tmp" && mv "${QT5_CONFIG}.tmp" "$QT5_CONFIG"
+            python3 - "$QT5_CONFIG" << 'PYEOF'
+          import sys
+          path = sys.argv[1]
+          with open(path, 'r') as f:
+              lines = f.readlines()
+          out = []
+          in_choice = False
+          inserted = False
+          for line in lines:
+              out.append(line)
+              if line.strip() == 'choice' and not in_choice:
+                  in_choice = True
+                  inserted = False
+              elif in_choice and not inserted and line.strip().startswith(('config ', 'endchoice')):
+                  out.insert(-1, '\t\tdepends on PACKAGE_qt5base-gui\n')
+                  inserted = True
+                  in_choice = False
+          with open(path, 'w') as f:
+              f.writelines(out)
+          PYEOF
             echo ">>> qt5base choice 块校验："
-            grep -n -A4 '^[[:space:]]*choice[[:space:]]*$' "$QT5_CONFIG" | head -10
+            grep -A4 '^choice$' "$QT5_CONFIG" | head -8
+            if ! grep -A4 '^choice$' "$QT5_CONFIG" | grep -q 'depends on PACKAGE_qt5base-gui'; then
+              echo "::error::qt5base depends 插入失败"
+              exit 1
+            fi
           else
-            echo "::warning::未找到 qt5base/Config.in"
+            echo "::error::未找到 $QT5_CONFIG"
+            exit 1
           fi
 
-          FWKNOP_CONFIG=$(find feeds/packages -path '*fwknop/Config.in' -type f | head -1)
-          if [ -n "$FWKNOP_CONFIG" ]; then
+          FWKNOP_CONFIG="feeds/packages/net/fwknop/Config.in"
+          if [ -f "$FWKNOP_CONFIG" ]; then
             echo ">>> 修复 fwknop: $FWKNOP_CONFIG"
             sed -i 's/^[[:space:]]*depends on PACKAGE_fwknopd[[:space:]]*$/	depends on PACKAGE_fwknopd || PACKAGE_fwknop/' "$FWKNOP_CONFIG"
             echo ">>> fwknop menu 依赖校验："
             grep -n 'depends on PACKAGE_fwknop' "$FWKNOP_CONFIG"
+            if ! grep -q 'depends on PACKAGE_fwknopd || PACKAGE_fwknop' "$FWKNOP_CONFIG"; then
+              echo "::error::fwknop depends 替换失败"
+              exit 1
+            fi
           else
-            echo "::warning::未找到 fwknop/Config.in"
+            echo "::error::未找到 $FWKNOP_CONFIG"
+            exit 1
           fi
 
-          SQZ_MK=$(find feeds/packages feeds/sound -path '*squeezelite/Makefile' -type f 2>/dev/null | head -1)
-          if [ -n "$SQZ_MK" ]; then
+          SQZ_MK="feeds/packages/sound/squeezelite/Makefile"
+          if [ -f "$SQZ_MK" ]; then
             echo ">>> 修复 squeezelite: $SQZ_MK"
-            for cfg in SQUEEZELITE_WMA_ALAC SQUEEZELITE_WMA; do
-              if grep -q "config $cfg" "$SQZ_MK"; then
-                if ! grep -A2 "config $cfg" "$SQZ_MK" | grep -q 'depends on BUILD_PATENTED'; then
-                  sed -i "/config $cfg/a\	depends on BUILD_PATENTED" "$SQZ_MK"
-                fi
-                echo ">>> $cfg 配置块校验："
-                grep -n -A3 "config $cfg" "$SQZ_MK"
-              fi
-            done
+            if ! grep -A3 '^config SQUEEZELITE_WMA$' "$SQZ_MK" | grep -q 'depends on BUILD_PATENTED'; then
+              python3 - "$SQZ_MK" << 'PYEOF'
+          import sys
+          path = sys.argv[1]
+          with open(path, 'r') as f:
+              lines = f.readlines()
+          out = []
+          for line in lines:
+              out.append(line)
+              if line.strip() == 'config SQUEEZELITE_WMA':
+                  out.append('\t\tdepends on BUILD_PATENTED\n')
+          with open(path, 'w') as f:
+              f.writelines(out)
+          PYEOF
+            fi
+            echo ">>> SQUEEZELITE_WMA 配置块校验："
+            grep -A4 '^config SQUEEZELITE_WMA$' "$SQZ_MK"
+            if ! grep -A4 '^config SQUEEZELITE_WMA$' "$SQZ_MK" | grep -q 'depends on BUILD_PATENTED'; then
+              echo "::error::squeezelite BUILD_PATENTED 依赖插入失败"
+              exit 1
+            fi
           else
-            echo "::warning::未找到 squeezelite/Makefile"
+            echo "::error::未找到 $SQZ_MK"
+            exit 1
           fi
 
           echo ">>> mihomo 递归依赖由主配置段禁用 mihomo-alpha 解决"
@@ -203,7 +232,7 @@ jobs:
             -e 's/+PACKAGE_mihomo-meta//g' \
             -e 's/+PACKAGE_mihomo-alpha//g' {} + 2>/dev/null || true
 
-          echo ">>> 递归依赖精准修复完成"
+          echo ">>> 递归依赖精准修复完成（所有修改均已校验）"
 
       - name: 将 luci-app-airoha-npu 克隆到 package 目录 + 自动同步子模块
         working-directory: ./ponwrt
