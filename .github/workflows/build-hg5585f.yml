@@ -1,5 +1,4 @@
-# ============================================================================
-# 编译 PonWrt HG5585F 电信版集成版固件
+name: 编译 PonWrt HG5585F 电信版集成版固件
 # （mihomo + sing-box 共存 + IPTV 驱动 + omcproxy + PON 修复 + GPON 补丁 + Releases 预发布）
 # ----------------------------------------------------------------------------
 # 重要约定：新增第三方软件/库前，先核查上游仓库 README、Makefile、依赖、submodule、平台支持
@@ -8,7 +7,6 @@
 #  3. 内核模块 kmod 必须和固件一起编译（=m / =y）；
 #  4. 普通luci应用、daemon、上层服务，优先走SDK分包编译；
 # ============================================================================
-name: 编译 PonWrt HG5585F 电信版固件 (mihomo + sing-box + IPTV + omcproxy + GPON + USB)
 on:
   workflow_dispatch:
   push:
@@ -287,6 +285,16 @@ jobs:
           # 可选扩展：USB串口、USB网卡
           CONFIG_PACKAGE_kmod-usb-serial=m
           CONFIG_PACKAGE_kmod-usb-net=m
+          # --- USB 二合一无线网卡驱动（独立IPK，不打包进固件） ---
+          # rtw88 驱动 RTL8821CU / RTL8822BU 二合一网卡（WiFi+蓝牙，5G+2.4G）
+          CONFIG_PACKAGE_kmod-rtw88=m
+          CONFIG_PACKAGE_kmod-rtw88-usb=m
+          CONFIG_PACKAGE_kmod-rtw88-8822c=m
+          CONFIG_PACKAGE_kmod-rtw88-8822cu=m
+          CONFIG_PACKAGE_usb-modeswitch=m
+          CONFIG_PACKAGE_usb-modeswitch-data=m
+          # RTL8723BU (RTL8723B USB) 二合一网卡第三方驱动（仅2.4G，WiFi+蓝牙）
+          CONFIG_PACKAGE_kmod-rtl8723bu=m
           # --- 独立包不参与固件 ---
           # CONFIG_PACKAGE_luci-app-iptv is not set
           # CONFIG_PACKAGE_luci-app-airoha-npu is not set
@@ -349,12 +357,19 @@ jobs:
           sed -i 's|^# CONFIG_PACKAGE_luci-app-iptv is not set$|CONFIG_PACKAGE_luci-app-iptv=m|' .config
           sed -i 's|^# CONFIG_PACKAGE_luci-app-airoha-npu is not set$|CONFIG_PACKAGE_luci-app-airoha-npu=m|' .config
           sed -i 's|^# CONFIG_PACKAGE_luci-app-airoha-soc is not set$|CONFIG_PACKAGE_luci-app-airoha-soc=m|' .config
+          sed -i 's|^# CONFIG_PACKAGE_kmod-rtw88 is not set$|CONFIG_PACKAGE_kmod-rtw88=m|' .config
+          sed -i 's|^# CONFIG_PACKAGE_kmod-rtw88-usb is not set$|CONFIG_PACKAGE_kmod-rtw88-usb=m|' .config
+          sed -i 's|^# CONFIG_PACKAGE_kmod-rtw88-8822c is not set$|CONFIG_PACKAGE_kmod-rtw88-8822c=m|' .config
+          sed -i 's|^# CONFIG_PACKAGE_kmod-rtw88-8822cu is not set$|CONFIG_PACKAGE_kmod-rtw88-8822cu=m|' .config
+          sed -i 's|^# CONFIG_PACKAGE_usb-modeswitch is not set$|CONFIG_PACKAGE_usb-modeswitch=m|' .config
+          sed -i 's|^# CONFIG_PACKAGE_usb-modeswitch-data is not set$|CONFIG_PACKAGE_usb-modeswitch-data=m|' .config
+          sed -i 's|^# CONFIG_PACKAGE_kmod-rtl8723bu is not set$|CONFIG_PACKAGE_kmod-rtl8723bu=m|' .config
 
           # 修复：使用 olddefconfig，不重置已设置=m
           make olddefconfig >/dev/null 2>&1
 
           echo ">>> 当前config独立包状态"
-          grep -E 'CONFIG_PACKAGE_luci-app-iptv|CONFIG_PACKAGE_luci-app-airoha-npu|CONFIG_PACKAGE_luci-app-airoha-soc' .config
+          grep -E 'CONFIG_PACKAGE_luci-app-iptv|CONFIG_PACKAGE_luci-app-airoha-npu|CONFIG_PACKAGE_luci-app-airoha-soc|CONFIG_PACKAGE_kmod-rtw88|CONFIG_PACKAGE_kmod-rtl8723bu' .config
 
           # --- luci-app-iptv ---
           echo ">>> 下载 luci-app-iptv"
@@ -384,6 +399,22 @@ jobs:
             echo "::warning::未检测到 airoha-npu/soc 包，跳过"
           fi
 
+          # --- rtw88 驱动 RTL8821CU / RTL8822BU 无线网卡驱动 + usb-modeswitch ---
+          echo ">>> 编译 rtw88 系列驱动"
+          make package/kernel/rtw88/download V=s 2>&1 | tail -3 || echo "::warning::rtw88 下载失败"
+          make package/kernel/rtw88/compile -j"$(nproc)" V=s 2>&1 | tee logs/rtw88-pkg.log | tail -20
+          [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::rtw88 编译失败（不影响固件）" || echo ">>> rtw88 驱动成功"
+          echo ">>> 编译 usb-modeswitch"
+          make package/feeds/packages/usb-modeswitch/download V=s 2>&1 | tail -3 || echo "::warning::usb-modeswitch 下载失败"
+          make package/feeds/packages/usb-modeswitch/compile -j"$(nproc)" V=s 2>&1 | tee logs/usb-modeswitch-pkg.log | tail -20
+          [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::usb-modeswitch 编译失败（不影响固件）" || echo ">>> usb-modeswitch 成功"
+
+          # --- rtl8723bu 第三方网卡驱动 ---
+          echo ">>> 编译 rtl8723bu 驱动"
+          make package/kernel/rtl8723bu/download V=s 2>&1 | tail -3 || echo "::warning::rtl8723bu 下载失败"
+          make package/kernel/rtl8723bu/compile -j"$(nproc)" V=s 2>&1 | tee logs/rtl8723bu-pkg.log | tail -20
+          [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::rtl8723bu 编译失败（不影响固件）" || echo ">>> rtl8723bu 驱动成功"
+
           echo ">>> 【调试】打印bin目录结构，查看apk实际输出位置"
           ls -la bin/
           ls -la bin/packages/*/ 2>/dev/null || true
@@ -409,7 +440,8 @@ jobs:
         working-directory: ./ponwrt
         run: |
           mkdir -p ../ipk_out
-          for pkg in luci-app-iptv luci-app-airoha-npu luci-app-airoha-soc; do
+          pkg_list="luci-app-iptv luci-app-airoha-npu luci-app-airoha-soc kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822c kmod-rtw88-8822cu usb-modeswitch usb-modeswitch-data kmod-rtl8723bu"
+          for pkg in $pkg_list; do
             found=0
             while IFS= read -r -d '' f; do
               cp -f "$f" ../ipk_out/
@@ -417,7 +449,7 @@ jobs:
             done < <(find bin -type f \( -name "${pkg}*.apk" -o -name "${pkg}*.ipk" \) -print0 )
             [ "$found" -eq 1 ] && echo ">>> 已收集 $pkg" || echo "::notice::$pkg 未生成，跳过"
           done
-          ls -lh ../ipk_out/luci-app-*.apk ../ipk_out/luci-app-*.ipk 2>/dev/null || true
+          ls -lh ../ipk_out/luci-app-*.apk ../ipk_out/luci-app-*.ipk ../ipk_out/kmod-*.ipk ../ipk_out/usb-modeswitch*.ipk 2>/dev/null || true
 
       - name: 上传固件 Artifact
         if: success()
@@ -467,7 +499,7 @@ jobs:
           generate_release_notes: true
           body: |
             PonWrt HG5585F-CT 集成版自动预发布。
-            包含固件镜像、软件包压缩包、独立 luci-app-iptv / airoha-npu、USB全套内核模块ipk（如编译成功）及 SHA256SUMS。
+            包含固件镜像、软件包压缩包、独立 luci-app-iptv / airoha-npu、USB全套内核模块ipk、RTL8821CU/RTL8723BU二合一无线网卡驱动ipk（如编译成功）及 SHA256SUMS。
             注意：这是预发布，仅用于测试验证。
             USB底层驱动已内置支持（xhci/存储/ntfs3/vfat/ext4/uvc摄像头/usb-serial/usb-net）
             Samba4、NFS、CUPS、mjpg-streamer 上层应用请使用SDK分包工作流编译。
