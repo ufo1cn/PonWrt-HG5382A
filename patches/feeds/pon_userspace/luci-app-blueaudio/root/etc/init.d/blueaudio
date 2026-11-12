@@ -1,0 +1,26 @@
+#!/bin/sh /etc/rc.common
+USE_PROCD=1
+START=99
+STOP=01
+
+start_service() {
+    local profile
+    config_load blueaudio
+    config_get profile main profile "a2dp"
+
+    procd_open_instance
+    procd_set_param command /usr/bin/bluealsad
+    if [ "$profile" = "hfp" ]; then
+        procd_append_param command -p a2dp-source -p a2dp-sink -p hfp-ag
+    else
+        procd_append_param command -p a2dp-source -p a2dp-sink
+    fi
+    procd_set_param respawn
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+
+service_triggers() {
+    procd_add_reload_trigger "blueaudio"
+}
