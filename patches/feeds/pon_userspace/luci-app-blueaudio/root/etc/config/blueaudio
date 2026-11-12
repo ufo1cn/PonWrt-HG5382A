@@ -1,2 +1,0 @@
-config main
-    option profile 'a2dp'
