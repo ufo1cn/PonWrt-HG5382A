@@ -1,0 +1,10 @@
+config port
+    option enable '1'
+    option device '/dev/ttyS0'
+    option baud '9600'
+    option databits '8'
+    option stopbits '1'
+    option parity 'none'
+    option tcp_mode 'raw'
+    option port '2000'
+    option timeout '0'
