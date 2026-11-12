@@ -1,4 +1,4 @@
-name: 编译 PonWrt HG5585F 电信版集成版固件
+name: 编译 PonWrt 软件包
 # （mihomo + sing-box 共存 + IPTV 驱动 + omcproxy + PON 修复 + GPON 补丁 + Releases 预发布）
 # ----------------------------------------------------------------------------
 # 重要约定：新增第三方软件/库前，先核查上游仓库 README、Makefile、依赖、submodule、平台支持
