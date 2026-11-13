@@ -416,31 +416,24 @@ jobs:
           printf 'CONFIG_PACKAGE_kmod-usb-audio=y\n' >> .config
 
           printf '# ============================================================\n' >> .config
-          printf '# go2rtc / camlive：USB 摄像头远程访问 + 浏览器视频聊天\n' >> .config
-          printf '# camlive 输出 HTTP MJPEG（零外部依赖），go2rtc 转 WebRTC（需 ffmpeg + H264）\n' >> .config
+          printf '# go2rtc / camlive 及其用户态依赖：一律只编独立包，不进镜像\n' >> .config
+          printf '# 用到再装：apk add --allow-untrusted <包>.apk（产物见 artifact）\n' >> .config
           printf '# ============================================================\n' >> .config
-          printf 'CONFIG_PACKAGE_camlive=y\n' >> .config
-          printf 'CONFIG_PACKAGE_go2rtc=y\n' >> .config
-          printf 'CONFIG_PACKAGE_luci-app-camlive=y\n' >> .config
-          printf 'CONFIG_PACKAGE_luci-app-go2rtc=y\n' >> .config
-          printf '# camlive/go2rtc 的 LuCI 是 Lua 写的（controller/model/view），需要 luci-compat\n' >> .config
-          printf 'CONFIG_PACKAGE_luci-compat=y\n' >> .config
-          printf '# ffmpeg：MJPEG->H264 转码 + libopus 音频编码，WebRTC 视频聊天必需\n' >> .config
-          printf 'CONFIG_PACKAGE_ffmpeg=y\n' >> .config
-          printf 'CONFIG_PACKAGE_alsa-utils=y\n' >> .config
-          printf '# libx264 的包级依赖是 @BUILD_PATENTED：不开这个符号，kconfig 会把 libx264\n' >> .config
-          printf '# （以及 ffmpeg 的 FFMPEG_LIBX264）整个判为不可选、静默丢掉\n' >> .config
+          printf '# CONFIG_PACKAGE_camlive is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-app-camlive is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-compat is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_ffmpeg is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_libx264 is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_libopus is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_alsa-utils is not set\n' >> .config
+          printf '# go2rtc 与它自己的 LuCI 前端同理，只出 apk\n' >> .config
+          printf '# CONFIG_PACKAGE_go2rtc is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-app-go2rtc is not set\n' >> .config
+          printf '# 但全局 BUILD_PATENTED 必须留 y：libx264 的包依赖是 @BUILD_PATENTED，\n' >> .config
+          printf '# 没有它 kconfig 连符号都不给，独立 apk 也编不出来（静默丢弃）。\n' >> .config
           printf 'CONFIG_BUILD_PATENTED=y\n' >> .config
-          printf 'CONFIG_PACKAGE_libx264=y\n' >> .config
-          printf 'CONFIG_PACKAGE_libopus=y\n' >> .config
-          printf 'CONFIG_FFMPEG_PROGRAMS=y\n' >> .config
-          printf 'CONFIG_FFMPEG_GPL=y\n' >> .config
-          printf 'CONFIG_FFMPEG_LIBX264=y\n' >> .config
-          printf 'CONFIG_FFMPEG_LIBOPUS=y\n' >> .config
-          printf '# 体积：打开 --enable-small，静态表/hardcoded tables 不要\n' >> .config
-          printf 'CONFIG_FFMPEG_OPTIMIZE_SIZE=y\n' >> .config
-          printf '# 必须保持"完整组件集"：手动裁剪模式下 ffmpeg 包的组件清单里没有\n' >> .config
-          printf '# mjpeg 解码器 / rtsp 复用器的符号，开了就编不出 go2rtc 要用的组件\n' >> .config
+          printf '# ffmpeg 只编独立包，但组件集必须保持默认（完整）：手动裁剪模式下\n' >> .config
+          printf '# 组件清单里没有 mjpeg 解码器 / rtsp 复用器，开了反而编不出 go2rtc 要的件。\n' >> .config
           printf '# CONFIG_FFMPEG_SELECT_COMPONENTS is not set\n' >> .config
           printf '# --- 驱动依赖的内核符号（kmod 打包要求 .ko 必须真的被编出来）---\n' >> .config
           for k in $DRIVER_KCONFIGS; do printf 'CONFIG_KERNEL_%s=m\n' "${k#CONFIG_}" >> .config; done
@@ -527,14 +520,15 @@ jobs:
           for p in $DRIVER_PKGS; do check_y "CONFIG_PACKAGE_${p}"; done
           for p in $DRIVER_FW_PKGS; do check_y "CONFIG_PACKAGE_${p}"; done
           for p in $BT_USER_PKGS; do check_y "CONFIG_PACKAGE_${p}"; done
-          # go2rtc 链路（摄像头/转码/LuCI 前端），任何一个被 kconfig 静默丢掉都直接失败
+          # go2rtc 链路一律独立包，不允许混进镜像；BUILD_PATENTED 必须开着，
+          # 否则 libx264 的符号会被 kconfig 直接吞掉，独立 apk 也编不出来
+          check_y "CONFIG_BUILD_PATENTED"
           for p in camlive go2rtc luci-app-camlive luci-app-go2rtc luci-compat \
-                   ffmpeg alsa-utils libx264 libopus; do
-            check_y "CONFIG_PACKAGE_${p}"
-          done
-          for s in CONFIG_BUILD_PATENTED CONFIG_FFMPEG_PROGRAMS CONFIG_FFMPEG_GPL \
-                   CONFIG_FFMPEG_LIBX264 CONFIG_FFMPEG_LIBOPUS; do
-            check_y "$s"
+                   ffmpeg libx264 libopus alsa-utils; do
+            if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
+              echo "::error::${p} 应只做独立包（未被选中），却出现在固件镜像里"
+              missing=$((missing+1))
+            fi
           done
 
           # sing-box 的关键开关不允许为打开状态（naive outbound 在 CI 中必然编译失败）
@@ -786,6 +780,22 @@ jobs:
           compile_dir "luci-app-airoha-npu" "package/luci-app-airoha-npu" "npu-pkg.log.txt"
           compile_dir "luci-app-blueaudio" "package/pon-local/luci-app-blueaudio" "blueaudio-pkg.log.txt"
           compile_dir "luci-app-btsp" "package/pon-local/luci-app-btsp" "btsp-pkg.log.txt"
+          # ---- go2rtc 链路的用户态依赖（全部 feed 包，按依赖顺序，best-effort）----
+          X264_DIR=$(ls -d package/feeds/*/libx264 2>/dev/null | head -1)
+          OPUS_DIR=$(ls -d package/feeds/*/libopus 2>/dev/null | head -1)
+          FFMPEG_DIR=$(ls -d package/feeds/*/ffmpeg 2>/dev/null | head -1)
+          ALSAUTIL_DIR=$(ls -d package/feeds/*/alsa-utils 2>/dev/null | head -1)
+          LUALLR_DIR=$(ls -d package/feeds/*/luci-lua-runtime 2>/dev/null | head -1)
+          LUACOMPAT_DIR=$(ls -d package/feeds/*/luci-compat 2>/dev/null | head -1)
+          [ -n "$X264_DIR" ]     && compile_dir "libx264" "$X264_DIR" "libx264-pkg.log.txt"
+          [ -n "$OPUS_DIR" ]     && compile_dir "libopus" "$OPUS_DIR" "libopus-pkg.log.txt"
+          # ffmpeg 编译时会自动带上 libx264/libopus（DEPENDS 里有条件依赖）
+          [ -n "$FFMPEG_DIR" ]   && compile_dir "ffmpeg" "$FFMPEG_DIR" "ffmpeg-pkg.log.txt"
+          [ -n "$ALSAUTIL_DIR" ] && compile_dir "alsa-utils" "$ALSAUTIL_DIR" "alsa-utils-pkg.log.txt"
+          # LuCI Lua 应用要 luci-lua-runtime + luci-compat 才能显示菜单
+          [ -n "$LUALLR_DIR" ]   && compile_dir "luci-lua-runtime" "$LUALLR_DIR" "luci-lua-runtime-pkg.log.txt"
+          [ -n "$LUACOMPAT_DIR" ] && compile_dir "luci-compat" "$LUACOMPAT_DIR" "luci-compat-pkg.log.txt"
+
           # camlive 后端必须在 luci 前端之前编出来（前端 DEPENDS 里有 +camlive）
           compile_dir "camlive" "package/pon-local/camlive" "camlive-backend-pkg.log.txt"
           compile_dir "luci-app-camlive" "package/pon-local/luci-app-camlive" "camlive-pkg.log.txt"
@@ -796,6 +806,15 @@ jobs:
           compile_dir "luci-app-ser2net" "package/pon-local/luci-app-ser2net" "luci-ser2net-pkg.log.txt"
 
           echo ""
+          echo ">>> go2rtc 链路独立包产出核对"
+          : > logs/go2rtc-packages.txt
+          for p in libx264 libopus ffmpeg alsa-utils luci-lua-runtime luci-compat \
+                   camlive luci-app-camlive go2rtc luci-app-go2rtc; do
+            hit=$(find bin -type f \( -name "${p}*.apk" -o -name "${p}*.ipk" \) 2>/dev/null | head -1)
+            if [ -n "$hit" ]; then echo "OK   $p -> $hit" | tee -a logs/go2rtc-packages.txt
+            else echo "MISS $p（未产出）" | tee -a logs/go2rtc-packages.txt; fi
+          done
+
           echo ">>> bin 目录结构"
           ls -la bin/packages/*/ 2>/dev/null || true
           ls -la bin/targets/airoha/an7581/packages/ 2>/dev/null | head -n 40 || true
@@ -841,7 +860,7 @@ jobs:
         run: |
           set +e
           mkdir -p ../ipk_out
-          pkg_list="camlive go2rtc luci-app-go2rtc usbutils luci-app-iptv luci-app-airoha-npu luci-app-blueaudio luci-app-btsp luci-app-camlive gensio ser2net luci-app-ser2net mihomo-meta mihomo-alpha $EXTRA_KMODS $DRIVER_PKGS $DRIVER_FW_PKGS $BT_USER_PKGS"
+          pkg_list="camlive go2rtc luci-app-go2rtc ffmpeg libx264 libopus alsa-utils luci-compat luci-lua-runtime usbutils luci-app-iptv luci-app-airoha-npu luci-app-blueaudio luci-app-btsp luci-app-camlive gensio ser2net luci-app-ser2net mihomo-meta mihomo-alpha $EXTRA_KMODS $DRIVER_PKGS $DRIVER_FW_PKGS $BT_USER_PKGS"
           : > ../ipk_out/collected.txt
           for pkg in $pkg_list; do
             found=0
