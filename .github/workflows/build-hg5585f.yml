@@ -30,6 +30,43 @@ jobs:
       USB_CORE_PKGS: >-
         kmod-usb3 kmod-usb-storage kmod-usb-storage-uas kmod-usb-storage-extras
         kmod-fs-ext4 kmod-fs-vfat kmod-fs-exfat kmod-fs-ntfs3 block-mount
+      # 镜像内置的 USB 串口/网卡/蓝牙/无线网卡驱动（=y，开机即可用）
+      # 名字全部来自 base 仓库：
+      #   package/kernel/linux/modules/{usb,bluetooth,video}.mk
+      #   package/kernel/mac80211/realtek.mk  （rtw88 / rtl8xxxu 就在这里！）
+      DRIVER_PKGS: >-
+        kmod-usb-serial kmod-usb-serial-ch341 kmod-usb-serial-cp210x
+        kmod-usb-serial-ftdi kmod-usb-serial-pl2303 kmod-usb-acm
+        kmod-usb-net kmod-usb-net-cdc-ether kmod-usb-net-cdc-ncm
+        kmod-usb-net-rtl8152 kmod-usb-net-asix-ax88179
+        kmod-bluetooth kmod-btusb kmod-btbcm kmod-btmtk kmod-hci-uart
+        kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822cu kmod-rtw88-8821cu
+        kmod-rtw88-8723du kmod-rtl8xxxu kmod-rtl8192cu
+        kmod-video-core kmod-video-videobuf2 kmod-video-uvc
+      # 无线网卡 / 蓝牙所需固件（package/firmware/linux-firmware/realtek.mk）
+      DRIVER_FW_PKGS: >-
+        rtl8822ce-firmware rtl8821ce-firmware rtl8723bu-firmware rtl8723de-firmware
+      # 蓝牙用户态栈（feed: immortalwrt/packages utils/bluez）
+      BT_USER_PKGS: >-
+        bluez bluez-libs bluez-utils bluez-utils-btmon bluez-utils-extra bluez-daemon
+      # 上述驱动所依赖的内核 Kconfig（只列会产出 .ko 的模块符号，强制 =m；
+      # bool 型子选项（BT_BREDR/BT_HCIBTUSB_RTL 等）由 kmod 包自带的 KCONFIG 负责，
+      # 不在这里强改写，避免把 bool 塞成 m）。历史上 usbnet.ko 缺失就是
+      # "包选中了但内核符号没打开"造成的，编译后还会用内核 .config 反查核验。
+      DRIVER_KCONFIGS: >-
+        CONFIG_USB_USBNET CONFIG_USB_SERIAL CONFIG_USB_SERIAL_CH341
+        CONFIG_USB_SERIAL_CP210X CONFIG_USB_SERIAL_FTDI_SIO CONFIG_USB_SERIAL_PL2303
+        CONFIG_USB_ACM CONFIG_USB_WDM
+        CONFIG_BT CONFIG_BT_HCIBTUSB CONFIG_BT_HCIUART
+        CONFIG_RTW88 CONFIG_RTW88_USB CONFIG_RTW88_8822C CONFIG_RTW88_8822CU
+        CONFIG_RTW88_8821C CONFIG_RTW88_8821CU CONFIG_RTW88_8723D CONFIG_RTW88_8723DU
+        CONFIG_RTL8XXXU CONFIG_RTL8192CU CONFIG_CFG80211 CONFIG_MAC80211
+      # 编译完成后用内核 .config 反查这些符号（bool 子选项也一起查）
+      DRIVER_KCONFIG_CHECK: >-
+        CONFIG_USB_USBNET CONFIG_USB_SERIAL_CH341 CONFIG_BT CONFIG_BT_HCIBTUSB
+        CONFIG_BT_HCIBTUSB_RTL CONFIG_BT_HCIUART CONFIG_BT_BREDR CONFIG_BT_LE
+        CONFIG_RTW88 CONFIG_RTW88_USB CONFIG_RTW88_8822CU CONFIG_RTW88_8821CU
+        CONFIG_RTW88_8723DU CONFIG_RTL8XXXU CONFIG_CFG80211 CONFIG_MAC80211
       # 以 =m 单独出包的附加内核模块（全部来自 package/kernel/linux/modules）
       EXTRA_KMODS: >-
         kmod-usb-serial kmod-usb-serial-ch341 kmod-usb-serial-cp210x
@@ -83,13 +120,16 @@ jobs:
           git -C ponwrt checkout --detach FETCH_HEAD
           echo ">>> PonWrt pinned: $SOURCE_REF"
 
-      - name: 加入外挂来源（移除 homeproxy，保留 nikki + iptv）
+      - name: 加入外挂来源（nikki + homeproxy + iptv，与 PonWrt1 一致）
         working-directory: ./ponwrt
         run: |
           if [ ! -f feeds.conf.default ]; then touch feeds.conf.default; fi
-          sed -i '/nikki/d;/homeproxy/d;/openwrt-iptv/d' feeds.conf.default
+          sed -i '/nikki/d;/homeproxy/d;/openwrt-iptv/d;/airoha-npu/d' feeds.conf.default
           [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
           echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
+          # homeproxy feed = sing-box + luci-app-homeproxy + libcronet 的来源，
+          # 缺了它 sing-box 根本不存在（HG5382A 之所以能编 sing-box 就靠这一行）
+          echo 'src-git homeproxy https://github.com/immortalwrt/homeproxy.git;master' >> feeds.conf.default
           echo 'src-git iptv https://github.com/yveming/openwrt-iptv.git' >> feeds.conf.default
           dos2unix feeds.conf.default 2>/dev/null || true
           tail -n 10 feeds.conf.default
@@ -143,7 +183,7 @@ jobs:
             https://raw.githubusercontent.com/openwrt/openwrt/master/package/libs/libffi/Makefile
           grep -q 'PKG_NAME:=libffi' package/libs/libffi/Makefile && echo ">>> libffi 注入成功" || exit 1
 
-      - name: 更新 Feeds 并安装（只装真实存在于 feed 的包）
+      - name: 更新 Feeds 并安装（与 PonWrt1 一致：feeds install -a）
         working-directory: ./ponwrt
         run: |
           set +e
@@ -152,30 +192,22 @@ jobs:
             find feeds/nikki -name Makefile -exec sed -i -E 's/[[:space:]]*\+yq\b//g' {} + || true
           fi
 
-          # 说明：kmod-usb3 / kmod-usb-storage / kmod-fs-* / kmod-usb-serial /
-          # kmod-usb-net / kmod-video-* 等全部位于 base 仓库 package/kernel/linux/modules，
-          # 不需要（也无法）用 feeds install 安装，直接用 CONFIG_PACKAGE_ 选择即可。
-          # 曾出现的 kmod-usb-xhci / kmod-video-v4l2 / kmod-rtw88-* / kmod-rtl8723bu /
-          # usb-modeswitch 在本树和全部 feed 中均不存在，属于幻觉包名，已移除。
-          ./scripts/feeds install \
-            kmod-airoha-paged-bosa kmod-airoha-pon-frontend kmod-airoha-xpon \
-            airoha-ponctl airoha-pond \
-            kmod-tun kmod-nft-tproxy kmod-nft-socket kmod-inet-diag kmod-dummy \
-            kmod-iptv \
-            omcproxy luci-app-omcproxy \
-            block-mount usbutils luci-app-iptv
+          # 关键：HG5382A 那套能编出 sing-box / mihomo / omcproxy / bluez /
+          # luci-app-homeproxy，靠的就是全量 feeds install。hg5585f 以前只做
+          # "最小化 install"，导致大量包在 package/ 里根本没有目录，
+          # 于是 make 报 "No rule to make target" / 包符号被丢弃。
+          ./scripts/feeds install -a
 
-          ./scripts/feeds install mihomo-meta nikki luci-app-nikki luci-i18n-nikki-zh-cn
-
-          ./scripts/feeds install curl libcurl libidn2 libnghttp2 libpsl \
-            libgnutls libtasn1 libunistring nettle gmp \
-            ip-full yq libcronet \
-            luci-app-ttyd luci-app-ddns ddns-scripts openssh-sftp-server
-
-          echo ">>> feeds install 完成，实际安装到 package/feeds 的目录："
-          ls -1 package/feeds/*/ 2>/dev/null | head -n 60
-          echo ">>> usbutils 是否就位："
-          ls -d package/feeds/*/usbutils 2>/dev/null || echo "::warning::usbutils 未安装成功（feed 索引中缺失）"
+          echo ">>> feeds install 完成，关键包是否就位："
+          for d in usbutils bluez sing-box luci-app-homeproxy omcproxy \
+                   luci-app-omcproxy luci-app-iptv mihomo nikki libcronet \
+                   bluez-alsa; do
+            if [ -z "$(find package/feeds -maxdepth 2 -name "$d" -type d 2>/dev/null)" ]; then
+              echo "::warning::feed 中未找到 $d（该包在本树不可用）"
+            else
+              echo "OK: $d"
+            fi
+          done
 
       - name: 将 luci-app-airoha-npu 克隆到 package 目录
         working-directory: ./ponwrt
@@ -207,6 +239,17 @@ jobs:
             done
           fi
           ls -1 package/pon-local || true
+
+          # 修 luci-app-ser2net 的 include 路径：它写的是 $(TOPDIR)/luci.mk，
+          # 而这个文件只在 luci 仓库根目录存在；在 OpenWrt 树里必须用
+          # $(TOPDIR)/feeds/luci/luci.mk，否则要么报不存在、要么包定义重复。
+          MK=package/pon-local/luci-app-ser2net/Makefile
+          if [ -f "$MK" ]; then
+            sed -i 's|include $(TOPDIR)/luci.mk|include $(TOPDIR)/feeds/luci/luci.mk|' "$MK"
+            sed -i '/\$(eval \$(call BuildPackage,luci-app-ser2net))/d' "$MK"
+            echo ">>> luci-app-ser2net Makefile 已修正 include 路径："
+            grep -n 'luci.mk' "$MK" || true
+          fi
 
       - name: 预修改 luci-app-iptv Makefile（独立包阶段再编译）
         working-directory: ./ponwrt
@@ -263,8 +306,6 @@ jobs:
           clear_sym CONFIG_PACKAGE_qt5base
           clear_sym CONFIG_PACKAGE_fwknopd
           clear_sym CONFIG_PACKAGE_squeezelite-custom
-          clear_sym CONFIG_PACKAGE_luci-app-homeproxy
-          clear_sym CONFIG_PACKAGE_sing-box
           clear_sym CONFIG_KERNEL_DEBUG_FS
           clear_sym CONFIG_KERNEL_DEVMEM
           clear_sym CONFIG_BUSYBOX_CONFIG_DEVMEM
@@ -332,6 +373,20 @@ jobs:
           printf 'CONFIG_PACKAGE_kmod-fs-exfat=y\n' >> .config
           printf 'CONFIG_PACKAGE_kmod-fs-ntfs3=y\n' >> .config
           printf 'CONFIG_PACKAGE_block-mount=y\n' >> .config
+          printf '# --- sing-box + luci-app-homeproxy（来自 homeproxy feed）---\n' >> .config
+          printf 'CONFIG_PACKAGE_sing-box=y\n' >> .config
+          printf 'CONFIG_PACKAGE_luci-app-homeproxy=y\n' >> .config
+          # 关键：naive outbound 会去拉外部依赖，在 CI 里必失败（HG5382A 也是这么关的）
+          printf '# CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set\n' >> .config
+          printf '# --- 蓝牙用户态 ---\n' >> .config
+          for p in $BT_USER_PKGS; do printf 'CONFIG_PACKAGE_%s=y\n' "$p" >> .config; done
+          printf '# ============================================================\n' >> .config
+          printf '# USB 串口/网卡/蓝牙/无线网卡/CH340 驱动（镜像内置 =y）\n' >> .config
+          printf '# ============================================================\n' >> .config
+          for p in $DRIVER_PKGS; do printf 'CONFIG_PACKAGE_%s=y\n' "$p" >> .config; done
+          for p in $DRIVER_FW_PKGS; do printf 'CONFIG_PACKAGE_%s=y\n' "$p" >> .config; done
+          printf '# --- 驱动依赖的内核符号（kmod 打包要求 .ko 必须真的被编出来）---\n' >> .config
+          for k in $DRIVER_KCONFIGS; do printf 'CONFIG_KERNEL_%s=m\n' "${k#CONFIG_}" >> .config; done
           printf '# --- 独立包不参与固件镜像 ---\n' >> .config
           printf '# CONFIG_PACKAGE_usbutils is not set\n' >> .config
           printf '# CONFIG_PACKAGE_luci-app-iptv is not set\n' >> .config
@@ -347,8 +402,7 @@ jobs:
           printf '# CONFIG_PACKAGE_fwknopd is not set\n' >> .config
           printf '# CONFIG_PACKAGE_squeezelite-custom is not set\n' >> .config
           printf '# CONFIG_PACKAGE_mihomo-alpha is not set\n' >> .config
-          printf '# CONFIG_PACKAGE_luci-app-homeproxy is not set\n' >> .config
-          printf '# CONFIG_PACKAGE_sing-box is not set\n' >> .config
+          printf '# --- 独立/可选包（不会拖累固件镜像）---\n' >> .config
           printf '# ============================================================\n' >> .config
           printf '# 显式开启内核 DEBUG_FS 及调试功能\n' >> .config
           printf '# ============================================================\n' >> .config
@@ -397,9 +451,21 @@ jobs:
 
           # 其余固件必需包
           for p in kmod-iptv kmod-airoha-xpon airoha-ponctl airoha-pond \
-                   kmod-nft-tproxy kmod-tun mihomo-meta nikki luci-app-nikki libcronet; do
+                   kmod-nft-tproxy kmod-tun mihomo-meta nikki luci-app-nikki libcronet \
+                   sing-box luci-app-homeproxy omcproxy luci-app-omcproxy; do
             check_y "CONFIG_PACKAGE_${p}"
           done
+
+          # USB 串口/网卡/蓝牙/无线网卡/CH340 驱动（镜像内置）
+          for p in $DRIVER_PKGS; do check_y "CONFIG_PACKAGE_${p}"; done
+          for p in $DRIVER_FW_PKGS; do check_y "CONFIG_PACKAGE_${p}"; done
+          for p in $BT_USER_PKGS; do check_y "CONFIG_PACKAGE_${p}"; done
+
+          # sing-box 的关键开关必须真的是 "not set"
+          if ! grep -q '^# CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set$' .config; then
+            echo "::error::CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND 未按要求关闭（naive outbound 在 CI 中必然编译失败）"
+            missing=$((missing+1))
+          fi
 
           echo "==== 配置预检结果 ===="
           cat logs/config-check.txt
@@ -473,6 +539,44 @@ jobs:
             echo "::error::未生成 hg5585f-${DEVICE_ID} 固件映像，编译失败"
             exit 1
           }
+
+      - name: 校验内核 Kconfig 是否真的打开了驱动（.ko 缺失的根因排查）
+        if: always()
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p logs
+          KC=$(find build_dir -maxdepth 4 -path '*linux-6*' -name '.config' 2>/dev/null | head -n 1)
+          if [ -z "$KC" ]; then
+            KC=$(find build_dir -maxdepth 5 -name '.config' -path '*linux*' 2>/dev/null | head -n 1)
+          fi
+          echo ">>> 内核 .config: ${KC:-未找到}"
+          {
+            echo "内核符号 | 实际值"
+            echo "---------|-------"
+          } > logs/kernel-config-check.txt
+          if [ -n "$KC" ]; then
+            for k in $DRIVER_KCONFIG_CHECK; do
+              v=$(grep -m1 "^${k}=" "$KC" || echo "（未出现）")
+              echo "${k} | ${v}" >> logs/kernel-config-check.txt
+            done
+            {
+              echo "### 内核 Kconfig 反查"
+              echo '```'
+              cat logs/kernel-config-check.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            cat logs/kernel-config-check.txt
+          else
+            echo "::warning::没有找到内核 .config，无法反查驱动符号（可能编译未真正开始）"
+          fi
+          # 顺带把已经打好的 .ko 列出来，确认驱动真的生成了
+          {
+            echo "### 驱动 .ko 产物"
+            echo '```'
+            find build_dir -name 'rtw88_*.ko' -o -name 'rtl8xxxu.ko' -o -name 'btusb.ko' \
+                 -o -name 'ch341.ko' -o -name 'usbnet.ko' 2>/dev/null | head -n 40
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 标记固件编译成功
         if: success()
@@ -655,7 +759,7 @@ jobs:
         run: |
           set +e
           mkdir -p ../ipk_out
-          pkg_list="usbutils luci-app-iptv luci-app-airoha-npu luci-app-blueaudio luci-app-btsp luci-app-camlive gensio ser2net luci-app-ser2net mihomo-meta mihomo-alpha $EXTRA_KMODS"
+          pkg_list="usbutils luci-app-iptv luci-app-airoha-npu luci-app-blueaudio luci-app-btsp luci-app-camlive gensio ser2net luci-app-ser2net mihomo-meta mihomo-alpha $EXTRA_KMODS $DRIVER_PKGS $DRIVER_FW_PKGS $BT_USER_PKGS"
           : > ../ipk_out/collected.txt
           for pkg in $pkg_list; do
             found=0
