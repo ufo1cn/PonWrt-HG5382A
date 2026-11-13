@@ -1,0 +1,43 @@
+# go2rtc 默认配置（HG5585F）
+# 文档: https://github.com/AlexxIT/go2rtc/wiki
+# 改完执行: /etc/init.d/go2rtc restart
+
+log:
+  level: info
+
+api:
+  listen: ":1984"
+  origin: "*"
+
+# 本机 RTSP（给局域网播放器用，不要直接暴露到公网）
+rtsp:
+  listen: ":8554"
+
+# WebRTC：浏览器直连需要外部客户端能访问到这里的 UDP 端口
+webrtc:
+  listen: ":8555"
+
+# ---------------------------------------------------------------
+# 流定义
+# ---------------------------------------------------------------
+streams:
+  # 摄像头画面：来自本仓库 camlive 的 HTTP MJPEG（推荐，协议最稳）
+  # camlive 默认 HTTP 端口 = RTSP 端口 +1，即 8555 -> 这里改成 8556 更清晰
+  camera: "http://127.0.0.1:8556/stream"
+
+  # 同一路画面转成 H264（WebRTC 必需，需要系统里有 ffmpeg）
+  # 没有 ffmpeg 时这条会报错，把 camera 直接给 WebRTC 是不行的（MJPEG 不被 WebRTC 支持）
+  camera_h264: "ffmpeg:camera#video=h264#audio=copy"
+
+  # 麦克风（USB 摄像头内置麦克风，走 ALSA 采集）
+  # 设备名用 `arecord -l` 或 go2rtc 的 /api/alsa 接口查
+  # microphone: "alsa:default"
+
+  # 喇叭（把浏览器里的声音回放到 USB 摄像头喇叭，用于双向语音）
+  # speaker: "alsa:default"
+
+# ---------------------------------------------------------------
+# ffmpeg：MJPEG/H264 之间转码要它
+# ---------------------------------------------------------------
+ffmpeg:
+  bin: ffmpeg
