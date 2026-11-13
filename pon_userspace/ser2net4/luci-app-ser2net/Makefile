@@ -11,6 +11,4 @@ LUCI_TITLE:=LuCI for ser2net 4.x (yaml)
 LUCI_DEPENDS:=+ser2net
 LUCI_PKGARCH:=all
 
-include $(TOPDIR)/luci.mk
-
-$(eval $(call BuildPackage,luci-app-ser2net))
+include $(TOPDIR)/feeds/luci/luci.mk
