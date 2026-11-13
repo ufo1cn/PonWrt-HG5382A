@@ -1,6 +1,4 @@
 name: 编译 PonWrt HG5585F 电信版集成版固件
-# 正式固件Job + usbutils独立调试Job
-# 正式固件：排除usbutils，保证固件产出；debug‑usbutils专门抓usbutils编译日志，失败不影响固件
 on:
   workflow_dispatch:
 permissions:
@@ -9,9 +7,10 @@ permissions:
 concurrency:
   group: build-hg5585f-${{ github.ref }}
   cancel-in-progress: true
+
 jobs:
   build-firmware:
-    name: 编译 HG5585F‑CT 集成版固件
+    name: 编译 HG5585F-CT 集成版固件
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
@@ -148,7 +147,7 @@ jobs:
             ip-full yq libcronet \
             luci-app-ttyd luci-app-ddns ddns-scripts openssh-sftp-server
 
-          echo ">>> 最小化 feeds install 完成（usbutils跳过，交给debug‑usbutils job）"
+          echo ">>> 最小化 feeds install 完成（usbutils跳过，交给debug-usbutils job）"
 
       - name: 将 luci-app-airoha-npu 克隆到 package 目录
         working-directory: ./ponwrt
@@ -189,10 +188,7 @@ jobs:
           grep -q "o.value('gpon'" feeds/pon_userspace/luci-app-pon/htdocs/luci-static/resources/view/pon/config.js
           echo "OK: GPON patches are present."
 
-      # ============================================================================
-      # 固件配置：使用 make defconfig，usbutils 关闭，不进入主编译链
-      # ============================================================================
-      - name: 生成并锁定 HG5585F‑CT 固件配置 ✅【清理重复符号】
+      - name: 生成并锁定 HG5585F-CT 固件配置 ✅【无heredoc，printf逐行写config】
         working-directory: ./ponwrt
         run: |
           rm -rf tmp
@@ -200,7 +196,7 @@ jobs:
           make defconfig
 
           sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
-          sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
+          sed -i '/CONFIG_TARGET_MULTI_PROFILES/d' .config
           sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
           sed -i '/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
 
@@ -223,105 +219,103 @@ jobs:
           clear_sym CONFIG_BUSYBOX_CONFIG_DEVMEM
           clear_sym CONFIG_PACKAGE_usbutils
 
-          cat >> .config << 'EOF'
-          # CONFIG_TARGET_ALL_PROFILES is not set
-          # CONFIG_TARGET_MULTI_PROFILE is not set
-          CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y
-          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y
-          CONFIG_PACKAGE_luci-theme-argon=y
-          # CONFIG_PACKAGE_luci-theme-bootstrap is not set
-          CONFIG_PACKAGE_luci-app-ttyd=y
-          CONFIG_PACKAGE_luci-app-ddns=y
-          CONFIG_PACKAGE_ddns-scripts=y
-          CONFIG_PACKAGE_openssh-sftp-server=y
-          # --- PON 修复 ---
-          CONFIG_PACKAGE_kmod-airoha-paged-bosa=y
-          CONFIG_PACKAGE_kmod-airoha-pon-frontend=y
-          CONFIG_PACKAGE_kmod-airoha-xpon=y
-          CONFIG_PACKAGE_airoha-ponctl=y
-          CONFIG_PACKAGE_airoha-pond=y
-          # --- 透明代理内核模块 ---
-          CONFIG_PACKAGE_kmod-tun=y
-          CONFIG_PACKAGE_kmod-nft-tproxy=y
-          CONFIG_PACKAGE_kmod-nft-socket=y
-          CONFIG_PACKAGE_kmod-inet-diag=y
-          CONFIG_PACKAGE_kmod-dummy=y
-          # --- mihomo（仅稳定版 meta） ---
-          CONFIG_PACKAGE_mihomo-meta=y
-          CONFIG_PACKAGE_nikki=y
-          CONFIG_PACKAGE_luci-app-nikki=y
-          CONFIG_PACKAGE_luci-i18n-nikki-zh-cn=y
-          # --- curl / libcurl ---
-          CONFIG_PACKAGE_curl=y
-          CONFIG_PACKAGE_libcurl=y
-          CONFIG_PACKAGE_libidn2=y
-          CONFIG_PACKAGE_libnghttp2=y
-          CONFIG_PACKAGE_libpsl=y
-          CONFIG_PACKAGE_libgnutls=y
-          CONFIG_PACKAGE_libtasn1=y
-          CONFIG_PACKAGE_libunistring=y
-          CONFIG_PACKAGE_nettle=y
-          CONFIG_PACKAGE_gmp=y
-          # --- 工具 ---
-          CONFIG_PACKAGE_ip-full=y
-          CONFIG_PACKAGE_yq=y
-          CONFIG_PACKAGE_libffi=y
-          CONFIG_PACKAGE_libcronet=y
-          # --- IPTV 核心驱动 ---
-          CONFIG_PACKAGE_kmod-iptv=y
-          # --- omcproxy ---
-          CONFIG_PACKAGE_omcproxy=y
-          CONFIG_PACKAGE_luci-app-omcproxy=y
-          # --- USB底层模块 feed包 设置=m，usbutils不参与固件编译
-          CONFIG_PACKAGE_kmod-usb-xhci=m
-          CONFIG_PACKAGE_kmod-usb-storage=m
-          CONFIG_PACKAGE_kmod-usb-storage-extras=m
-          CONFIG_PACKAGE_kmod-fs-ext4=m
-          CONFIG_PACKAGE_kmod-fs-vfat=m
-          CONFIG_PACKAGE_kmod-fs-ntfs3=m
-          CONFIG_PACKAGE_block-mount=m
-          # CONFIG_PACKAGE_usbutils is not set
-          CONFIG_PACKAGE_kmod-video-v4l2=m
-          CONFIG_PACKAGE_kmod-video-uvc=m
-          CONFIG_PACKAGE_kmod-usb-serial=m
-          CONFIG_PACKAGE_kmod-usb-net=m
-          CONFIG_PACKAGE_kmod-rtw88=m
-          CONFIG_PACKAGE_kmod-rtw88-usb=m
-          CONFIG_PACKAGE_kmod-rtw88-8822c=m
-          CONFIG_PACKAGE_kmod-rtw88-8822cu=m
-          CONFIG_PACKAGE_usb-modeswitch=m
-          CONFIG_PACKAGE_usb-modeswitch-data=m
-          CONFIG_PACKAGE_kmod-rtl8723bu=m
-          # --- pon_userspace独立包不参与固件镜像 ---
-          # CONFIG_PACKAGE_luci-app-iptv is not set
-          # CONFIG_PACKAGE_luci-app-airoha-npu is not set
-          # CONFIG_PACKAGE_luci-app-airoha-soc is not set
-          # CONFIG_PACKAGE_luci-app-blueaudio is not set
-          # CONFIG_PACKAGE_luci-app-btsp is not set
-          # CONFIG_PACKAGE_luci-app-camlive is not set
-          # CONFIG_PACKAGE_kmod-usb-serial-ch341 is not set
-          # CONFIG_PACKAGE_ser2net is not set
-          # CONFIG_PACKAGE_gensio is not set
-          # CONFIG_PACKAGE_luci-app-ser2net is not set
-          # CONFIG_PACKAGE_qt5base is not set
-          # CONFIG_PACKAGE_fwknopd is not set
-          # CONFIG_PACKAGE_squeezelite-custom is not set
-          # CONFIG_PACKAGE_mihomo-alpha is not set
-          # CONFIG_PACKAGE_luci-app-homeproxy is not set
-          # CONFIG_PACKAGE_sing-box is not set
-          # ============================================================
-          # 显式开启内核 DEBUG_FS 及调试功能
-          # ============================================================
-          CONFIG_KERNEL_DEBUG_FS=y
-          CONFIG_KERNEL_DEVMEM=y
-          CONFIG_BUSYBOX_CONFIG_DEVMEM=y
-          EOF
+          printf '# CONFIG_TARGET_ALL_PROFILES is not set\n' >> .config
+          printf '# CONFIG_TARGET_MULTI_PROFILE is not set\n' >> .config
+          printf 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y\n' >> .config
+          printf 'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y\n' >> .config
+          printf 'CONFIG_PACKAGE_luci-theme-argon=y\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-theme-bootstrap is not set\n' >> .config
+          printf 'CONFIG_PACKAGE_luci-app-ttyd=y\n' >> .config
+          printf 'CONFIG_PACKAGE_luci-app-ddns=y\n' >> .config
+          printf 'CONFIG_PACKAGE_ddns-scripts=y\n' >> .config
+          printf 'CONFIG_PACKAGE_openssh-sftp-server=y\n' >> .config
+          printf '# --- PON 修复 ---\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-airoha-paged-bosa=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-airoha-pon-frontend=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-airoha-xpon=y\n' >> .config
+          printf 'CONFIG_PACKAGE_airoha-ponctl=y\n' >> .config
+          printf 'CONFIG_PACKAGE_airoha-pond=y\n' >> .config
+          printf '# --- 透明代理内核模块 ---\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-tun=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-nft-tproxy=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-nft-socket=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-inet-diag=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-dummy=y\n' >> .config
+          printf '# --- mihomo（仅稳定版 meta） ---\n' >> .config
+          printf 'CONFIG_PACKAGE_mihomo-meta=y\n' >> .config
+          printf 'CONFIG_PACKAGE_nikki=y\n' >> .config
+          printf 'CONFIG_PACKAGE_luci-app-nikki=y\n' >> .config
+          printf 'CONFIG_PACKAGE_luci-i18n-nikki-zh-cn=y\n' >> .config
+          printf '# --- curl / libcurl ---\n' >> .config
+          printf 'CONFIG_PACKAGE_curl=y\n' >> .config
+          printf 'CONFIG_PACKAGE_libcurl=y\n' >> .config
+          printf 'CONFIG_PACKAGE_libidn2=y\n' >> .config
+          printf 'CONFIG_PACKAGE_libnghttp2=y\n' >> .config
+          printf 'CONFIG_PACKAGE_libpsl=y\n' >> .config
+          printf 'CONFIG_PACKAGE_libgnutls=y\n' >> .config
+          printf 'CONFIG_PACKAGE_libtasn1=y\n' >> .config
+          printf 'CONFIG_PACKAGE_libunistring=y\n' >> .config
+          printf 'CONFIG_PACKAGE_nettle=y\n' >> .config
+          printf 'CONFIG_PACKAGE_gmp=y\n' >> .config
+          printf '# --- 工具 ---\n' >> .config
+          printf 'CONFIG_PACKAGE_ip-full=y\n' >> .config
+          printf 'CONFIG_PACKAGE_yq=y\n' >> .config
+          printf 'CONFIG_PACKAGE_libffi=y\n' >> .config
+          printf 'CONFIG_PACKAGE_libcronet=y\n' >> .config
+          printf '# --- IPTV 核心驱动 ---\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-iptv=y\n' >> .config
+          printf '# --- omcproxy ---\n' >> .config
+          printf 'CONFIG_PACKAGE_omcproxy=y\n' >> .config
+          printf 'CONFIG_PACKAGE_luci-app-omcproxy=y\n' >> .config
+          printf '# --- USB底层模块 feed包 设置=m，usbutils不参与固件编译\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-usb-xhci=m\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-usb-storage=m\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-usb-storage-extras=m\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-fs-ext4=m\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-fs-vfat=m\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-fs-ntfs3=m\n' >> .config
+          printf 'CONFIG_PACKAGE_block-mount=m\n' >> .config
+          printf '# CONFIG_PACKAGE_usbutils is not set\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-video-v4l2=m\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-video-uvc=m\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-usb-serial=m\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-usb-net=m\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-rtw88=m\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-rtw88-usb=m\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-rtw88-8822c=m\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-rtw88-8822cu=m\n' >> .config
+          printf 'CONFIG_PACKAGE_usb-modeswitch=m\n' >> .config
+          printf 'CONFIG_PACKAGE_usb-modeswitch-data=m\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-rtl8723bu=m\n' >> .config
+          printf '# --- pon_userspace独立包不参与固件镜像 ---\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-app-iptv is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-app-airoha-npu is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-app-airoha-soc is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-app-blueaudio is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-app-btsp is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-app-camlive is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_kmod-usb-serial-ch341 is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_ser2net is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_gensio is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-app-ser2net is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_qt5base is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_fwknopd is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_squeezelite-custom is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_mihomo-alpha is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-app-homeproxy is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_sing-box is not set\n' >> .config
+          printf '# ============================================================\n' >> .config
+          printf '# 显式开启内核 DEBUG_FS 及调试功能\n' >> .config
+          printf '# ============================================================\n' >> .config
+          printf 'CONFIG_KERNEL_DEBUG_FS=y\n' >> .config
+          printf 'CONFIG_KERNEL_DEVMEM=y\n' >> .config
+          printf 'CONFIG_BUSYBOX_CONFIG_DEVMEM=y\n' >> .config
 
           make defconfig
 
           sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
           if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y$' .config; then
-            echo "::error::HG5585F‑CT 单一机型锁定校验失败！"; exit 1
+            echo "::error::HG5585F-CT 单一机型锁定校验失败！"; exit 1
           fi
 
           echo "==== 校验关键内核模块与调试选项 ===="
@@ -400,9 +394,6 @@ jobs:
             ls -lh
           )
 
-      # ============================================================================
-      # 独立包阶段：仅编译 pon_userspace 本地包 + mihomo‑alpha
-      # ============================================================================
       - name: 尝试编译 pon_userspace 本地独立软件包
         working-directory: ./ponwrt
         run: |
@@ -479,7 +470,7 @@ jobs:
 
           echo ""
           echo "============================================================"
-          echo ">>> 处理 mihomo‑alpha（feed包，使用顶层make target）"
+          echo ">>> 处理 mihomo-alpha（feed包，使用顶层make target）"
           echo "============================================================"
           if [ -d "package/feeds/nikki/mihomo-alpha" ] || [ -d "feeds/nikki/mihomo-alpha" ]; then
             disable_pkg "mihomo-meta"
@@ -497,7 +488,7 @@ jobs:
             sed -i "s|^CONFIG_PACKAGE_mihomo-meta=m|CONFIG_PACKAGE_mihomo-meta=y|" .config
             make defconfig >/dev/null 2>&1
           else
-            echo "::warning::mihomo‑alpha 目录不存在，跳过"
+            echo "::warning::mihomo-alpha 目录不存在，跳过"
           fi
 
           echo ""
@@ -579,18 +570,18 @@ jobs:
         uses: softprops/action-gh-release@v2.0.8
         with:
           tag_name: hg5585f-ct-${{ github.run_number }}-${{ github.run_attempt }}
-          name: PonWrt HG5585F‑CT 集成版预发布 #${{ github.run_number }}
+          name: PonWrt HG5585F-CT 集成版预发布 #${{ github.run_number }}
           prerelease: true
           make_latest: false
           generate_release_notes: true
           body: |
-            PonWrt HG5585F‑CT 集成版自动预发布（最小化固件 + pon_userspace本地包独立编译）。
-            固件镜像内置：PON 修复、透明代理内核模块、mihomo‑meta（稳定版）、IPTV 驱动、omcproxy、USB底层驱动。
-            独立 ipk：luci‑app‑iptv、luci‑app‑airoha‑npu、luci‑app‑blueaudio、luci‑app‑btsp、luci‑app‑camlive、
-            gensio、ser2net、luci‑app‑ser2net、RTL8821CU/RTL8723BU网卡驱动、usb‑modeswitch，
-            以及可选产出的 mihomo‑alpha 独立 ipk（与 meta 互斥，设备上只能二选一安装）。
-            ⚠️ homeproxy / sing‑box 因 feed 索引缺失未纳入本次构建。
-            ⚠️ usbutils 未纳入固件编译链，请查看 debug‑usbutils Job日志。
+            PonWrt HG5585F-CT 集成版自动预发布（最小化固件 + pon_userspace本地包独立编译）。
+            固件镜像内置：PON 修复、透明代理内核模块、mihomo-meta（稳定版）、IPTV 驱动、omcproxy、USB底层驱动。
+            独立 ipk：luci-app-iptv、luci-app-airoha-npu、luci-app-blueaudio、luci-app-btsp、luci-app-camlive、
+            gensio、ser2net、luci-app-ser2net、RTL8821CU/RTL8723BU网卡驱动、usb-modeswitch，
+            以及可选产出的 mihomo-alpha 独立 ipk（与 meta 互斥，设备上只能二选一安装）。
+            ⚠️ homeproxy / sing-box 因 feed 索引缺失未纳入本次构建。
+            ⚠️ usbutils 未纳入固件编译链，请查看 debug-usbutils Job日志。
           files: release_out/*
 
       - name: 保存 staging 缓存
@@ -605,7 +596,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: HG5585F‑CT‑diagnostics
+          name: HG5585F-CT-diagnostics
           path: |
             ponwrt/.config
             ponwrt/.config.firmware
@@ -614,9 +605,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-  # 独立调试Job：专门编译usbutils，失败不影响固件产出
   debug-usbutils:
-    name: Debug‑usbutils 单独编译调试
+    name: Debug-usbutils 单独编译调试
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
@@ -670,10 +660,8 @@ jobs:
           sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
           sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
           sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
-          cat >> .config <<'EOF'
-CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y
-CONFIG_PACKAGE_usbutils=m
-EOF
+          printf 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y\n' >> .config
+          printf 'CONFIG_PACKAGE_usbutils=m\n' >> .config
           make defconfig
           mkdir -p logs
 
