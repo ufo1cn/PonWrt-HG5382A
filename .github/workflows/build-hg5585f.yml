@@ -1,6 +1,15 @@
 name: 编译 PonWrt HG5585F 电信版集成版固件
 on:
   workflow_dispatch:
+    inputs:
+      device:
+        description: "机型变体：ct=原厂形态（lan5 2.5G 可用，USB 口不启用）；ct-usb-sfp=启用 USB 口（lan5 的 PCS 让给 USB）"
+        required: true
+        default: "ct"
+        type: choice
+        options:
+          - ct
+          - ct-usb-sfp
 permissions:
   contents: write
   actions: write
@@ -10,11 +19,13 @@ concurrency:
 
 jobs:
   build-firmware:
-    name: 编译 HG5585F-CT 集成版固件（USB 全支持）
+    name: 编译 HG5585F 集成版固件（USB 全支持）
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
       SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
+      # 目标支持多机型之前只能是单机型，机型由触发时的输入决定
+      DEVICE_ID: ${{ github.event.inputs.device || 'ct' }}
       # 固件镜像内置的 USB / 存储支持（与 image/an7581.mk 的 DEVICE_PACKAGES 保持一致）
       USB_CORE_PKGS: >-
         kmod-usb3 kmod-usb-storage kmod-usb-storage-uas kmod-usb-storage-extras
@@ -260,13 +271,8 @@ jobs:
           clear_sym CONFIG_PACKAGE_usbutils
 
           printf '# CONFIG_TARGET_ALL_PROFILES is not set\n' >> .config
-          # 必须开启多机型模式，否则 kconfig 只保留一个 DEVICE_ 符号（另一变体被丢弃）
-          printf 'CONFIG_TARGET_MULTI_PROFILE=y\n' >> .config
-          # 一次构建产出两个变体：CT（默认，USB 口未启用）与 CT-USB-SFP（启用 usb0，占用 lan5 的 PCS）
-          printf 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y\n' >> .config
-          printf 'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y\n' >> .config
-          printf 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct-usb-sfp=y\n' >> .config
-          printf 'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct-usb-sfp=y\n' >> .config
+          # 单机型锁定：本 target 的 Kconfig 不支持同时选多个 device
+          printf 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-%s=y\n' "$DEVICE_ID" >> .config
           printf 'CONFIG_PACKAGE_luci-theme-argon=y\n' >> .config
           printf '# CONFIG_PACKAGE_luci-theme-bootstrap is not set\n' >> .config
           printf 'CONFIG_PACKAGE_luci-app-ttyd=y\n' >> .config
@@ -378,15 +384,10 @@ jobs:
 
           # 机型锁定
           devcount=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
-          if [ "$devcount" -ne 2 ]; then
-            echo "::error::机型数量应为 2（hg5585f-ct + hg5585f-ct-usb-sfp），实际 $devcount"; missing=$((missing+1))
+          if [ "$devcount" -ne 1 ]; then
+            echo "::error::机型数量应为 1（本次目标 fiberhome_hg5585f-$DEVICE_ID），实际 $devcount"; missing=$((missing+1))
           fi
-          check_y CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct
-          check_y CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct-usb-sfp
-          # 多机型模式下 image.mk 实际读取的是 CONFIG_TARGET_DEVICE_... 这一族
-          check_y CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct
-          check_y CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct-usb-sfp
-          check_y CONFIG_TARGET_MULTI_PROFILE
+          check_y "CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-${DEVICE_ID}"
 
           # USB / 存储核心（固件内置）
           for p in $USB_CORE_PKGS; do check_y "CONFIG_PACKAGE_${p}"; done
@@ -468,8 +469,8 @@ jobs:
           echo "==== 固件编译错误摘要（前 40 行） ===="
           head -n 40 logs/firmware-errors.txt || true
 
-          test -n "$(find bin/targets/airoha/an7581 -maxdepth 1 -name '*hg5585f-ct*sysupgrade*.itb' 2>/dev/null)" || {
-            echo "::error::未生成 hg5585f 固件映像，编译失败"
+          test -n "$(find bin/targets/airoha/an7581 -maxdepth 1 -name "*hg5585f-${DEVICE_ID}*sysupgrade*.itb" 2>/dev/null)" || {
+            echo "::error::未生成 hg5585f-${DEVICE_ID} 固件映像，编译失败"
             exit 1
           }
 
@@ -696,7 +697,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: PonWrt-HG5585F-CT-integrated
+          name: PonWrt-HG5585F-${{ github.event.inputs.device || 'ct' }}-integrated
           path: ./firmware_out/
           if-no-files-found: warn
           retention-days: 14
@@ -734,17 +735,18 @@ jobs:
         if: success()
         uses: softprops/action-gh-release@v2.0.8
         with:
-          tag_name: hg5585f-ct-${{ github.run_number }}-${{ github.run_attempt }}
-          name: PonWrt HG5585F-CT 集成版预发布 #${{ github.run_number }}
+          tag_name: hg5585f-${{ github.event.inputs.device || 'ct' }}-${{ github.run_number }}-${{ github.run_attempt }}
+          name: PonWrt HG5585F-${{ github.event.inputs.device || 'ct' }} 集成版预发布 #${{ github.run_number }}
           prerelease: true
           make_latest: false
           generate_release_notes: true
           body: |
-            PonWrt HG5585F-CT 集成版自动预发布。
+            PonWrt HG5585F 集成版自动预发布，本次机型：`fiberhome_hg5585f-${{ github.event.inputs.device || 'ct' }}`。
 
-            **固件（两个变体，按需选一个刷）**
-            - `...hg5585f-ct-...itb`：原厂形态，lan5（2.5G）可用，USB 口未启用（DTS 未开启 `usb0`）。
-            - `...hg5585f-ct-usb-sfp-...itb`：启用 `usb0`（USB2 PHY），USB 口可用；该变体把 USB PHY 的 PCS 让给 lan5 使用。
+            机型变体说明（一次构建只能选一个）：
+            - `ct`：原厂形态，lan5（2.5G）可用，但对应用户态的 USB 口不启用（DTS 未开启 `usb0`）。
+            - `ct-usb-sfp`：启用 `usb0`（USB2 PHY），USB 口可用；该变体把 USB PHY 的 PCS 让给 lan5 使用。
+              需要 USB 硬件真正可用时，请用 `device=ct-usb-sfp` 重新触发一次。
 
             **镜像内置**：PON 修复、透明代理内核模块、mihomo-meta、IPTV 驱动、omcproxy、
             USB 主机控制器（kmod-usb3 → xhci-hcd + xhci-mtk）、USB 存储（storage/uas/extras）、
