@@ -43,6 +43,7 @@ jobs:
         kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822cu kmod-rtw88-8821cu
         kmod-rtw88-8723du kmod-rtl8xxxu kmod-rtl8192cu
         kmod-video-core kmod-video-videobuf2 kmod-video-uvc
+        kmod-sound-core kmod-usb-audio
       # 无线网卡 / 蓝牙所需固件（package/firmware/linux-firmware/realtek.mk）
       DRIVER_FW_PKGS: >-
         rtl8822ce-firmware rtl8821ce-firmware rtl8723bu-firmware rtl8723de-firmware
@@ -227,7 +228,7 @@ jobs:
         run: |
           rm -rf package/pon-local
           mkdir -p package/pon-local
-          for d in luci-app-blueaudio luci-app-btsp luci-app-camlive; do
+          for d in camlive luci-app-blueaudio luci-app-btsp luci-app-camlive; do
             if [ -d "../pon_userspace/$d" ]; then
               cp -a "../pon_userspace/$d" package/pon-local/
               echo ">>> 复制 $d"
@@ -740,6 +741,8 @@ jobs:
           compile_dir "luci-app-airoha-npu" "package/luci-app-airoha-npu" "npu-pkg.log.txt"
           compile_dir "luci-app-blueaudio" "package/pon-local/luci-app-blueaudio" "blueaudio-pkg.log.txt"
           compile_dir "luci-app-btsp" "package/pon-local/luci-app-btsp" "btsp-pkg.log.txt"
+          # camlive 后端必须在 luci 前端之前编出来（前端 DEPENDS 里有 +camlive）
+          compile_dir "camlive" "package/pon-local/camlive" "camlive-backend-pkg.log.txt"
           compile_dir "luci-app-camlive" "package/pon-local/luci-app-camlive" "camlive-pkg.log.txt"
           compile_dir "gensio" "package/pon-local/gensio" "gensio-pkg.log.txt"
           compile_dir "ser2net" "package/pon-local/ser2net" "ser2net-pkg.log.txt"
@@ -791,7 +794,7 @@ jobs:
         run: |
           set +e
           mkdir -p ../ipk_out
-          pkg_list="usbutils luci-app-iptv luci-app-airoha-npu luci-app-blueaudio luci-app-btsp luci-app-camlive gensio ser2net luci-app-ser2net mihomo-meta mihomo-alpha $EXTRA_KMODS $DRIVER_PKGS $DRIVER_FW_PKGS $BT_USER_PKGS"
+          pkg_list="camlive usbutils luci-app-iptv luci-app-airoha-npu luci-app-blueaudio luci-app-btsp luci-app-camlive gensio ser2net luci-app-ser2net mihomo-meta mihomo-alpha $EXTRA_KMODS $DRIVER_PKGS $DRIVER_FW_PKGS $BT_USER_PKGS"
           : > ../ipk_out/collected.txt
           for pkg in $pkg_list; do
             found=0
