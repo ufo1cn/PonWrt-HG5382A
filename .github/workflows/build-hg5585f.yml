@@ -1,3 +1,56 @@
+# ==============================================================================
+# PonWrt HG5585F（光猫 FiberHome HG5585F 电信版 / CT）固件编译工作流
+# ------------------------------------------------------------------------------
+# 【这一条工作流只干一件事】产出可以刷机的固件（itb/bootinfo）以及"底层支持"。
+#
+# 一、与其他工作流的分工（改动前务必先看这里）
+#   1) 本文件 build-hg5585f.yml
+#      - 责任：PonWrt 源码 + 机型锁定 + 内核/驱动（kmod）+ 必要底层库 → 出固件
+#      - 原则：应用层软件（代理、LuCI 前端、摄像头发布等）**一律不进镜像**
+#   2) .github/workflows/build-package.yml
+#      - 责任：把应用层全部编成 .apk/.ipk，刷完机按需安装
+#      - 原则：这里编出的只是"软件包"，不产出、也不修改固件
+#   3) PonWrt1.yml（HG5382A 机型）
+#      - 已验证可用，**禁止修改**，作为"能出 itb"的参照基线
+#
+# 二、为什么镜像里要"预先打开尽可能多的底层支持"
+#   ---- 这是本项目最容易返工的地方，写清楚原因：
+#   1) 内核模块（kmod）必须与固件内核严格配套：同样的内核版本、同样的内核配置、
+#      同样的 vermagic。后期在别的工作流里单独编出来的 kmod，装到另一份内核上
+#      很可能"装得上但加载失败"。所以 kmod 必须跟着固件一起编、一起进镜像。
+#   2) 用户态软件（sing-box / mihomo / ffmpeg / go2rtc / LuCI 前端 …）不挑内核，
+#      它们只挑"内核有没有对应的内核设施"。例如 sing-box 需要 NETLINK_DIAG、
+#      nikki 需要 DUMMY 网卡、摄像头需要 UVC/V4L2、语音需要 SND_USB_AUDIO。
+#      只要这些设施在固件里预先是打开的，后期单编的 apk 装上就能用。
+#   3) 反过来，如果固件里没开，后期单编的 apk 就会出现"装上去了但功能不工作"，
+#      而且几乎查不到原因（kmod 自己没法在运行时再要内核支持）。
+#   => 结论：kmod 与内核符号尽量在固件里一次开足（DRIVER_PKGS /
+#      DRIVER_KCONFIGS / USB_CORE_PKGS 三个变量就是干这件事的）；
+#      用户态软件则全部走 build-package.yml 后期编，固件不背它们的编译风险。
+#
+# 三、三道校验（缺一不可，全部为"失败就报错"，不允许静默通过）
+#   step 19  配置预检：逐个核对 .config 里的符号是否真的生效（=y），
+#            并反向校验应用层包**没有**混进镜像
+#   step 23  内核反查：拿编译出来的内核 .config 逐个核对驱动符号，
+#            再列出实际产出的 .ko（解决历史问题"包选中了但 usbnet.ko 缺失"）
+#   step 26  产物核对：列出每个附加包的 apk 是否真的产出
+#
+# 四、改包名/加驱动时，必须同步的三个地方（只改一处必然出问题）
+#   1) 作业级 env：USB_CORE_PKGS / DRIVER_PKGS / DRIVER_FW_PKGS /
+#      BT_USER_PKGS / DRIVER_KCONFIGS / DRIVER_KCONFIG_CHECK
+#      （这些变量会被 step 18 写进 .config、step 19 预检、step 23 反查）
+#   2) step 18 的 printf 配置块（只有这个变量覆盖不到的特殊包才需要手写）
+#   3) 步骤名/注释里的清单（保持文档与实际一致，否则排查时会被误导）
+#
+# 五、已知的"静默丢弃"陷阱（编译不报错，但包直接消失）
+#   - libx264：包依赖是 @BUILD_PATENTED，不开全局 CONFIG_BUILD_PATENTED 时
+#     连 kconfig 符号都不生成
+#   - kmod-sound-core / kmod-usb-audio：硬依赖 audio-support（默认关闭）与
+#     kmod-input-core，没打开时包与符号一起消失，.config 里连 "is not set" 都不留
+#   - luci-compat：Lua 风格的 LuCI 应用缺它菜单不显示，但编译完全不报错
+#   - kmod-usb-net：包选中但内核 CONFIG_USB_USBNET 未开时，打包阶段才报
+#     "usbnet.ko is missing"
+# ==============================================================================
 name: 编译 PonWrt HG5585F 电信版集成版固件
 on:
   workflow_dispatch:
@@ -45,6 +98,23 @@ jobs:
         kmod-rtw88-8723du kmod-rtl8xxxu kmod-rtl8192cu
         kmod-video-core kmod-video-videobuf2 kmod-video-uvc
         kmod-sound-core kmod-usb-audio
+        # ---- 下面这些是"预先打开、给后期独立包用"的底层设施 ----
+        # sing-box 依赖 NETLINK_DIAG（没有它 sing-box 起来就报 diag 相关错误）
+        kmod-netlink-diag
+        # USB 键鼠 / 手柄 / UPS 等 HID 设备
+        kmod-usb-hid
+        # 后续装 wireguard 工具就能直接用
+        kmod-wireguard
+        # NFS 客户端与服务端（后期装 nfs-utils / nfs-kernel-server 需要）
+        kmod-fs-nfs kmod-fs-nfs-common kmod-fs-nfs-v4 kmod-fs-nfsd
+        # 挂载 Windows/SMB 共享
+        kmod-fs-cifs
+        # 虚拟网卡/网桥：容器、透明代理分流、多网卡场景常用
+        kmod-macvlan kmod-veth
+        # 网桥上的 netfilter：透明代理（tproxy）经网桥时必须
+        kmod-br-netfilter
+        # NAT：nftables/iptables 做 NAT 的底层模块
+        kmod-nft-nat kmod-nf-nat
       # 无线网卡 / 蓝牙所需固件（package/firmware/linux-firmware/realtek.mk）
       DRIVER_FW_PKGS: >-
         rtl8822ce-firmware rtl8821ce-firmware rtl8723bu-firmware rtl8723de-firmware
@@ -65,6 +135,9 @@ jobs:
         CONFIG_RTW88 CONFIG_RTW88_USB CONFIG_RTW88_8822C CONFIG_RTW88_8822CU
         CONFIG_RTW88_8821C CONFIG_RTW88_8821CU CONFIG_RTW88_8723D CONFIG_RTW88_8723DU
         CONFIG_RTL8XXXU CONFIG_RTL8192CU CONFIG_CFG80211 CONFIG_MAC80211
+        CONFIG_NETLINK_DIAG CONFIG_USB_HID CONFIG_HID CONFIG_WIREGUARD
+        CONFIG_CIFS CONFIG_NFS_FS CONFIG_NFSD CONFIG_MACVLAN CONFIG_VETH
+        CONFIG_BRIDGE CONFIG_BRIDGE_NF_EBTABLES CONFIG_NFT_NAT CONFIG_NF_NAT
       # 编译完成后用内核 .config 反查这些符号（bool 子选项也一起查）
       DRIVER_KCONFIG_CHECK: >-
         CONFIG_USB_USBNET CONFIG_USB_SERIAL_CH341 CONFIG_BT CONFIG_BT_HCIBTUSB
@@ -78,6 +151,9 @@ jobs:
         CONFIG_EXT4_FS CONFIG_VFAT_FS CONFIG_EXFAT_FS CONFIG_NTFS3_FS
         CONFIG_MEDIA_SUPPORT CONFIG_VIDEO_DEV CONFIG_USB_VIDEO_CLASS
         CONFIG_RTW88 CONFIG_RTW88_USB CONFIG_INET_DIAG CONFIG_NETLINK_DIAG CONFIG_TUN
+        CONFIG_USB_HID CONFIG_HID CONFIG_WIREGUARD CONFIG_CIFS
+        CONFIG_NFS_FS CONFIG_NFSD CONFIG_MACVLAN CONFIG_VETH
+        CONFIG_BRIDGE_NF_EBTABLES CONFIG_NFT_NAT
       # 以 =m 单独出包的附加内核模块（全部来自 package/kernel/linux/modules）
       EXTRA_KMODS: >-
         kmod-usb-serial kmod-usb-serial-ch341 kmod-usb-serial-cp210x
