@@ -10,11 +10,22 @@ concurrency:
 
 jobs:
   build-firmware:
-    name: 编译 HG5585F-CT 集成版固件
+    name: 编译 HG5585F-CT 集成版固件（USB 全支持）
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
       SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
+      # 固件镜像内置的 USB / 存储支持（与 image/an7581.mk 的 DEVICE_PACKAGES 保持一致）
+      USB_CORE_PKGS: >-
+        kmod-usb3 kmod-usb-storage kmod-usb-storage-uas kmod-usb-storage-extras
+        kmod-fs-ext4 kmod-fs-vfat kmod-fs-exfat kmod-fs-ntfs3 block-mount
+      # 以 =m 单独出包的附加内核模块（全部来自 package/kernel/linux/modules）
+      EXTRA_KMODS: >-
+        kmod-usb-serial kmod-usb-serial-ch341 kmod-usb-serial-cp210x
+        kmod-usb-serial-ftdi kmod-usb-serial-pl2303 kmod-usb-acm kmod-usb-hid
+        kmod-usb-net kmod-usb-net-cdc-ether kmod-usb-net-cdc-ncm
+        kmod-usb-net-rtl8152 kmod-usb-net-asix-ax88179
+        kmod-video-core kmod-video-videobuf2 kmod-video-uvc kmod-usbip-client
     steps:
       - name: 签出工作流仓库
         uses: actions/checkout@v4
@@ -87,7 +98,7 @@ jobs:
           path: |
             ponwrt/staging_dir/toolchain-*
             ponwrt/staging_dir/host
-          key: hg5585f-toolchain-${{ github.workflow_sha }}-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
+          key: hg5585f-toolchain-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
           restore-keys: |
             hg5585f-toolchain-
 
@@ -109,7 +120,7 @@ jobs:
             ponwrt/build_dir/target-aarch64_cortex-a53_musl/sing-box-*
             ponwrt/build_dir/target-aarch64_cortex-a53_musl/libcronet-*
             ponwrt/build_dir/target-aarch64_cortex-a53_musl/openssl-*
-          key: hg5585f-slow-${{ github.workflow_sha }}-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config', 'ponwrt/feeds.conf.default') }}
+          key: hg5585f-slow-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config', 'ponwrt/feeds.conf.default') }}
           restore-keys: |
             hg5585f-slow-
 
@@ -121,24 +132,27 @@ jobs:
             https://raw.githubusercontent.com/openwrt/openwrt/master/package/libs/libffi/Makefile
           grep -q 'PKG_NAME:=libffi' package/libs/libffi/Makefile && echo ">>> libffi 注入成功" || exit 1
 
-      - name: 更新 Feeds 并最小化安装 ✅【usbutils不install，避免带入主编译链】
+      - name: 更新 Feeds 并安装（只装真实存在于 feed 的包）
         working-directory: ./ponwrt
         run: |
+          set +e
           ./scripts/feeds update -a
           if [ -d feeds/nikki ]; then
             find feeds/nikki -name Makefile -exec sed -i -E 's/[[:space:]]*\+yq\b//g' {} + || true
           fi
 
+          # 说明：kmod-usb3 / kmod-usb-storage / kmod-fs-* / kmod-usb-serial /
+          # kmod-usb-net / kmod-video-* 等全部位于 base 仓库 package/kernel/linux/modules，
+          # 不需要（也无法）用 feeds install 安装，直接用 CONFIG_PACKAGE_ 选择即可。
+          # 曾出现的 kmod-usb-xhci / kmod-video-v4l2 / kmod-rtw88-* / kmod-rtl8723bu /
+          # usb-modeswitch 在本树和全部 feed 中均不存在，属于幻觉包名，已移除。
           ./scripts/feeds install \
             kmod-airoha-paged-bosa kmod-airoha-pon-frontend kmod-airoha-xpon \
             airoha-ponctl airoha-pond \
             kmod-tun kmod-nft-tproxy kmod-nft-socket kmod-inet-diag kmod-dummy \
             kmod-iptv \
             omcproxy luci-app-omcproxy \
-            kmod-usb-xhci kmod-usb-storage kmod-usb-storage-extras \
-            kmod-fs-ext4 kmod-fs-vfat kmod-fs-ntfs3 block-mount usb-modeswitch usb-modeswitch-data kmod-rtl8723bu \
-            kmod-video-v4l2 kmod-video-uvc kmod-usb-serial kmod-usb-net \
-            kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822c kmod-rtw88-8822cu
+            block-mount usbutils luci-app-iptv
 
           ./scripts/feeds install mihomo-meta nikki luci-app-nikki luci-i18n-nikki-zh-cn
 
@@ -147,7 +161,10 @@ jobs:
             ip-full yq libcronet \
             luci-app-ttyd luci-app-ddns ddns-scripts openssh-sftp-server
 
-          echo ">>> 最小化 feeds install 完成（usbutils跳过，交给debug-usbutils job）"
+          echo ">>> feeds install 完成，实际安装到 package/feeds 的目录："
+          ls -1 package/feeds/*/ 2>/dev/null | head -n 60
+          echo ">>> usbutils 是否就位："
+          ls -d package/feeds/*/usbutils 2>/dev/null || echo "::warning::usbutils 未安装成功（feed 索引中缺失）"
 
       - name: 将 luci-app-airoha-npu 克隆到 package 目录
         working-directory: ./ponwrt
@@ -158,19 +175,43 @@ jobs:
             git -C package/luci-app-airoha-npu submodule update --init --recursive --depth=1
           fi
           rm -rf package/luci-app-airoha-npu/.git package/luci-app-airoha-npu/.github package/luci-app-airoha-npu/screenshots
-          rm -rf package/luci-app-airoha-npu/luci-app-airoha-npu
           grep -m1 'LUCI_TITLE' package/luci-app-airoha-npu/Makefile || echo "::warning::未找到 LUCI_TITLE"
+
+      - name: 部署仓库自带的本地 luci 包到 package/pon-local
+        working-directory: ./ponwrt
+        run: |
+          rm -rf package/pon-local
+          mkdir -p package/pon-local
+          for d in luci-app-blueaudio luci-app-btsp luci-app-camlive; do
+            if [ -d "../pon_userspace/$d" ]; then
+              cp -a "../pon_userspace/$d" package/pon-local/
+              echo ">>> 复制 $d"
+            else
+              echo "::warning::../pon_userspace/$d 不存在，跳过"
+            fi
+          done
+          if [ -d "../pon_userspace/ser2net4" ]; then
+            for d in gensio ser2net luci-app-ser2net; do
+              [ -d "../pon_userspace/ser2net4/$d" ] && cp -a "../pon_userspace/ser2net4/$d" package/pon-local/ && echo ">>> 复制 $d"
+            done
+          fi
+          ls -1 package/pon-local || true
 
       - name: 预修改 luci-app-iptv Makefile（独立包阶段再编译）
         working-directory: ./ponwrt
         run: |
-          if [ -f pon_userspace/luci-app-iptv/Makefile ]; then
-            MK="pon_userspace/luci-app-iptv/Makefile"
+          MK=""
+          for cand in package/feeds/*/luci-app-iptv/Makefile feeds/*/luci-app-iptv/Makefile; do
+            [ -f "$cand" ] && MK="$cand" && break
+          done
+          if [ -n "$MK" ]; then
             cp -f "$MK" "$MK.orig"
             sed -i 's/+kmod-iptv/kmod-iptv/g' "$MK"
             sed -i '/\/etc\/config\/iptv/d' "$MK"
             sed -i '/\/etc\/init\.d\/iptv/d' "$MK"
-            echo ">>> luci-app-iptv Makefile 预修改完成"
+            echo ">>> luci-app-iptv Makefile 已预修改：$MK"
+          else
+            echo "::warning::未找到 luci-app-iptv 的 Makefile（feed 中可能不存在）"
           fi
 
       - name: 应用 GPON feed 补丁
@@ -188,7 +229,7 @@ jobs:
           grep -q "o.value('gpon'" feeds/pon_userspace/luci-app-pon/htdocs/luci-static/resources/view/pon/config.js
           echo "OK: GPON patches are present."
 
-      - name: 生成并锁定 HG5585F-CT 固件配置 ✅【无heredoc，printf逐行写config】
+      - name: 生成并锁定 HG5585F 固件配置 ✅【printf 逐行写 config，不依赖 heredoc】
         working-directory: ./ponwrt
         run: |
           rm -rf tmp
@@ -207,7 +248,6 @@ jobs:
           clear_sym CONFIG_PACKAGE_kmod-iptv
           clear_sym CONFIG_PACKAGE_kmod-tun
           clear_sym CONFIG_PACKAGE_kmod-nft-tproxy
-          clear_sym CONFIG_PACKAGE_kmod-usb-xhci
           clear_sym CONFIG_PACKAGE_mihomo-alpha
           clear_sym CONFIG_PACKAGE_qt5base
           clear_sym CONFIG_PACKAGE_fwknopd
@@ -221,8 +261,11 @@ jobs:
 
           printf '# CONFIG_TARGET_ALL_PROFILES is not set\n' >> .config
           printf '# CONFIG_TARGET_MULTI_PROFILE is not set\n' >> .config
+          # 一次构建产出两个变体：CT（默认，USB 口未启用）与 CT-USB-SFP（启用 usb0，占用 lan5 的 PCS）
           printf 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y\n' >> .config
           printf 'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y\n' >> .config
+          printf 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct-usb-sfp=y\n' >> .config
+          printf 'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct-usb-sfp=y\n' >> .config
           printf 'CONFIG_PACKAGE_luci-theme-argon=y\n' >> .config
           printf '# CONFIG_PACKAGE_luci-theme-bootstrap is not set\n' >> .config
           printf 'CONFIG_PACKAGE_luci-app-ttyd=y\n' >> .config
@@ -267,34 +310,29 @@ jobs:
           printf '# --- omcproxy ---\n' >> .config
           printf 'CONFIG_PACKAGE_omcproxy=y\n' >> .config
           printf 'CONFIG_PACKAGE_luci-app-omcproxy=y\n' >> .config
-          printf '# --- USB底层模块 feed包 设置=m，usbutils不参与固件编译\n' >> .config
-          printf 'CONFIG_PACKAGE_kmod-usb-xhci=m\n' >> .config
-          printf 'CONFIG_PACKAGE_kmod-usb-storage=m\n' >> .config
-          printf 'CONFIG_PACKAGE_kmod-usb-storage-extras=m\n' >> .config
-          printf 'CONFIG_PACKAGE_kmod-fs-ext4=m\n' >> .config
-          printf 'CONFIG_PACKAGE_kmod-fs-vfat=m\n' >> .config
-          printf 'CONFIG_PACKAGE_kmod-fs-ntfs3=m\n' >> .config
-          printf 'CONFIG_PACKAGE_block-mount=m\n' >> .config
+          printf '# ============================================================\n' >> .config
+          printf '# USB 支持（镜像内置）：主机控制器 kmod-usb3 会在 airoha 上\n' >> .config
+          printf '# 自动拉入 kmod-usb-xhci-hcd + kmod-usb-xhci-mtk；其余为存储/文件系统\n' >> .config
+          printf '# ============================================================\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-usb3=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-usb-xhci-hcd=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-usb-xhci-mtk=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-usb-storage=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-usb-storage-uas=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-usb-storage-extras=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-fs-ext4=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-fs-vfat=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-fs-exfat=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-fs-ntfs3=y\n' >> .config
+          printf 'CONFIG_PACKAGE_block-mount=y\n' >> .config
+          printf '# --- 独立包不参与固件镜像 ---\n' >> .config
           printf '# CONFIG_PACKAGE_usbutils is not set\n' >> .config
-          printf 'CONFIG_PACKAGE_kmod-video-v4l2=m\n' >> .config
-          printf 'CONFIG_PACKAGE_kmod-video-uvc=m\n' >> .config
-          printf 'CONFIG_PACKAGE_kmod-usb-serial=m\n' >> .config
-          printf 'CONFIG_PACKAGE_kmod-usb-net=m\n' >> .config
-          printf 'CONFIG_PACKAGE_kmod-rtw88=m\n' >> .config
-          printf 'CONFIG_PACKAGE_kmod-rtw88-usb=m\n' >> .config
-          printf 'CONFIG_PACKAGE_kmod-rtw88-8822c=m\n' >> .config
-          printf 'CONFIG_PACKAGE_kmod-rtw88-8822cu=m\n' >> .config
-          printf 'CONFIG_PACKAGE_usb-modeswitch=m\n' >> .config
-          printf 'CONFIG_PACKAGE_usb-modeswitch-data=m\n' >> .config
-          printf 'CONFIG_PACKAGE_kmod-rtl8723bu=m\n' >> .config
-          printf '# --- pon_userspace独立包不参与固件镜像 ---\n' >> .config
           printf '# CONFIG_PACKAGE_luci-app-iptv is not set\n' >> .config
           printf '# CONFIG_PACKAGE_luci-app-airoha-npu is not set\n' >> .config
           printf '# CONFIG_PACKAGE_luci-app-airoha-soc is not set\n' >> .config
           printf '# CONFIG_PACKAGE_luci-app-blueaudio is not set\n' >> .config
           printf '# CONFIG_PACKAGE_luci-app-btsp is not set\n' >> .config
           printf '# CONFIG_PACKAGE_luci-app-camlive is not set\n' >> .config
-          printf '# CONFIG_PACKAGE_kmod-usb-serial-ch341 is not set\n' >> .config
           printf '# CONFIG_PACKAGE_ser2net is not set\n' >> .config
           printf '# CONFIG_PACKAGE_gensio is not set\n' >> .config
           printf '# CONFIG_PACKAGE_luci-app-ser2net is not set\n' >> .config
@@ -312,27 +350,65 @@ jobs:
           printf 'CONFIG_BUSYBOX_CONFIG_DEVMEM=y\n' >> .config
 
           make defconfig
+          mkdir -p logs
+          cp .config .config.firmware
+          echo ">>> 固件配置已生成，保存到 .config.firmware"
 
-          sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
-          if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y$' .config; then
-            echo "::error::HG5585F-CT 单一机型锁定校验失败！"; exit 1
+      - name: 预检：逐个核对配置符号是否真实生效（缺失即立即失败，附可读清单）
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p logs
+          missing=0
+          {
+            echo "符号 | 期望 | 实际"
+            echo "-----|------|-----"
+          } > logs/config-check.txt
+
+          check_y() {
+            local sym="$1"
+            local actual
+            actual=$(grep -m1 "^${sym}=" .config || echo "（不存在/未激活）")
+            echo "${sym#CONFIG_} | =y | $actual" >> logs/config-check.txt
+            case "$actual" in
+              "${sym}=y") ;;
+              *) echo "::error::必需符号未生效：$sym （实际：$actual）"; missing=$((missing+1)) ;;
+            esac
+          }
+
+          # 机型锁定
+          devcount=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
+          if [ "$devcount" -ne 2 ]; then
+            echo "::error::机型数量应为 2（hg5585f-ct + hg5585f-ct-usb-sfp），实际 $devcount"; missing=$((missing+1))
           fi
+          check_y CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct
+          check_y CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct-usb-sfp
 
-          echo "==== 校验关键内核模块与调试选项 ===="
-          for sym in CONFIG_KERNEL_DEBUG_FS CONFIG_KERNEL_DEVMEM CONFIG_BUSYBOX_CONFIG_DEVMEM \
-                     CONFIG_PACKAGE_kmod-nft-tproxy CONFIG_PACKAGE_kmod-tun \
-                     CONFIG_PACKAGE_kmod-iptv CONFIG_PACKAGE_kmod-usb-xhci; do
-            echo "--- $sym ---"
-            grep "^${sym}=" .config || echo "(未激活)"
+          # USB / 存储核心（固件内置）
+          for p in $USB_CORE_PKGS; do check_y "CONFIG_PACKAGE_${p}"; done
+          # 主机控制器：kmod-usb3 的依赖包必须一并被 kconfig 拉入
+          check_y CONFIG_PACKAGE_kmod-usb-xhci-hcd
+          check_y CONFIG_PACKAGE_kmod-usb-xhci-mtk
+
+          # 其余固件必需包
+          for p in kmod-iptv kmod-airoha-xpon airoha-ponctl airoha-pond \
+                   kmod-nft-tproxy kmod-tun mihomo-meta nikki luci-app-nikki libcronet; do
+            check_y "CONFIG_PACKAGE_${p}"
           done
 
-          echo "==== 校验循环相关包未被激活 ===="
-          grep -E 'CONFIG_PACKAGE_(qt5base|fwknopd|squeezelite-custom|mihomo-alpha)=' .config || \
-            echo ">>> 循环相关包均未以激活状态出现在 .config 中"
+          echo "==== 配置预检结果 ===="
+          cat logs/config-check.txt
+          {
+            echo "### 配置预检"
+            echo '```'
+            cat logs/config-check.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          cp .config .config.firmware
-          mkdir -p logs
-          echo ">>> 固件配置完成，已保存 .config.firmware"
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::配置预检失败，共 $missing 项不符合预期。请查看上表（缺失通常表示该包名在该目标/该 feed 中根本不存在）"
+            exit 1
+          fi
+          echo ">>> 配置预检通过"
 
       - name: 下载源码软件包
         working-directory: ./ponwrt
@@ -344,18 +420,23 @@ jobs:
           make download -j1 V=s 2>&1 | tee logs/download.log.txt || { echo "::warning::仍有下载失败"; }
           find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
 
-      - name: 检查上次构建状态并精准清理缓存
+      - name: 清理配置漂移导致的脏 stamp（只在 .config 变化时清 stamp）
         working-directory: ./ponwrt
         run: |
-          if [ -f staging_dir/.build_success ]; then
-            echo ">>> 上次构建成功，保留缓存，仅清理 tmp"
-            rm -rf tmp
-          else
-            echo ">>> 上次构建失败，精准清理"
+          set +e
+          CFG_HASH=$(sha256sum .config.firmware | awk '{print $1}')
+          CACHED=""
+          [ -f staging_dir/.cfg_hash ] && CACHED=$(cat staging_dir/.cfg_hash)
+          if [ "$CFG_HASH" != "$CACHED" ]; then
+            echo ">>> 配置指纹变化（缓存：${CACHED:-none} → 本次：$CFG_HASH），清理 package stamp 避免沿用旧内核状态"
             rm -rf staging_dir/target-aarch64_cortex-a53_musl/stamp
-            rm -rf tmp
+            rm -rf staging_dir/.build_success
+          else
+            echo ">>> 配置指纹一致，保留 stamp 复用"
           fi
-          rm -f staging_dir/.build_success
+          rm -rf tmp
+          mkdir -p staging_dir
+          echo "$CFG_HASH" > staging_dir/.cfg_hash
 
       - name: 执行固件编译
         working-directory: ./ponwrt
@@ -368,42 +449,44 @@ jobs:
           mkdir -p logs
           make package/libs/libffi/compile -j"$(nproc)" V=s || true
           set -o pipefail
-          make -j"$(nproc)" 2>&1 | tee logs/build.log.txt || \
-            (echo ">>> 并行编译失败，回退单线程" && make -j1 V=s 2>&1 | tee -a logs/build.log.txt)
 
-      - name: 标记构建成功
+          if make -j"$(nproc)" 2>&1 | tee logs/build.log.txt; then
+            echo ">>> 并行编译成功"
+          else
+            echo ">>> 并行编译失败，回退单线程重试（错误明细见 logs/firmware-errors.txt）"
+            make -j1 V=s 2>&1 | tee -a logs/build.log.txt || true
+          fi
+
+          # 无论成功失败，都把错误行单独抽出来，便于一眼定位
+          grep -nE '^(make(\[[0-9]+\])?: \*\*\*|ERROR: |.*: error: |.*Error [0-9]+$|.*undefined reference to)' \
+            logs/build.log.txt > logs/firmware-errors.txt 2>/dev/null || true
+          echo "==== 固件编译错误摘要（前 40 行） ===="
+          head -n 40 logs/firmware-errors.txt || true
+
+          test -n "$(find bin/targets/airoha/an7581 -maxdepth 1 -name '*hg5585f-ct*sysupgrade*.itb' 2>/dev/null)" || {
+            echo "::error::未生成 hg5585f 固件映像，编译失败"
+            exit 1
+          }
+
+      - name: 标记固件编译成功
         if: success()
         working-directory: ./ponwrt
         run: |
           mkdir -p staging_dir
           touch staging_dir/.build_success
 
-      - name: 整理产物
-        run: |
-          mkdir -p ./firmware_out
-          find ponwrt/bin/targets/airoha/an7581/ -type f \( \
-            -iname '*hg5585f-ct*.bin' -o -iname '*hg5585f-ct*.ubi' -o \
-            -iname '*hg5585f-ct*.itb' -o -name '*.buildinfo' -o -name 'profiles.json' \
-          \) -exec cp -f {} ./firmware_out/ \;
-          (
-            cd ./firmware_out
-            shopt -s nullglob nocaseglob
-            files=( *hg5585f-ct*.bin *hg5585f-ct*.ubi *hg5585f-ct*.itb )
-            if [ "${#files[@]}" -eq 0 ]; then echo "::error::无固件映像"; exit 1; fi
-            sha256sum "${files[@]}" > sha256sums
-            ls -lh
-          )
-
-      - name: 尝试编译 pon_userspace 本地独立软件包
+      - name: 编译附加 USB 内核模块与工具（=m 单独出包，失败不影响固件）
+        if: always()
         working-directory: ./ponwrt
         run: |
           set +e
-          echo ">>> 独立包编译：拷贝固件配置副本"
-          cp .config.firmware .config
+          set -o pipefail
+          mkdir -p logs
+          cp -f .config.firmware .config
 
-          enable_pkg_m() {
+          set_m() {
             local pkg="$1"
-            if grep -q "CONFIG_PACKAGE_${pkg} is not set" .config; then
+            if grep -q "^CONFIG_PACKAGE_${pkg} is not set" .config; then
               sed -i "s|^# CONFIG_PACKAGE_${pkg} is not set|CONFIG_PACKAGE_${pkg}=m|" .config
             elif grep -q "^CONFIG_PACKAGE_${pkg}=y" .config; then
               sed -i "s|^CONFIG_PACKAGE_${pkg}=y|CONFIG_PACKAGE_${pkg}=m|" .config
@@ -412,92 +495,140 @@ jobs:
             fi
           }
 
-          disable_pkg() {
+          for p in $EXTRA_KMODS; do set_m "$p"; done
+          make oldconfig < /dev/null >/dev/null 2>&1
+
+          # 关键证据：哪些附加包在被 kconfig 处理后真实存活（不存在的包会在这里消失）
+          {
+            echo "附加内核模块符号状态（oldconfig 之后的真实结果）："
+            for p in $EXTRA_KMODS; do
+              st=$(grep -m1 "^CONFIG_PACKAGE_${p}=" .config)
+              if [ -z "$st" ]; then
+                if grep -q "^# CONFIG_PACKAGE_${p} is not set" .config; then
+                  st="[=n 依赖不满足，被 kconfig 关闭]"
+                else
+                  st="[符号不存在：包名在当前源树/feed 中不存在]"
+                fi
+              fi
+              printf '  %-32s %s\n' "$p" "$st"
+            done
+          } | tee logs/extra-symbols.txt
+
+          echo ""
+          echo ">>> 一次性编译全部附加内核模块（-k 保留所有错误）"
+          make -k package/kernel/linux/compile -j"$(nproc)" V=s 2>&1 | tee logs/extra-kmods.log.txt >/dev/null
+          echo ">>> 内核模块阶段退出码：$?"
+
+          grep -nE '^(make(\[[0-9]+\])?: \*\*\*|ERROR: |.*: error: |.*Error [0-9]+$)' \
+            logs/extra-kmods.log.txt > logs/extra-kmods-errors.txt 2>/dev/null || true
+          echo "==== 附加内核模块错误摘要（前 40 行） ===="
+          head -n 40 logs/extra-kmods-errors.txt || true
+
+          echo ""
+          echo ">>> 独立工具链包（按依赖顺序编译，usbutils 依赖 libusb-1.0 / libudev / usbids）"
+          for p in usbids libudev-zero libusb-1.0 usbutils; do
+            d=$(ls -d package/feeds/*/$p package/*/$p package/*/*/$p 2>/dev/null | head -1)
+            if [ -z "$d" ]; then
+              echo "MISS $p 在当前源树/feeds 中找不到目录" | tee -a logs/usbutils.log.txt
+              continue
+            fi
+            echo "== $p -> $d ==" | tee -a logs/usbutils.log.txt
+            set_m "$p"
+            make oldconfig < /dev/null >/dev/null 2>&1
+            make -C "$d" V=s compile -j1 2>&1 | tee "logs/${p}-pkg.log.txt" | tail -n 5
+            echo ">>> $p 退出码：$?" | tee -a logs/usbutils.log.txt
+            grep -nE 'error:|Error [0-9]|No rule|not found' "logs/${p}-pkg.log.txt" | head -n 12 || true
+          done
+
+          echo ""
+          echo ">>> 逐包核对产出（.apk/.ipk 是否存在）"
+          : > logs/extra-packages-list.txt
+          for p in $EXTRA_KMODS usbutils; do
+            hit=$(find bin -type f \( -name "${p}*.apk" -o -name "${p}*.ipk" \) 2>/dev/null | head -1)
+            if [ -n "$hit" ]; then
+              echo "OK   $p -> $hit" | tee -a logs/extra-packages-list.txt
+            else
+              echo "MISS $p 未生成" | tee -a logs/extra-packages-list.txt
+            fi
+          done
+          exit 0
+
+      - name: 编译本地 luci 独立包与 feed 独立包（全部 best-effort）
+        if: always()
+        working-directory: ./ponwrt
+        run: |
+          set +e
+          set -o pipefail
+          cp -f .config.firmware .config
+
+          set_m() {
             local pkg="$1"
-            if grep -q "^CONFIG_PACKAGE_${pkg}=m" .config; then
-              sed -i "s|^CONFIG_PACKAGE_${pkg}=m|# CONFIG_PACKAGE_${pkg} is not set|" .config
+            if grep -q "^CONFIG_PACKAGE_${pkg} is not set" .config; then
+              sed -i "s|^# CONFIG_PACKAGE_${pkg} is not set|CONFIG_PACKAGE_${pkg}=m|" .config
             elif grep -q "^CONFIG_PACKAGE_${pkg}=y" .config; then
-              sed -i "s|^CONFIG_PACKAGE_${pkg}=y|# CONFIG_PACKAGE_${pkg} is not set|" .config
+              sed -i "s|^CONFIG_PACKAGE_${pkg}=y|CONFIG_PACKAGE_${pkg}=m|" .config
+            elif ! grep -q "^CONFIG_PACKAGE_${pkg}=" .config; then
+              echo "CONFIG_PACKAGE_${pkg}=m" >> .config
             fi
           }
 
-          compile_one() {
+          compile_dir() {
             local pkg="$1"
-            local path="$2"
+            local dir="$2"
             local log="$3"
-
             echo ""
-            echo "============================================================"
-            echo ">>> 处理独立包: $pkg  (路径: $path)"
-            echo "============================================================"
-
-            if [ ! -d "$path" ]; then
-              echo "::warning::$pkg 的目录 $path 不存在，跳过"
+            echo "==== $pkg ($dir) ===="
+            if [ ! -d "$dir" ]; then
+              echo "::warning::$pkg 目录 $dir 不存在，跳过"
               return 0
             fi
-
-            enable_pkg_m "$pkg"
-            make defconfig >/dev/null 2>&1
-            enable_pkg_m "$pkg"
-
-            make -C "$path" V=s compile 2>&1 | tee "logs/$log" | tail -8
-            local rc=${PIPESTATUS[0]}
-            if [ $rc -ne 0 ]; then
-              echo "::warning::$pkg 编译失败（不影响固件）"
-            else
+            set_m "$pkg"
+            make oldconfig < /dev/null >/dev/null 2>&1
+            if make -C "$dir" V=s compile 2>&1 | tee "logs/$log" | tail -n 8; then
               echo ">>> $pkg 编译成功"
+            else
+              echo "::warning::$pkg 编译失败（不影响固件，日志 logs/$log）"
+              grep -nE 'error:|Error [0-9]|No rule|nothing provides|missing dependency' "logs/$log" | head -n 15 || true
             fi
             return 0
           }
 
-          compile_one "luci-app-iptv" "pon_userspace/luci-app-iptv" "iptv-pkg.log.txt"
-          compile_one "luci-app-airoha-npu" "package/luci-app-airoha-npu" "npu-pkg.log.txt"
-          compile_one "luci-app-blueaudio" "pon_userspace/luci-app-blueaudio" "blueaudio-pkg.log.txt"
-          compile_one "luci-app-btsp" "pon_userspace/luci-app-btsp" "btsp-pkg.log.txt"
-          compile_one "luci-app-camlive" "pon_userspace/luci-app-camlive" "camlive-pkg.log.txt"
-
-          SER2NET4_DIR="pon_userspace/ser2net4"
-          if [ -d "$SER2NET4_DIR" ]; then
-            echo ""
-            echo ">>> 检查 ser2net4 集合目录结构："
-            ls -la "$SER2NET4_DIR" || true
-            [ -d "$SER2NET4_DIR/gensio" ] && compile_one "gensio" "$SER2NET4_DIR/gensio" "gensio-pkg.log.txt"
-            [ -d "$SER2NET4_DIR/ser2net" ] && compile_one "ser2net" "$SER2NET4_DIR/ser2net" "ser2net-pkg.log.txt"
-            [ -d "$SER2NET4_DIR/luci-app-ser2net" ] && compile_one "luci-app-ser2net" "$SER2NET4_DIR/luci-app-ser2net" "luci-ser2net-pkg.log.txt"
-          else
-            echo "::warning::ser2net4 目录 $SER2NET4_DIR 不存在，跳过"
-          fi
+          IPTV_DIR=$(ls -d package/feeds/*/luci-app-iptv 2>/dev/null | head -1)
+          [ -n "$IPTV_DIR" ] && compile_dir "luci-app-iptv" "$IPTV_DIR" "iptv-pkg.log.txt"
+          compile_dir "luci-app-airoha-npu" "package/luci-app-airoha-npu" "npu-pkg.log.txt"
+          compile_dir "luci-app-blueaudio" "package/pon-local/luci-app-blueaudio" "blueaudio-pkg.log.txt"
+          compile_dir "luci-app-btsp" "package/pon-local/luci-app-btsp" "btsp-pkg.log.txt"
+          compile_dir "luci-app-camlive" "package/pon-local/luci-app-camlive" "camlive-pkg.log.txt"
+          compile_dir "gensio" "package/pon-local/gensio" "gensio-pkg.log.txt"
+          compile_dir "ser2net" "package/pon-local/ser2net" "ser2net-pkg.log.txt"
+          compile_dir "luci-app-ser2net" "package/pon-local/luci-app-ser2net" "luci-ser2net-pkg.log.txt"
 
           echo ""
-          echo "============================================================"
-          echo ">>> 处理 mihomo-alpha（feed包，使用顶层make target）"
-          echo "============================================================"
-          if [ -d "package/feeds/nikki/mihomo-alpha" ] || [ -d "feeds/nikki/mihomo-alpha" ]; then
-            disable_pkg "mihomo-meta"
-            enable_pkg_m "mihomo-alpha"
-            make defconfig >/dev/null 2>&1
-            enable_pkg_m "mihomo-alpha"
-            grep -E 'CONFIG_PACKAGE_mihomo-(meta|alpha)' .config || true
-
-            make package/feeds/nikki/mihomo-alpha/compile -j"$(nproc)" V=s 2>&1 | tee logs/mihomo-alpha-pkg.log.txt | tail -8
-            local rc_mh=${PIPESTATUS[0]}
-            [ $rc_mh -ne 0 ] && echo "::warning::mihomo-alpha 编译失败" || echo ">>> mihomo-alpha 编译成功"
-
-            disable_pkg "mihomo-alpha"
-            enable_pkg_m "mihomo-meta"
-            sed -i "s|^CONFIG_PACKAGE_mihomo-meta=m|CONFIG_PACKAGE_mihomo-meta=y|" .config
-            make defconfig >/dev/null 2>&1
-          else
-            echo "::warning::mihomo-alpha 目录不存在，跳过"
-          fi
-
-          echo ""
-          echo ">>> 【调试】bin 目录结构"
-          ls -la bin/ || true
+          echo ">>> bin 目录结构"
           ls -la bin/packages/*/ 2>/dev/null || true
-          ls -la bin/targets/*/*/packages/ 2>/dev/null || true
+          ls -la bin/targets/airoha/an7581/packages/ 2>/dev/null | head -n 40 || true
+          exit 0
 
-          echo ">>> pon_userspace独立包编译尝试结束"
+      - name: 整理固件产物
+        if: always()
+        run: |
+          set +e
+          mkdir -p ./firmware_out
+          find ponwrt/bin/targets/airoha/an7581/ -type f \( \
+            -iname '*hg5585f*.itb' -o -iname '*hg5585f*.bin' -o -iname '*hg5585f*.ubi' -o \
+            -name '*.buildinfo' -o -name 'profiles.json' \
+          \) -exec cp -f {} ./firmware_out/ \;
+          cd ./firmware_out
+          shopt -s nullglob nocaseglob
+          files=( *hg5585f*.itb )
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::firmware_out 中没有任何 hg5585f 映像"
+          else
+            sha256sum "${files[@]}" > sha256sums
+            echo ">>> 产出映像："
+            ls -lh "${files[@]}"
+          fi
+          ls -lh
           exit 0
 
       - name: 打包全部软件包
@@ -506,8 +637,8 @@ jobs:
         run: |
           mkdir -p ../ipk_out
           for d in bin/packages bin/targets/airoha/an7581/packages; do
-            if [ -d "$d" ] && [ -n "$(find "$d" \( -name '*.apk' -o -name '*.ipk' \) | head -1)" ]; then
-              tar --zstd -cf ../ipk_out/$(basename "$d").tar.zst "$d" || true
+            if [ -d "$d" ] && [ -n "$(find "$d" \( -name '*.apk' -o -name '*.ipk' \) -print -quit)" ]; then
+              tar --zstd -cf "../ipk_out/$(basename "$d").tar.zst" "$d" || true
             fi
           done
           ls -la ../ipk_out || true
@@ -516,25 +647,53 @@ jobs:
         if: always()
         working-directory: ./ponwrt
         run: |
+          set +e
           mkdir -p ../ipk_out
-          pkg_list="luci-app-iptv luci-app-airoha-npu luci-app-blueaudio luci-app-btsp luci-app-camlive gensio ser2net luci-app-ser2net kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822c kmod-rtw88-8822cu usb-modeswitch usb-modeswitch-data kmod-rtl8723bu mihomo-meta mihomo-alpha"
+          pkg_list="usbutils luci-app-iptv luci-app-airoha-npu luci-app-blueaudio luci-app-btsp luci-app-camlive gensio ser2net luci-app-ser2net mihomo-meta mihomo-alpha $EXTRA_KMODS"
+          : > ../ipk_out/collected.txt
           for pkg in $pkg_list; do
             found=0
             while IFS= read -r -d '' f; do
-              cp -f "$f" ../ipk_out/
-              found=1
-            done < <(find bin -type f \( -name "${pkg}*.apk" -o -name "${pkg}*.ipk" \) -print0 )
-            [ "$found" -eq 1 ] && echo ">>> 已收集 $pkg" || echo "::notice::$pkg 未生成，跳过"
+              cp -f "$f" ../ipk_out/ && found=1 && echo "$pkg -> $(basename "$f")" >> ../ipk_out/collected.txt
+            done < <(find bin -type f \( -name "${pkg}*.apk" -o -name "${pkg}*.ipk" \) -print0 2>/dev/null)
+            [ "$found" -eq 1 ] || echo "::notice::$pkg 未生成，跳过"
           done
-          ls -lh ../ipk_out/*.ipk 2>/dev/null || true
+          cat ../ipk_out/collected.txt || true
+          exit 0
+
+      - name: 生成构建报告（写入 Job Summary）
+        if: always()
+        run: |
+          {
+            echo "## HG5585F 构建报告"
+            echo ""
+            echo "### 固件映像"
+            ls -lh firmware_out/ 2>/dev/null || echo "（无）"
+            echo ""
+            echo "### 配置预检"
+            sed -n '1,60p' ponwrt/logs/config-check.txt 2>/dev/null || echo "（无）"
+            echo ""
+            echo "### 附加内核模块符号状态"
+            sed -n '1,40p' ponwrt/logs/extra-symbols.txt 2>/dev/null || echo "（无）"
+            echo ""
+            echo "### 附加包产出清单"
+            sed -n '1,60p' ponwrt/logs/extra-packages-list.txt 2>/dev/null || echo "（无）"
+            echo ""
+            echo "### 固件编译错误摘要"
+            sed -n '1,30p' ponwrt/logs/firmware-errors.txt 2>/dev/null || echo "（无错误行）"
+            echo ""
+            echo "### 附加内核模块错误摘要"
+            sed -n '1,30p' ponwrt/logs/extra-kmods-errors.txt 2>/dev/null || echo "（无错误行）"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo ">>> 报告已写入 Job Summary"
 
       - name: 上传固件 Artifact
-        if: success()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: PonWrt-HG5585F-CT-integrated
           path: ./firmware_out/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
       - name: 上传全部软件包 Artifact
@@ -546,6 +705,7 @@ jobs:
             ./ipk_out/*.tar.zst
             ./ipk_out/*.apk
             ./ipk_out/*.ipk
+            ./ipk_out/collected.txt
           if-no-files-found: warn
           retention-days: 14
 
@@ -575,14 +735,19 @@ jobs:
           make_latest: false
           generate_release_notes: true
           body: |
-            PonWrt HG5585F-CT 集成版自动预发布（最小化固件 + pon_userspace本地包独立编译）。
-            固件镜像内置：PON 修复、透明代理内核模块、mihomo-meta（稳定版）、IPTV 驱动、omcproxy、USB底层驱动。
-            独立 ipk：luci-app-iptv、luci-app-airoha-npu、luci-app-blueaudio、luci-app-btsp、luci-app-camlive、
-            gensio、ser2net、luci-app-ser2net、RTL8821CU/RTL8723BU网卡驱动、usb-modeswitch，
-            以及可选产出的 mihomo-alpha 独立 ipk（与 meta 互斥，设备上只能二选一安装）。
-            ⚠️ homeproxy / sing-box 因 feed 索引缺失未纳入本次构建。
-            ⚠️ usbutils 未纳入固件编译链，请查看 debug-usbutils Job日志。
-          files: release_out/*
+            PonWrt HG5585F-CT 集成版自动预发布。
+
+            **固件（两个变体，按需选一个刷）**
+            - `...hg5585f-ct-...itb`：原厂形态，lan5（2.5G）可用，USB 口未启用（DTS 未开启 `usb0`）。
+            - `...hg5585f-ct-usb-sfp-...itb`：启用 `usb0`（USB2 PHY），USB 口可用；该变体把 USB PHY 的 PCS 让给 lan5 使用。
+
+            **镜像内置**：PON 修复、透明代理内核模块、mihomo-meta、IPTV 驱动、omcproxy、
+            USB 主机控制器（kmod-usb3 → xhci-hcd + xhci-mtk）、USB 存储（storage/uas/extras）、
+            exfat/ntfs3/ext4/vfat 文件系统、block-mount。
+
+            **独立软件包**：USB 串口（ch341/cp210x/ftdi/pl2303）、USB 网卡（cdc-ether/cdc-ncm/rtl8152/asix-ax88179）、
+            USB 摄像头 UVC、usbutils(lsusb)、camlive/blueaudio/btsp/ser2net 等 luci 应用。
+            详见 `collected.txt` 与构建报告。
 
       - name: 保存 staging 缓存
         if: always()
@@ -592,7 +757,7 @@ jobs:
           path: ponwrt/staging_dir/target-aarch64_cortex-a53_musl
           key: hg5585f-stage-${{ github.run_id }}
 
-      - name: 上传编译配置与日志
+      - name: 上传编译配置与日志（含隐藏文件）
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -602,81 +767,6 @@ jobs:
             ponwrt/.config.firmware
             ponwrt/feeds.conf.default
             ponwrt/logs/
-          if-no-files-found: ignore
-          retention-days: 3
-
-  debug-usbutils:
-    name: Debug-usbutils 单独编译调试
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    env:
-      SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
-    steps:
-      - name: 签出工作流仓库
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: 初始化编译环境
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends \
-            asciidoc autoconf automake autopoint binutils bison build-essential \
-            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
-            gettext git g++-multilib gcc-multilib gperf help2man intltool \
-            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
-            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
-            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
-            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
-            python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
-            subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
-            libzstd-dev jq dos2unix upx-ucl
-
-      - name: 拉取 PonWrt 指定 commit
-        run: |
-          git init ponwrt
-          git -C ponwrt remote add origin https://github.com/pbs05/ponwrt.git
-          git -C ponwrt fetch --depth=1 -- origin "$SOURCE_REF"
-          git -C ponwrt checkout --detach FETCH_HEAD
-
-      - name: 配置feeds源，和正式固件保持一致
-        working-directory: ./ponwrt
-        run: |
-          if [ ! -f feeds.conf.default ]; then touch feeds.conf.default; fi
-          sed -i '/nikki/d;/homeproxy/d;/openwrt-iptv/d' feeds.conf.default
-          echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
-          echo 'src-git iptv https://github.com/yveming/openwrt-iptv.git' >> feeds.conf.default
-          dos2unix feeds.conf.default 2>/dev/null || true
-          ./scripts/feeds update -a
-          ./scripts/feeds install usbutils
-
-      - name: 生成基础target配置
-        working-directory: ./ponwrt
-        run: |
-          rm -rf tmp
-          perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
-          sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
-          sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
-          sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
-          printf 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y\n' >> .config
-          printf 'CONFIG_PACKAGE_usbutils=m\n' >> .config
-          make defconfig
-          mkdir -p logs
-
-      - name: usbutils 单独编译，抓取完整日志
-        working-directory: ./ponwrt
-        run: |
-          make package/feeds/packages/usbutils/clean
-          make package/feeds/packages/usbutils/compile V=s -j1 2>&1 | tee logs/usbutils-debug.log.txt; true
-
-      - name: 上传usbutils调试产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: usbutils-debug-artifact
-          path: |
-            ponwrt/logs/usbutils-debug.log.txt
-            ponwrt/bin/targets/airoha/an7581/packages/usbutils*.ipk*
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 7
