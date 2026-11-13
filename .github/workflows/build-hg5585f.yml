@@ -237,7 +237,7 @@ jobs:
           make defconfig
 
           sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
-          sed -i '/CONFIG_TARGET_MULTI_PROFILES/d' .config
+          sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
           sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
           sed -i '/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
 
@@ -260,7 +260,8 @@ jobs:
           clear_sym CONFIG_PACKAGE_usbutils
 
           printf '# CONFIG_TARGET_ALL_PROFILES is not set\n' >> .config
-          printf '# CONFIG_TARGET_MULTI_PROFILE is not set\n' >> .config
+          # 必须开启多机型模式，否则 kconfig 只保留一个 DEVICE_ 符号（另一变体被丢弃）
+          printf 'CONFIG_TARGET_MULTI_PROFILE=y\n' >> .config
           # 一次构建产出两个变体：CT（默认，USB 口未启用）与 CT-USB-SFP（启用 usb0，占用 lan5 的 PCS）
           printf 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y\n' >> .config
           printf 'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y\n' >> .config
@@ -382,6 +383,10 @@ jobs:
           fi
           check_y CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct
           check_y CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct-usb-sfp
+          # 多机型模式下 image.mk 实际读取的是 CONFIG_TARGET_DEVICE_... 这一族
+          check_y CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct
+          check_y CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct-usb-sfp
+          check_y CONFIG_TARGET_MULTI_PROFILE
 
           # USB / 存储核心（固件内置）
           for p in $USB_CORE_PKGS; do check_y "CONFIG_PACKAGE_${p}"; done
