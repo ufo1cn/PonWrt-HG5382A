@@ -2,12 +2,13 @@ name: 编译 PonWrt HG5585F 电信版集成版固件
 # （最小化固件 + 独立包逐包切换编译 + 重复符号清理 + WARN_RECURSIVE_DEP 降级诊断）
 # ----------------------------------------------------------------------------
 # 关键修正：
-#   1. 诊断命令改为 make olddefconfig V=s（目标在前、变量在后），不再报 No rule to make target；
-#   2. 追加配置前先清理 .config 中可能重复的符号，保证每个符号只出现一次；
-#   3. 用 WARN_RECURSIVE_DEP=1 将递归依赖降级为警告，让配置同步能完成；
-#   4. 独立包路径按仓库根目录 pon_userspace 实际结构修正；
-#   5. ser2net4 集合拆分为 gensio / ser2net / luci-app-ser2net 分别编译。
-# ============================================================================
+#   1. 全部使用 make defconfig，移除不稳定 olddefconfig，避免kconfig递归依赖直接报错退出
+#   2. 追加配置前先清理 .config 重复符号，保证每个符号只出现一次
+#   3. 固件本体不编译 usbutils，移到独立包单独编译并输出完整诊断日志
+#   4. 固件配置与独立包彻底隔离，独立包只操作配置副本，不污染固件编译结果
+#   5. 日志直接输出 *.log.txt，Windows下载可直接双击打开
+#   6. ser2net4 集合拆分为 gensio / ser2net / luci‑app‑ser2net 分别编译
+
 on:
   workflow_dispatch:
 permissions:
@@ -18,8 +19,8 @@ concurrency:
   cancel-in-progress: true
 jobs:
   build:
-    name: 编译 HG5585F-CT 集成版固件
-    runs-on: ubuntu-24.04
+    name: 编译 HG5585F‑CT 集成版固件
+    runs-on: ubuntu‑24.04
     timeout-minutes: 360
     env:
       SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
@@ -52,14 +53,14 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             asciidoc autoconf automake autopoint binutils bison build-essential \
             bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
-            gettext git g++-multilib gcc-multilib gperf help2man intltool \
-            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
-            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
-            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
-            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
-            python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
-            subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
-            libzstd-dev jq dos2unix upx-ucl
+            gettext git g++‑multilib gcc‑multilib gperf help2man intltool \
+            libelf-dev libglib2.0‑dev libgmp3‑dev libltdl‑dev libmpc‑dev \
+            libmpfr‑dev libncurses‑dev libpython3‑dev libreadline‑dev libssl‑dev \
+            libtool libyaml‑dev lld llvm ninja‑build p7zip‑full patch pkgconf \
+            python3 python3‑docutils python3‑pip python3‑ply python3‑pyelftools \
+            python3‑setuptools qemu‑utils re2c rsync scons squashfs‑tools \
+            subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g‑dev zstd \
+            libzstd‑dev jq dos2unix upx‑ucl
 
       - name: 拉取 PonWrt 指定 commit
         run: |
@@ -73,10 +74,10 @@ jobs:
         working-directory: ./ponwrt
         run: |
           if [ ! -f feeds.conf.default ]; then touch feeds.conf.default; fi
-          sed -i '/nikki/d;/homeproxy/d;/openwrt-iptv/d' feeds.conf.default
+          sed -i '/nikki/d;/homeproxy/d;/openwrt‑iptv/d' feeds.conf.default
           [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
-          echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
-          echo 'src-git iptv https://github.com/yveming/openwrt-iptv.git' >> feeds.conf.default
+          echo 'src‑git nikki https://github.com/nikkinikki‑org/OpenWrt‑nikki.git;main' >> feeds.conf.default
+          echo 'src‑git iptv https://github.com/yveming/openwrt‑iptv.git' >> feeds.conf.default
           dos2unix feeds.conf.default 2>/dev/null || true
           tail -n 10 feeds.conf.default
 
@@ -84,42 +85,42 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ponwrt/dl
-          key: ponwrt-dl-an7581-${{ hashFiles('ponwrt/feeds.conf.default', 'ponwrt/configs/*.config') }}
-          restore-keys: |
-            ponwrt-dl-an7581-
-            ponwrt-dl-
+          key: ponwrt‑dl‑an7581‑${{ hashFiles('ponwrt/feeds.conf.default', 'ponwrt/configs/*.config') }}
+          restore‑keys: |
+            ponwrt‑dl‑an7581‑
+            ponwrt‑dl‑
 
       - name: 缓存 toolchain + host
         uses: actions/cache@v4
         with:
           path: |
-            ponwrt/staging_dir/toolchain-*
+            ponwrt/staging_dir/toolchain‑*
             ponwrt/staging_dir/host
-          key: hg5585f-toolchain-${{ github.workflow_sha }}-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
-          restore-keys: |
-            hg5585f-toolchain-
+          key: hg5585f‑toolchain‑${{ github.workflow_sha }}‑${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
+          restore‑keys: |
+            hg5585f‑toolchain‑
 
       - name: 恢复 staging 缓存
         uses: actions/cache/restore@v4
         with:
-          path: ponwrt/staging_dir/target-aarch64_cortex-a53_musl
-          key: hg5585f-stage-${{ github.run_id }}
-          restore-keys: |
-            hg5585f-stage-
+          path: ponwrt/staging_dir/target‑aarch64_cortex‑a53_musl
+          key: hg5585f‑stage‑${{ github.run_id }}
+          restore‑keys: |
+            hg5585f‑stage‑
 
       - name: 缓存慢包构建目录
         uses: actions/cache@v4
         with:
           path: |
-            ponwrt/build_dir/hostpkg/golang-*
-            ponwrt/build_dir/target-aarch64_cortex-a53_musl/python3-*
-            ponwrt/build_dir/target-aarch64_cortex-a53_musl/golang-*
-            ponwrt/build_dir/target-aarch64_cortex-a53_musl/sing-box-*
-            ponwrt/build_dir/target-aarch64_cortex-a53_musl/libcronet-*
-            ponwrt/build_dir/target-aarch64_cortex-a53_musl/openssl-*
-          key: hg5585f-slow-${{ github.workflow_sha }}-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config', 'ponwrt/feeds.conf.default') }}
-          restore-keys: |
-            hg5585f-slow-
+            ponwrt/build_dir/hostpkg/golang‑*
+            ponwrt/build_dir/target‑aarch64_cortex‑a53_musl/python3‑*
+            ponwrt/build_dir/target‑aarch64_cortex‑a53_musl/golang‑*
+            ponwrt/build_dir/target‑aarch64_cortex‑a53_musl/sing‑box‑*
+            ponwrt/build_dir/target‑aarch64_cortex‑a53_musl/libcronet‑*
+            ponwrt/build_dir/target‑aarch64_cortex‑a53_musl/openssl‑*
+          key: hg5585f‑slow‑${{ github.workflow_sha }}‑${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config', 'ponwrt/feeds.conf.default') }}
+          restore‑keys: |
+            hg5585f‑slow‑
 
       - name: 注入 libffi 包（在 feeds install 之前）
         working-directory: ./ponwrt
@@ -138,135 +139,128 @@ jobs:
           fi
 
           ./scripts/feeds install \
-            kmod-airoha-paged-bosa kmod-airoha-pon-frontend kmod-airoha-xpon \
-            airoha-ponctl airoha-pond \
-            kmod-tun kmod-nft-tproxy kmod-nft-socket kmod-inet-diag kmod-dummy \
-            kmod-iptv \
-            omcproxy luci-app-omcproxy \
-            kmod-usb-xhci kmod-usb-storage kmod-usb-storage-extras \
-            kmod-fs-ext4 kmod-fs-vfat kmod-fs-ntfs3 block-mount usbutils \
-            kmod-video-v4l2 kmod-video-uvc kmod-usb-serial kmod-usb-net \
-            kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822c kmod-rtw88-8822cu \
-            usb-modeswitch usb-modeswitch-data kmod-rtl8723bu
+            kmod‑airoha‑paged‑bosa kmod‑airoha‑pon‑frontend kmod‑airoha‑xpon \
+            airoha‑ponctl airoha‑pond \
+            kmod‑tun kmod‑nft‑tproxy kmod‑nft‑socket kmod‑inet‑diag kmod‑dummy \
+            kmod‑iptv \
+            omcproxy luci‑app‑omcproxy \
+            kmod‑usb‑xhci kmod‑usb‑storage kmod‑usb‑storage‑extras \
+            kmod‑fs‑ext4 kmod‑fs‑vfat kmod‑fs‑ntfs3 block‑mount \
+            kmod‑video‑v4l2 kmod‑video‑uvc kmod‑usb‑serial kmod‑usb‑net \
+            kmod‑rtw88 kmod‑rtw88‑usb kmod‑rtw88‑8822c kmod‑rtw88‑8822cu \
+            usb‑modeswitch usb‑modeswitch‑data kmod‑rtl8723bu
 
-          ./scripts/feeds install mihomo-meta nikki luci-app-nikki luci-i18n-nikki-zh-cn
+          ./scripts/feeds install mihomo‑meta nikki luci‑app‑nikki luci‑i18n‑nikki‑zh‑cn
 
           ./scripts/feeds install curl libcurl libidn2 libnghttp2 libpsl \
             libgnutls libtasn1 libunistring nettle gmp \
-            ip-full yq libcronet \
-            luci-app-ttyd luci-app-ddns ddns-scripts openssh-sftp-server
+            ip‑full yq libcronet \
+            luci‑app‑ttyd luci‑app‑ddns ddns‑scripts openssh‑sftp‑server
 
           echo ">>> 最小化 feeds install 完成"
 
-      - name: 将 luci-app-airoha-npu 克隆到 package 目录
+      - name: 将 luci‑app‑airoha‑npu 克隆到 package 目录
         working-directory: ./ponwrt
         run: |
-          rm -rf package/luci-app-airoha-npu
-          git clone --depth=1 https://github.com/rchen14b/luci-app-airoha-npu.git package/luci-app-airoha-npu
-          if [ -f package/luci-app-airoha-npu/.gitmodules ]; then
-            git -C package/luci-app-airoha-npu submodule update --init --recursive --depth=1
+          rm -rf package/luci‑app‑airoha‑npu
+          git clone --depth=1 https://github.com/rchen14b/luci‑app‑airoha‑npu.git package/luci‑app‑airoha‑npu
+          if [ -f package/luci‑app‑airoha‑npu/.gitmodules ]; then
+            git -C package/luci‑app‑airoha‑npu submodule update --init --recursive --depth=1
           fi
-          rm -rf package/luci-app-airoha-npu/.git package/luci-app-airoha-npu/.github package/luci-app-airoha-npu/screenshots
-          rm -rf package/luci-app-airoha-npu/luci-app-airoha-npu
-          grep -m1 'LUCI_TITLE' package/luci-app-airoha-npu/Makefile || echo "::warning::未找到 LUCI_TITLE"
+          rm -rf package/luci‑app‑airoha‑npu/.git package/luci‑app‑airoha‑npu/.github package/luci‑app‑airoha‑npu/screenshots
+          rm -rf package/luci‑app‑airoha‑npu/luci‑app‑airoha‑npu
+          grep -m1 'LUCI_TITLE' package/luci‑app‑airoha‑npu/Makefile || echo "::warning::未找到 LUCI_TITLE"
 
-      - name: 预修改 luci-app-iptv Makefile（独立包阶段再 install）
+      - name: 预修改 luci‑app‑iptv Makefile（独立包阶段再 install）
         working-directory: ./ponwrt
         run: |
-          if [ -f pon_userspace/luci-app-iptv/Makefile ]; then
-            MK="pon_userspace/luci-app-iptv/Makefile"
+          if [ -f pon_userspace/luci‑app‑iptv/Makefile ]; then
+            MK="pon_userspace/luci‑app‑iptv/Makefile"
             cp -f "$MK" "$MK.orig"
-            sed -i 's/+kmod-iptv/kmod-iptv/g' "$MK"
+            sed -i 's/+kmod‑iptv/kmod‑iptv/g' "$MK"
             sed -i '/\/etc\/config\/iptv/d' "$MK"
             sed -i '/\/etc\/init\.d\/iptv/d' "$MK"
-            echo ">>> luci-app-iptv Makefile 预修改完成"
+            echo ">>> luci‑app‑iptv Makefile 预修改完成"
           fi
 
       - name: 应用 GPON feed 补丁
         env:
           PONWRT_DIR: ponwrt
           FEED_PATCHES_STRICT: '1'
-        run: bash scripts/apply-feed-patches.sh
+        run: bash scripts/apply‑feed‑patches.sh
 
       - name: 校验 GPON 补丁已生效
         working-directory: ./ponwrt
         run: |
           set -e
-          test -f feeds/pon_drivers/airoha-xpon/src/airoha-xpon-gpon.c
-          grep -q 'AIROHA_PON_FRONTEND_MODE_GPON' feeds/pon_drivers/airoha-pon-frontends/src/airoha-paged-bosa-ux3363.c
-          grep -q "o.value('gpon'" feeds/pon_userspace/luci-app-pon/htdocs/luci-static/resources/view/pon/config.js
+          test -f feeds/pon_drivers/airoha‑xpon/src/airoha‑xpon‑gpon.c
+          grep -q 'AIROHA_PON_FRONTEND_MODE_GPON' feeds/pon_drivers/airoha‑pon‑frontends/src/airoha‑paged‑bosa‑ux3363.c
+          grep -q "o.value('gpon'" feeds/pon_userspace/luci‑app‑pon/htdocs/luci‑static/resources/view/pon/config.js
           echo "OK: GPON patches are present."
 
       # ============================================================================
-      # 固件配置：
-      #   1. defconfig 生成基准；
-      #   2. 清理可能重复的符号，保证每个符号只出现一次；
-      #   3. 追加最小化配置；
-      #   4. 用 WARN_RECURSIVE_DEP=1 将递归依赖降级为警告，让 olddefconfig 能完成；
-      #   5. 若仍失败，用 make olddefconfig V=s（目标在前）抓取完整错误到诊断日志。
+      # 固件配置：使用 make defconfig，清理全部重复符号
       # ============================================================================
-      - name: 生成并锁定 HG5585F-CT 固件配置 ✅【清理重复符号 + 递归依赖降级】
+      - name: 生成并锁定 HG5585F‑CT 固件配置 ✅【清理重复符号】
         working-directory: ./ponwrt
         run: |
           rm -rf tmp
           perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
           make defconfig
 
+          # 删除旧target profile行
           sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
           sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
           sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
           sed -i '/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
 
-          # 清理可能重复的符号，保证 .config 中每个符号只出现一次
-          for sym in \
-            CONFIG_PACKAGE_kmod-iptv \
-            CONFIG_PACKAGE_kmod-tun \
-            CONFIG_PACKAGE_kmod-nft-tproxy \
-            CONFIG_PACKAGE_kmod-usb-xhci \
-            CONFIG_PACKAGE_mihomo-alpha \
-            CONFIG_PACKAGE_mihomo-meta \
-            CONFIG_PACKAGE_qt5base \
-            CONFIG_PACKAGE_fwknopd \
-            CONFIG_PACKAGE_squeezelite-custom \
-            CONFIG_PACKAGE_luci-app-homeproxy \
-            CONFIG_PACKAGE_sing-box \
-            CONFIG_KERNEL_DEBUG_FS \
-            CONFIG_KERNEL_DEVMEM \
-            CONFIG_BUSYBOX_CONFIG_DEVMEM; do
+          clear_sym() {
+            local sym="$1"
             sed -i "/^# ${sym} is not set$/d; /^${sym}=/d" .config
-          done
+          }
+          clear_sym CONFIG_PACKAGE_kmod‑iptv
+          clear_sym CONFIG_PACKAGE_kmod‑tun
+          clear_sym CONFIG_PACKAGE_kmod‑nft‑tproxy
+          clear_sym CONFIG_PACKAGE_kmod‑usb‑xhci
+          clear_sym CONFIG_PACKAGE_mihomo‑alpha
+          clear_sym CONFIG_PACKAGE_qt5base
+          clear_sym CONFIG_PACKAGE_fwknopd
+          clear_sym CONFIG_PACKAGE_squeezelite‑custom
+          clear_sym CONFIG_PACKAGE_luci‑app‑homeproxy
+          clear_sym CONFIG_PACKAGE_sing‑box
+          clear_sym CONFIG_KERNEL_DEBUG_FS
+          clear_sym CONFIG_KERNEL_DEVMEM
+          clear_sym CONFIG_BUSYBOX_CONFIG_DEVMEM
+          clear_sym CONFIG_PACKAGE_usbutils
 
           cat >> .config << 'EOF'
           # CONFIG_TARGET_ALL_PROFILES is not set
           # CONFIG_TARGET_MULTI_PROFILE is not set
-          CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y
-          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y
-          CONFIG_PACKAGE_luci-theme-argon=y
-          # CONFIG_PACKAGE_luci-theme-bootstrap is not set
-          CONFIG_PACKAGE_luci-app-ttyd=y
-          CONFIG_PACKAGE_luci-app-ddns=y
-          CONFIG_PACKAGE_ddns-scripts=y
-          CONFIG_PACKAGE_openssh-sftp-server=y
-          EOF
-
-          cat >> .config << 'EOF'
+          CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f‑ct=y
+          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f‑ct=y
+          CONFIG_PACKAGE_luci‑theme‑argon=y
+          # CONFIG_PACKAGE_luci‑theme‑bootstrap is not set
+          CONFIG_PACKAGE_luci‑app‑ttyd=y
+          CONFIG_PACKAGE_luci‑app‑ddns=y
+          CONFIG_PACKAGE_ddns‑scripts=y
+          CONFIG_PACKAGE_openssh‑sftp‑server=y
           # --- PON 修复 ---
-          CONFIG_PACKAGE_kmod-airoha-paged-bosa=y
-          CONFIG_PACKAGE_kmod-airoha-pon-frontend=y
-          CONFIG_PACKAGE_kmod-airoha-xpon=y
-          CONFIG_PACKAGE_airoha-ponctl=y
-          CONFIG_PACKAGE_airoha-pond=y
+          CONFIG_PACKAGE_kmod‑airoha‑paged‑bosa=y
+          CONFIG_PACKAGE_kmod‑airoha‑pon‑frontend=y
+          CONFIG_PACKAGE_kmod‑airoha‑xpon=y
+          CONFIG_PACKAGE_airoha‑ponctl=y
+          CONFIG_PACKAGE_airoha‑pond=y
           # --- 透明代理内核模块 ---
-          CONFIG_PACKAGE_kmod-tun=y
-          CONFIG_PACKAGE_kmod-nft-tproxy=y
-          CONFIG_PACKAGE_kmod-nft-socket=y
-          CONFIG_PACKAGE_kmod-inet-diag=y
-          CONFIG_PACKAGE_kmod-dummy=y
+          CONFIG_PACKAGE_kmod‑tun=y
+          CONFIG_PACKAGE_kmod‑nft‑tproxy=y
+          CONFIG_PACKAGE_kmod‑nft‑socket=y
+          CONFIG_PACKAGE_kmod‑inet‑diag=y
+          CONFIG_PACKAGE_kmod‑dummy=y
           # --- mihomo（仅稳定版 meta） ---
-          CONFIG_PACKAGE_mihomo-meta=y
+          CONFIG_PACKAGE_mihomo‑meta=y
           CONFIG_PACKAGE_nikki=y
-          CONFIG_PACKAGE_luci-app-nikki=y
-          CONFIG_PACKAGE_luci-i18n-nikki-zh-cn=y
+          CONFIG_PACKAGE_luci‑app‑nikki=y
+          CONFIG_PACKAGE_luci‑i18n‑nikki‑zh‑cn=y
           # --- curl / libcurl ---
           CONFIG_PACKAGE_curl=y
           CONFIG_PACKAGE_libcurl=y
@@ -279,53 +273,52 @@ jobs:
           CONFIG_PACKAGE_nettle=y
           CONFIG_PACKAGE_gmp=y
           # --- 工具 ---
-          CONFIG_PACKAGE_ip-full=y
+          CONFIG_PACKAGE_ip‑full=y
           CONFIG_PACKAGE_yq=y
           CONFIG_PACKAGE_libffi=y
           CONFIG_PACKAGE_libcronet=y
           # --- IPTV 核心驱动 ---
-          CONFIG_PACKAGE_kmod-iptv=y
+          CONFIG_PACKAGE_kmod‑iptv=y
           # --- omcproxy ---
           CONFIG_PACKAGE_omcproxy=y
-          CONFIG_PACKAGE_luci-app-omcproxy=y
-          # --- USB 底层模块（=m） ---
-          CONFIG_PACKAGE_kmod-usb-xhci=m
-          CONFIG_PACKAGE_kmod-usb-storage=m
-          CONFIG_PACKAGE_kmod-usb-storage-extras=m
-          CONFIG_PACKAGE_kmod-fs-ext4=m
-          CONFIG_PACKAGE_kmod-fs-vfat=m
-          CONFIG_PACKAGE_kmod-fs-ntfs3=m
-          CONFIG_PACKAGE_block-mount=m
-          CONFIG_PACKAGE_usbutils=m
-          CONFIG_PACKAGE_kmod-video-v4l2=m
-          CONFIG_PACKAGE_kmod-video-uvc=m
-          CONFIG_PACKAGE_kmod-usb-serial=m
-          CONFIG_PACKAGE_kmod-usb-net=m
-          CONFIG_PACKAGE_kmod-rtw88=m
-          CONFIG_PACKAGE_kmod-rtw88-usb=m
-          CONFIG_PACKAGE_kmod-rtw88-8822c=m
-          CONFIG_PACKAGE_kmod-rtw88-8822cu=m
-          CONFIG_PACKAGE_usb-modeswitch=m
-          CONFIG_PACKAGE_usb-modeswitch-data=m
-          CONFIG_PACKAGE_kmod-rtl8723bu=m
+          CONFIG_PACKAGE_luci‑app‑omcproxy=y
+          # --- USB底层模块 usbutils移到独立包编译，固件本体不内置
+          CONFIG_PACKAGE_kmod‑usb‑xhci=m
+          CONFIG_PACKAGE_kmod‑usb‑storage=m
+          CONFIG_PACKAGE_kmod‑usb‑storage‑extras=m
+          CONFIG_PACKAGE_kmod‑fs‑ext4=m
+          CONFIG_PACKAGE_kmod‑fs‑vfat=m
+          CONFIG_PACKAGE_kmod‑fs‑ntfs3=m
+          CONFIG_PACKAGE_block‑mount=m
+          # CONFIG_PACKAGE_usbutils is not set
+          CONFIG_PACKAGE_kmod‑video‑v4l2=m
+          CONFIG_PACKAGE_kmod‑video‑uvc=m
+          CONFIG_PACKAGE_kmod‑usb‑serial=m
+          CONFIG_PACKAGE_kmod‑usb‑net=m
+          CONFIG_PACKAGE_kmod‑rtw88=m
+          CONFIG_PACKAGE_kmod‑rtw88‑usb=m
+          CONFIG_PACKAGE_kmod‑rtw88‑8822c=m
+          CONFIG_PACKAGE_kmod‑rtw88‑8822cu=m
+          CONFIG_PACKAGE_usb‑modeswitch=m
+          CONFIG_PACKAGE_usb‑modeswitch‑data=m
+          CONFIG_PACKAGE_kmod‑rtl8723bu=m
           # --- 独立包不参与固件 ---
-          # CONFIG_PACKAGE_luci-app-iptv is not set
-          # CONFIG_PACKAGE_luci-app-airoha-npu is not set
-          # CONFIG_PACKAGE_luci-app-airoha-soc is not set
-          # CONFIG_PACKAGE_luci-app-blueaudio is not set
-          # CONFIG_PACKAGE_luci-app-btsp is not set
-          # CONFIG_PACKAGE_luci-app-camlive is not set
-          # CONFIG_PACKAGE_kmod-usb-serial-ch341 is not set
+          # CONFIG_PACKAGE_luci‑app‑iptv is not set
+          # CONFIG_PACKAGE_luci‑app‑airoha‑npu is not set
+          # CONFIG_PACKAGE_luci‑app‑airoha‑soc is not set
+          # CONFIG_PACKAGE_luci‑app‑blueaudio is not set
+          # CONFIG_PACKAGE_luci‑app‑btsp is not set
+          # CONFIG_PACKAGE_luci‑app‑camlive is not set
+          # CONFIG_PACKAGE_kmod‑usb‑serial‑ch341 is not set
           # CONFIG_PACKAGE_ser2net is not set
           # CONFIG_PACKAGE_gensio is not set
-          # CONFIG_PACKAGE_luci-app-ser2net is not set
+          # CONFIG_PACKAGE_luci‑app‑ser2net is not set
           # CONFIG_PACKAGE_qt5base is not set
           # CONFIG_PACKAGE_fwknopd is not set
-          # CONFIG_PACKAGE_squeezelite-custom is not set
-          # CONFIG_PACKAGE_mihomo-alpha is not set
-          # CONFIG_PACKAGE_luci-app-homeproxy is not set
-          # CONFIG_PACKAGE_sing-box is not set
-
+          # CONFIG_PACKAGE_squeezelite‑custom is not set
+          # CONFIG_PACKAGE_mihomo‑alpha is not set
+          # CONFIG_PACKAGE_luci‑app‑homeproxy is not set
+          # CONFIG_PACKAGE_sing‑box is not set
           # ============================================================
           # 显式开启内核 DEBUG_FS 及调试功能
           # ============================================================
@@ -334,38 +327,29 @@ jobs:
           CONFIG_BUSYBOX_CONFIG_DEVMEM=y
           EOF
 
-          # ============================================================
-          # olddefconfig：
-          #   1. 先用 WARN_RECURSIVE_DEP=1 降级递归依赖为警告，正常完成配置同步；
-          #   2. 若仍失败，用 make olddefconfig V=s（目标在前）抓取完整错误。
-          # ============================================================
-          mkdir -p logs
-          echo ">>> 运行 WARN_RECURSIVE_DEP=1 olddefconfig（递归依赖降级为警告）"
-          if ! make WARN_RECURSIVE_DEP=1 olddefconfig 2>&1 | tee logs/olddefconfig-warn.log; then
-            echo ">>> 降级模式仍失败，切换 make olddefconfig V=s 获取完整错误："
-            make olddefconfig V=s 2>&1 | tee logs/olddefconfig-diag.log
-            echo ">>> 诊断日志已保存到 logs/olddefconfig-diag.log"
-          else
-            echo ">>> olddefconfig 已在降级模式下完成，递归依赖以警告形式记录在 logs/olddefconfig-warn.log"
-          fi
+          make defconfig
 
           sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
-          if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y$' .config; then
-            echo "::error::HG5585F-CT 单一机型锁定校验失败！"; exit 1
+          if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f‑ct=y$' .config; then
+            echo "::error::HG5585F‑CT 单一机型锁定校验失败！"; exit 1
           fi
 
-          echo "==== 校验关键内核模块与调试选项（每项应只出现一次） ===="
+          echo "==== 校验关键内核模块与调试选项 ===="
           for sym in CONFIG_KERNEL_DEBUG_FS CONFIG_KERNEL_DEVMEM CONFIG_BUSYBOX_CONFIG_DEVMEM \
-                     CONFIG_PACKAGE_kmod-nft-tproxy CONFIG_PACKAGE_kmod-tun \
-                     CONFIG_PACKAGE_kmod-iptv CONFIG_PACKAGE_kmod-usb-xhci; do
+                     CONFIG_PACKAGE_kmod‑nft‑tproxy CONFIG_PACKAGE_kmod‑tun \
+                     CONFIG_PACKAGE_kmod‑iptv CONFIG_PACKAGE_kmod‑usb‑xhci; do
             echo "--- $sym ---"
             grep "^${sym}=" .config || echo "(未激活)"
           done
 
           echo "==== 校验循环相关包未被激活 ===="
-          grep -E 'CONFIG_PACKAGE_(qt5base|fwknopd|squeezelite-custom|mihomo-alpha)=' .config || \
+          grep -E 'CONFIG_PACKAGE_(qt5base|fwknopd|squeezelite‑custom|mihomo‑alpha)=' .config || \
             echo ">>> 循环相关包均未以激活状态出现在 .config 中"
-          echo ">>> 固件配置完成"
+
+          # 保存固件基准配置，独立包阶段拷贝副本使用，绝不修改本文件
+          cp .config .config.firmware
+          mkdir -p logs
+          echo ">>> 固件配置完成，已保存 .config.firmware"
 
       - name: 下载源码软件包
         working-directory: ./ponwrt
@@ -373,9 +357,9 @@ jobs:
           export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
           export GO111MODULE=on
           make download -j"$(nproc)" || true
-          find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
-          make download -j1 V=s || { echo "::warning::仍有下载失败"; }
-          find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
+          find dl -type f -size -1024c ! -path 'dl/go‑mod‑cache/*' -delete
+          make download -j1 V=s 2>&1 | tee logs/download.log.txt || { echo "::warning::仍有下载失败"; }
+          find dl -type f -size -1024c ! -path 'dl/go‑mod‑cache/*' -delete
 
       - name: 检查上次构建状态并精准清理缓存
         working-directory: ./ponwrt
@@ -385,7 +369,7 @@ jobs:
             rm -rf tmp
           else
             echo ">>> 上次构建失败，精准清理"
-            rm -rf staging_dir/target-aarch64_cortex-a53_musl/stamp
+            rm -rf staging_dir/target‑aarch64_cortex‑a53_musl/stamp
             rm -rf tmp
           fi
           rm -f staging_dir/.build_success
@@ -401,8 +385,8 @@ jobs:
           mkdir -p logs
           make package/libs/libffi/compile -j"$(nproc)" V=s || true
           set -o pipefail
-          make WARN_RECURSIVE_DEP=1 -j"$(nproc)" 2>&1 | tee logs/build.log || \
-            (echo ">>> 并行编译失败，回退单线程" && make WARN_RECURSIVE_DEP=1 -j1 V=s 2>&1 | tee -a logs/build.log)
+          make -j"$(nproc)" 2>&1 | tee logs/build.log.txt || \
+            (echo ">>> 并行编译失败，回退单线程" && make -j1 V=s 2>&1 | tee -a logs/build.log.txt)
 
       - name: 标记构建成功
         if: success()
@@ -415,29 +399,27 @@ jobs:
         run: |
           mkdir -p ./firmware_out
           find ponwrt/bin/targets/airoha/an7581/ -type f \( \
-            -iname '*hg5585f-ct*.bin' -o -iname '*hg5585f-ct*.ubi' -o \
-            -iname '*hg5585f-ct*.itb' -o -name '*.buildinfo' -o -name 'profiles.json' \
+            -iname '*hg5585f‑ct*.bin' -o -iname '*hg5585f‑ct*.ubi' -o \
+            -iname '*hg5585f‑ct*.itb' -o -name '*.buildinfo' -o -name 'profiles.json' \
           \) -exec cp -f {} ./firmware_out/ \;
           (
             cd ./firmware_out
             shopt -s nullglob nocaseglob
-            files=( *hg5585f-ct*.bin *hg5585f-ct*.ubi *hg5585f-ct*.itb )
+            files=( *hg5585f‑ct*.bin *hg5585f‑ct*.ubi *hg5585f‑ct*.itb )
             if [ "${#files[@]}" -eq 0 ]; then echo "::error::无固件映像"; exit 1; fi
             sha256sum "${files[@]}" > sha256sums
             ls -lh
           )
 
       # ============================================================================
-      # 独立包阶段：逐包切换配置 + 单独编译。
-      # 路径按仓库根目录 pon_userspace 实际结构。
+      # 独立包阶段：拷贝固件配置副本，逐包切换配置编译
       # ============================================================================
-      - name: 尝试编译独立软件包 ✅【逐包切换配置，路径按仓库根目录 pon_userspace】
+      - name: 尝试编译独立软件包 ✅【逐包切换配置】
         working-directory: ./ponwrt
         run: |
           set +e
-          echo ">>> 开始独立包编译（逐包切换配置）"
-
-          cp .config .config.firmware
+          echo ">>> 开始独立包编译（拷贝固件配置副本，保护原始固件配置）"
+          cp .config.firmware .config
 
           enable_pkg_m() {
             local pkg="$1"
@@ -475,10 +457,10 @@ jobs:
             fi
 
             enable_pkg_m "$pkg"
-            make WARN_RECURSIVE_DEP=1 olddefconfig >/dev/null 2>&1 || true
+            make defconfig >/dev/null 2>&1
             enable_pkg_m "$pkg"
 
-            make WARN_RECURSIVE_DEP=1 "$path/compile" -j"$(nproc)" V=s 2>&1 | tee "logs/$log" | tail -8
+            make "$path/compile" -j"$(nproc)" V=s 2>&1 | tee "logs/$log" | tail -8
             local rc=${PIPESTATUS[0]}
             if [ $rc -ne 0 ]; then
               echo "::warning::$pkg 编译失败（不影响固件）"
@@ -488,57 +470,57 @@ jobs:
             return 0
           }
 
-          compile_one "luci-app-iptv" "pon_userspace/luci-app-iptv" "iptv-pkg.log"
-          compile_one "luci-app-airoha-npu" "package/luci-app-airoha-npu" "npu-pkg.log"
-          compile_one "luci-app-blueaudio" "pon_userspace/luci-app-blueaudio" "blueaudio-pkg.log"
-          compile_one "luci-app-btsp" "pon_userspace/luci-app-btsp" "btsp-pkg.log"
-          compile_one "luci-app-camlive" "pon_userspace/luci-app-camlive" "camlive-pkg.log"
+          compile_one "luci‑app‑iptv" "pon_userspace/luci‑app‑iptv" "iptv‑pkg.log.txt"
+          compile_one "luci‑app‑airoha‑npu" "package/luci‑app‑airoha‑npu" "npu‑pkg.log.txt"
+          compile_one "luci‑app‑blueaudio" "pon_userspace/luci‑app‑blueaudio" "blueaudio‑pkg.log.txt"
+          compile_one "luci‑app‑btsp" "pon_userspace/luci‑app‑btsp" "btsp‑pkg.log.txt"
+          compile_one "luci‑app‑camlive" "pon_userspace/luci‑app‑camlive" "camlive‑pkg.log.txt"
 
           SER2NET4_DIR="pon_userspace/ser2net4"
           if [ -d "$SER2NET4_DIR" ]; then
             echo ""
             echo ">>> 检查 ser2net4 集合目录结构："
             ls -la "$SER2NET4_DIR" || true
-            [ -d "$SER2NET4_DIR/gensio" ] && compile_one "gensio" "$SER2NET4_DIR/gensio" "gensio-pkg.log"
-            [ -d "$SER2NET4_DIR/ser2net" ] && compile_one "ser2net" "$SER2NET4_DIR/ser2net" "ser2net-pkg.log"
-            [ -d "$SER2NET4_DIR/luci-app-ser2net" ] && compile_one "luci-app-ser2net" "$SER2NET4_DIR/luci-app-ser2net" "luci-ser2net-pkg.log"
+            [ -d "$SER2NET4_DIR/gensio" ] && compile_one "gensio" "$SER2NET4_DIR/gensio" "gensio‑pkg.log.txt"
+            [ -d "$SER2NET4_DIR/ser2net" ] && compile_one "ser2net" "$SER2NET4_DIR/ser2net" "ser2net‑pkg.log.txt"
+            [ -d "$SER2NET4_DIR/luci‑app‑ser2net" ] && compile_one "luci‑app‑ser2net" "$SER2NET4_DIR/luci‑app‑ser2net" "luci‑ser2net‑pkg.log.txt"
           else
             echo "::warning::ser2net4 目录 $SER2NET4_DIR 不存在，跳过"
           fi
 
           echo ""
           echo ">>> 编译 rtw88 系列驱动"
-          make WARN_RECURSIVE_DEP=1 package/kernel/rtw88/compile -j"$(nproc)" V=s 2>&1 | tee logs/rtw88-pkg.log | tail -5
+          make package/kernel/rtw88/compile -j"$(nproc)" V=s 2>&1 | tee logs/rtw88‑pkg.log.txt | tail -5
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::rtw88 编译失败" || echo ">>> rtw88 成功"
 
-          echo ">>> 编译 usb-modeswitch"
-          make WARN_RECURSIVE_DEP=1 package/feeds/packages/usb-modeswitch/compile -j"$(nproc)" V=s 2>&1 | tee logs/usb-modeswitch-pkg.log | tail -5
-          [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::usb-modeswitch 编译失败" || echo ">>> usb-modeswitch 成功"
+          echo ">>> 编译 usb‑modeswitch"
+          make package/feeds/packages/usb‑modeswitch/compile -j"$(nproc)" V=s 2>&1 | tee logs/usb‑modeswitch‑pkg.log.txt | tail -5
+          [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::usb‑modeswitch 编译失败" || echo ">>> usb‑modeswitch 成功"
 
           echo ">>> 编译 rtl8723bu"
-          make WARN_RECURSIVE_DEP=1 package/kernel/rtl8723bu/compile -j"$(nproc)" V=s 2>&1 | tee logs/rtl8723bu-pkg.log | tail -5
+          make package/kernel/rtl8723bu/compile -j"$(nproc)" V=s 2>&1 | tee logs/rtl8723bu‑pkg.log.txt | tail -5
           [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::rtl8723bu 编译失败" || echo ">>> rtl8723bu 成功"
 
           echo ""
           echo "============================================================"
-          echo ">>> 处理 mihomo-alpha（切换配置，单独编译）"
+          echo ">>> 处理 mihomo‑alpha（切换配置，单独编译）"
           echo "============================================================"
-          if [ -d "package/feeds/nikki/mihomo-alpha" ] || [ -d "feeds/nikki/mihomo-alpha" ]; then
-            disable_pkg "mihomo-meta"
-            enable_pkg_m "mihomo-alpha"
-            make WARN_RECURSIVE_DEP=1 olddefconfig >/dev/null 2>&1 || true
-            enable_pkg_m "mihomo-alpha"
-            grep -E 'CONFIG_PACKAGE_mihomo-(meta|alpha)' .config || true
+          if [ -d "package/feeds/nikki/mihomo‑alpha" ] || [ -d "feeds/nikki/mihomo‑alpha" ]; then
+            disable_pkg "mihomo‑meta"
+            enable_pkg_m "mihomo‑alpha"
+            make defconfig >/dev/null 2>&1
+            enable_pkg_m "mihomo‑alpha"
+            grep -E 'CONFIG_PACKAGE_mihomo‑(meta|alpha)' .config || true
 
-            make WARN_RECURSIVE_DEP=1 package/feeds/nikki/mihomo-alpha/compile -j"$(nproc)" V=s 2>&1 | tee logs/mihomo-alpha-pkg.log | tail -8
-            [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::mihomo-alpha 编译失败" || echo ">>> mihomo-alpha 编译成功"
+            make package/feeds/nikki/mihomo‑alpha/compile -j"$(nproc)" V=s 2>&1 | tee logs/mihomo‑alpha‑pkg.log.txt | tail -8
+            [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::mihomo‑alpha 编译失败" || echo ">>> mihomo‑alpha 编译成功"
 
-            disable_pkg "mihomo-alpha"
-            enable_pkg_m "mihomo-meta"
-            sed -i "s|^CONFIG_PACKAGE_mihomo-meta=m|CONFIG_PACKAGE_mihomo-meta=y|" .config
-            make WARN_RECURSIVE_DEP=1 olddefconfig >/dev/null 2>&1 || true
+            disable_pkg "mihomo‑alpha"
+            enable_pkg_m "mihomo‑meta"
+            sed -i "s|^CONFIG_PACKAGE_mihomo‑meta=m|CONFIG_PACKAGE_mihomo‑meta=y|" .config
+            make defconfig >/dev/null 2>&1
           else
-            echo "::warning::mihomo-alpha 目录不存在，跳过"
+            echo "::warning::mihomo‑alpha 目录不存在，跳过"
           fi
 
           echo ""
@@ -549,6 +531,14 @@ jobs:
 
           echo ">>> 独立包编译尝试结束"
           exit 0
+
+      - name: 单独捕获usbutils完整编译日志（always，失败也保存日志）
+        if: always()
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p logs
+          make package/feeds/packages/usbutils/clean
+          make package/feeds/packages/usbutils/compile V=s -j1 2>&1 | tee logs/usbutils‑build.log.txt
 
       - name: 打包全部软件包
         if: always()
@@ -567,7 +557,7 @@ jobs:
         working-directory: ./ponwrt
         run: |
           mkdir -p ../ipk_out
-          pkg_list="luci-app-iptv luci-app-airoha-npu luci-app-blueaudio luci-app-btsp luci-app-camlive gensio ser2net luci-app-ser2net kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822c kmod-rtw88-8822cu usb-modeswitch usb-modeswitch-data kmod-rtl8723bu mihomo-meta mihomo-alpha"
+          pkg_list="luci‑app‑iptv luci‑app‑airoha‑npu luci‑app‑blueaudio luci‑app‑btsp luci‑app‑camlive gensio ser2net luci‑app‑ser2net kmod‑rtw88 kmod‑rtw88‑usb kmod‑rtw88‑8822c kmod‑rtw88‑8822cu usb‑modeswitch usb‑modeswitch‑data kmod‑rtl8723bu mihomo‑meta mihomo‑alpha usbutils"
           for pkg in $pkg_list; do
             found=0
             while IFS= read -r -d '' f; do
@@ -580,24 +570,24 @@ jobs:
 
       - name: 上传固件 Artifact
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload‑artifact@v4
         with:
-          name: PonWrt-HG5585F-CT-integrated
+          name: PonWrt‑HG5585F‑CT‑integrated
           path: ./firmware_out/
-          if-no-files-found: error
-          retention-days: 14
+          if‑no‑files‑found: error
+          retention‑days: 14
 
       - name: 上传全部软件包 Artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload‑artifact@v4
         with:
-          name: ponwrt-hg5585f-ipk-packages
+          name: ponwrt‑hg5585f‑ipk‑packages
           path: |
             ./ipk_out/*.tar.zst
             ./ipk_out/*.apk
             ./ipk_out/*.ipk
-          if-no-files-found: warn
-          retention-days: 14
+          if‑no‑files‑found: warn
+          retention‑days: 14
 
       - name: 准备预发布文件
         if: success()
@@ -617,39 +607,39 @@ jobs:
 
       - name: 创建 GitHub 预发布
         if: success()
-        uses: softprops/action-gh-release@v2.0.8
+        uses: softprops/action‑gh‑release@v2.0.8
         with:
-          tag_name: hg5585f-ct-${{ github.run_number }}-${{ github.run_attempt }}
-          name: PonWrt HG5585F-CT 集成版预发布 #${{ github.run_number }}
+          tag_name: hg5585f‑ct‑${{ github.run_number }}‑${{ github.run_attempt }}
+          name: PonWrt HG5585F‑CT 集成版预发布 #${{ github.run_number }}
           prerelease: true
           make_latest: false
           generate_release_notes: true
           body: |
-            PonWrt HG5585F-CT 集成版自动预发布（最小化固件 + 独立包逐包切换编译）。
-            固件镜像内置：PON 修复、透明代理内核模块、mihomo-meta（稳定版）、IPTV 驱动、omcproxy、USB 底层驱动。
-            独立 ipk：luci-app-iptv、luci-app-airoha-npu、luci-app-blueaudio、luci-app-btsp、luci-app-camlive、
-            gensio、ser2net、luci-app-ser2net、RTL8821CU/RTL8723BU 网卡驱动、usb-modeswitch，
-            以及可选产出的 mihomo-alpha 独立 ipk（与 meta 互斥，设备上只能二选一安装）。
-            ⚠️ homeproxy / sing-box 因 feed 索引缺失未纳入本次构建。
+            PonWrt HG5585F‑CT 集成版自动预发布（最小化固件 + 独立包逐包切换编译）。
+            固件镜像内置：PON 修复、透明代理内核模块、mihomo‑meta（稳定版）、IPTV 驱动、omcproxy、USB 底层驱动。
+            独立 ipk：luci‑app‑iptv、luci‑app‑airoha‑npu、luci‑app‑blueaudio、luci‑app‑btsp、luci‑app‑camlive、
+            gensio、ser2net、luci‑app‑ser2net、RTL8821CU/RTL8723BU 网卡驱动、usb‑modeswitch，usbutils，
+            以及可选产出的 mihomo‑alpha 独立 ipk（与 meta 互斥，设备上只能二选一安装）。
+            ⚠️ homeproxy / sing‑box 因 feed 索引缺失未纳入本次构建。
           files: release_out/*
 
       - name: 保存 staging 缓存
         if: always()
-        continue-on-error: true
+        continue‑on‑error: true
         uses: actions/cache/save@v4
         with:
-          path: ponwrt/staging_dir/target-aarch64_cortex-a53_musl
-          key: hg5585f-stage-${{ github.run_id }}
+          path: ponwrt/staging_dir/target‑aarch64_cortex‑a53_musl
+          key: hg5585f‑stage‑${{ github.run_id }}
 
       - name: 上传编译配置与日志
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload‑artifact@v4
         with:
-          name: HG5585F-CT-diagnostics
+          name: HG5585F‑CT‑diagnostics
           path: |
             ponwrt/.config
             ponwrt/.config.firmware
             ponwrt/feeds.conf.default
             ponwrt/logs/
-          if-no-files-found: ignore
-          retention-days: 3
+          if‑no‑files‑found: ignore
+          retention‑days: 3
