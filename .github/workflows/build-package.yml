@@ -70,6 +70,8 @@ jobs:
           [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
           echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
           echo 'src-git iptv https://github.com/yveming/openwrt-iptv.git' >> feeds.conf.default
+          # homeproxy 的 LuCI 应用 + sing-box 相关包（缺了它 sing-box 系全没有）
+          echo 'src-git homeproxy https://github.com/immortalwrt/homeproxy.git;master' >> feeds.conf.default
           echo 'src-git emortal https://github.com/emortal/OpenWrt-packages.git;main' >> feeds.conf.default
           dos2unix feeds.conf.default 2>/dev/null || true
           cat feeds.conf.default
@@ -79,52 +81,11 @@ jobs:
         working-directory: ./ponwrt
         run: |
           set -e
-          # 基础内核、存储、USB、网络驱动组
-          ./scripts/feeds install \
-            kmod-airoha-paged-bosa kmod-airoha-pon-frontend kmod-airoha-xpon \
-            airoha-ponctl airoha-pond \
-            kmod-tun kmod-tap kmod-nft-tproxy kmod-nft-socket kmod-inet-diag kmod-dummy \
-            kmod-iptv omcproxy luci-app-omcproxy \
-            kmod-usb-xhci kmod-usb-storage kmod-usb-storage-extras \
-            kmod-fs-ext4 kmod-fs-vfat kmod-fs-ntfs3 block-mount usbutils \
-            kmod-video-v4l2 kmod-video-uvc kmod-usb-serial kmod-usb-net \
-            kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822c kmod-rtw88-8822cu \
-            usb-modeswitch usb-modeswitch-data kmod-rtl8723bu
-
-          # 代理、基础工具
-          ./scripts/feeds install mihomo-meta nikki luci-app-nikki luci-i18n-nikki-zh-cn
-          ./scripts/feeds install curl libcurl libidn2 libnghttp2 libpsl \
-            libgnutls libtasn1 libunistring nettle gmp \
-            ip-full yq libcronet luci-app-ttyd luci-app-ddns ddns-scripts openssh-sftp-server
-
-          # SMB共享组
-          ./scripts/feeds install samba4 luci-app-samba4 autosamba
-          ./scripts/feeds install ksmbd luci-app-ksmbd
-
-          # NFS组
-          ./scripts/feeds install \
-            nfs-kernel-server nfs-kernel-server-utils \
-            nfs-utils nfs-utils-libs \
-            kmod-fs-nfs-common kmod-fs-nfs kmod-fs-nfs-v4 kmod-fs-nfsd
-
-          # mDNS
-          ./scripts/feeds install avahi-daemon luci-app-avahi
-
-          # VPN互联组（分组安装，降低依赖树爆炸概率）
-          ./scripts/feeds install zerotier luci-app-zerotier
-          ./scripts/feeds install tailscale luci-app-tailscale
-          ./scripts/feeds install wireguard luci-proto-wireguard kmod-wireguard
-          ./scripts/feeds install nebula luci-proto-nebula
-          ./scripts/feeds install n2n luci-app-n2n
-          ./scripts/feeds install frpc luci-app-frpc
-
-          # 串口服务器
-          ./scripts/feeds install gensio ser2net luci-app-ser2net
-
-          # IPTV相关
-          ./scripts/feeds install luci-app-iptv
-
-          echo ">>> feeds install 全部分组完成，开始依赖树检查"
+          # 为什么不再逐个枚举包名：这条步骤原来写的 kmod-usb-xhci / kmod-video-v4l2 /
+          # usb-modeswitch(-data) / kmod-rtl8723bu 在这套树里根本不存在，set -e 下会直接失败。
+          # 包清单只在实际写 .config 的阶段使用（见后面的 pkg_list）。
+          ./scripts/feeds install -a
+          echo ">>> feeds 全量安装完成"
           make prereq
 
       - name: 注入 libffi
@@ -146,6 +107,31 @@ jobs:
           rm -rf package/luci-app-airoha-npu/.git package/luci-app-airoha-npu/.github package/luci-app-airoha-npu/screenshots
           rm -rf package/luci-app-airoha-npu/luci-app-airoha-npu
           grep -m1 'LUCI_TITLE' package/luci-app-airoha-npu/Makefile || echo "::warning::未找到 LUCI_TITLE"
+
+      - name: 部署仓库自带的本地包到 package/pon-local
+        working-directory: ./ponwrt
+        run: |
+          rm -rf package/pon-local
+          mkdir -p package/pon-local
+          for d in camlive go2rtc luci-app-go2rtc luci-app-blueaudio luci-app-btsp luci-app-camlive; do
+            if [ -d "../pon_userspace/$d" ]; then
+              cp -a "../pon_userspace/$d" package/pon-local/
+              echo ">>> 复制 $d"
+            else
+              echo "::warning::../pon_userspace/$d 不存在，跳过"
+            fi
+          done
+          if [ -d "../pon_userspace/ser2net4" ]; then
+            for d in gensio ser2net luci-app-ser2net; do
+              [ -d "../pon_userspace/ser2net4/$d" ] && cp -a "../pon_userspace/ser2net4/$d" package/pon-local/ && echo ">>> 复制 $d"
+            done
+          fi
+          MK=package/pon-local/luci-app-ser2net/Makefile
+          if [ -f "$MK" ]; then
+            sed -i 's|include $(TOPDIR)/luci.mk|include $(TOPDIR)/feeds/luci/luci.mk|' "$MK"
+            sed -i '/\$(eval \$(call BuildPackage,luci-app-ser2net))/d' "$MK"
+          fi
+          ls -1 package/pon-local || true
 
       - name: 预修改 luci-app-iptv Makefile
         working-directory: ./ponwrt
@@ -182,6 +168,8 @@ jobs:
           # CONFIG_TARGET_MULTI_PROFILE is not set
           CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y
           CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y
+          CONFIG_BUILD_PATENTED=y
+          CONFIG_PACKAGE_ca-bundle=y
           EOF
 
           make WARN_RECURSIVE_DEP=1 olddefconfig
@@ -227,10 +215,33 @@ jobs:
             kmod-rtw88
             kmod-rtw88-usb
             kmod-rtw88-8822c
+            kmod-rtw88-8821c
             kmod-rtw88-8822cu
-            usb-modeswitch
-            usb-modeswitch-data
-            kmod-rtl8723bu
+            kmod-rtw88-8821cu
+            kmod-rtw88-8723du
+            kmod-rtl8xxxu
+            kmod-rtl8192cu
+            kmod-usb-xhci-hcd
+            kmod-usb-xhci-mtk
+            kmod-video-core
+            kmod-video-videobuf2
+            kmod-video-uvc
+            kmod-usb-serial-ch341
+            kmod-usb-net-rtl8152
+            kmod-usb-net-asix-ax88179
+            kmod-usb-audio
+            kmod-sound-core
+            audio-support
+            camlive
+            go2rtc
+            luci-app-go2rtc
+            ffmpeg
+            libx264
+            libopus
+            alsa-utils
+            luci-compat
+            luci-lua-runtime
+            lsblk
             mihomo-alpha
             zerotier
             luci-app-zerotier
@@ -304,10 +315,33 @@ jobs:
             kmod-rtw88
             kmod-rtw88-usb
             kmod-rtw88-8822c
+            kmod-rtw88-8821c
             kmod-rtw88-8822cu
-            usb-modeswitch
-            usb-modeswitch-data
-            kmod-rtl8723bu
+            kmod-rtw88-8821cu
+            kmod-rtw88-8723du
+            kmod-rtl8xxxu
+            kmod-rtl8192cu
+            kmod-usb-xhci-hcd
+            kmod-usb-xhci-mtk
+            kmod-video-core
+            kmod-video-videobuf2
+            kmod-video-uvc
+            kmod-usb-serial-ch341
+            kmod-usb-net-rtl8152
+            kmod-usb-net-asix-ax88179
+            kmod-usb-audio
+            kmod-sound-core
+            audio-support
+            camlive
+            go2rtc
+            luci-app-go2rtc
+            ffmpeg
+            libx264
+            libopus
+            alsa-utils
+            luci-compat
+            luci-lua-runtime
+            lsblk
             mihomo-alpha
             zerotier
             luci-app-zerotier
