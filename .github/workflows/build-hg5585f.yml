@@ -346,11 +346,7 @@ jobs:
           printf '# CONFIG_TARGET_ALL_PROFILES is not set\n' >> .config
           # 单机型锁定：本 target 的 Kconfig 不支持同时选多个 device
           printf 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-%s=y\n' "$DEVICE_ID" >> .config
-          printf 'CONFIG_PACKAGE_luci-theme-argon=y\n' >> .config
           printf '# CONFIG_PACKAGE_luci-theme-bootstrap is not set\n' >> .config
-          printf 'CONFIG_PACKAGE_luci-app-ttyd=y\n' >> .config
-          printf 'CONFIG_PACKAGE_luci-app-ddns=y\n' >> .config
-          printf 'CONFIG_PACKAGE_ddns-scripts=y\n' >> .config
           printf 'CONFIG_PACKAGE_openssh-sftp-server=y\n' >> .config
           printf '# --- PON 修复 ---\n' >> .config
           printf 'CONFIG_PACKAGE_kmod-airoha-paged-bosa=y\n' >> .config
@@ -365,31 +361,11 @@ jobs:
           printf 'CONFIG_PACKAGE_kmod-inet-diag=y\n' >> .config
           printf 'CONFIG_PACKAGE_kmod-dummy=y\n' >> .config
           printf '# --- mihomo（仅稳定版 meta） ---\n' >> .config
-          printf 'CONFIG_PACKAGE_mihomo-meta=y\n' >> .config
-          printf 'CONFIG_PACKAGE_nikki=y\n' >> .config
-          printf 'CONFIG_PACKAGE_luci-app-nikki=y\n' >> .config
-          printf 'CONFIG_PACKAGE_luci-i18n-nikki-zh-cn=y\n' >> .config
           printf '# --- curl / libcurl ---\n' >> .config
-          printf 'CONFIG_PACKAGE_curl=y\n' >> .config
-          printf 'CONFIG_PACKAGE_libcurl=y\n' >> .config
-          printf 'CONFIG_PACKAGE_libidn2=y\n' >> .config
-          printf 'CONFIG_PACKAGE_libnghttp2=y\n' >> .config
-          printf 'CONFIG_PACKAGE_libpsl=y\n' >> .config
-          printf 'CONFIG_PACKAGE_libgnutls=y\n' >> .config
-          printf 'CONFIG_PACKAGE_libtasn1=y\n' >> .config
-          printf 'CONFIG_PACKAGE_libunistring=y\n' >> .config
-          printf 'CONFIG_PACKAGE_nettle=y\n' >> .config
-          printf 'CONFIG_PACKAGE_gmp=y\n' >> .config
           printf '# --- 工具 ---\n' >> .config
-          printf 'CONFIG_PACKAGE_ip-full=y\n' >> .config
-          printf 'CONFIG_PACKAGE_yq=y\n' >> .config
-          printf 'CONFIG_PACKAGE_libffi=y\n' >> .config
-          printf 'CONFIG_PACKAGE_libcronet=y\n' >> .config
           printf '# --- IPTV 核心驱动 ---\n' >> .config
           printf 'CONFIG_PACKAGE_kmod-iptv=y\n' >> .config
           printf '# --- omcproxy ---\n' >> .config
-          printf 'CONFIG_PACKAGE_omcproxy=y\n' >> .config
-          printf 'CONFIG_PACKAGE_luci-app-omcproxy=y\n' >> .config
           printf '# ============================================================\n' >> .config
           printf '# USB 支持（镜像内置）：主机控制器 kmod-usb3 会在 airoha 上\n' >> .config
           printf '# 自动拉入 kmod-usb-xhci-hcd + kmod-usb-xhci-mtk；其余为存储/文件系统\n' >> .config
@@ -406,8 +382,6 @@ jobs:
           printf 'CONFIG_PACKAGE_kmod-fs-ntfs3=y\n' >> .config
           printf 'CONFIG_PACKAGE_block-mount=y\n' >> .config
           printf '# --- sing-box + luci-app-homeproxy（来自 homeproxy feed）---\n' >> .config
-          printf 'CONFIG_PACKAGE_sing-box=y\n' >> .config
-          printf 'CONFIG_PACKAGE_luci-app-homeproxy=y\n' >> .config
           # 关键：naive outbound 会去拉外部依赖，在 CI 里必失败（HG5382A 也是这么关的）
           printf '# CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set\n' >> .config
           printf '# --- 蓝牙用户态 ---\n' >> .config
@@ -449,8 +423,6 @@ jobs:
           for k in $DRIVER_KCONFIGS; do printf 'CONFIG_KERNEL_%s=m\n' "${k#CONFIG_}" >> .config; done
           printf '# --- 独立包不参与固件镜像 ---\n' >> .config
           printf '# CONFIG_PACKAGE_usbutils is not set\n' >> .config
-          printf '# CONFIG_PACKAGE_luci-app-iptv is not set\n' >> .config
-          printf '# CONFIG_PACKAGE_luci-app-airoha-npu is not set\n' >> .config
           printf '# CONFIG_PACKAGE_luci-app-airoha-soc is not set\n' >> .config
           printf '# CONFIG_PACKAGE_luci-app-blueaudio is not set\n' >> .config
           printf '# CONFIG_PACKAGE_luci-app-btsp is not set\n' >> .config
@@ -519,28 +491,24 @@ jobs:
           check_y CONFIG_PACKAGE_kmod-usb-xhci-hcd
           check_y CONFIG_PACKAGE_kmod-usb-xhci-mtk
 
-          # 其余固件必需包
+          # 其余固件必需包：只剩底层（PON 工具、内核钩子、挂载）
           for p in kmod-iptv kmod-airoha-xpon airoha-ponctl airoha-pond \
-                   kmod-nft-tproxy kmod-tun mihomo-meta nikki luci-app-nikki libcronet \
-                   sing-box luci-app-homeproxy omcproxy luci-app-omcproxy; do
+                   block-mount kmod-nft-tproxy kmod-tun kmod-inet-diag kmod-dummy \
+                   kmod-nft-socket; do
             check_y "CONFIG_PACKAGE_${p}"
           done
-
-          # USB 串口/网卡/蓝牙/无线网卡/CH340 驱动（镜像内置）
-          for p in $DRIVER_PKGS; do check_y "CONFIG_PACKAGE_${p}"; done
-          for p in $DRIVER_FW_PKGS; do check_y "CONFIG_PACKAGE_${p}"; done
-          for p in $BT_USER_PKGS; do check_y "CONFIG_PACKAGE_${p}"; done
-          # go2rtc 链路一律独立包，不允许混进镜像；BUILD_PATENTED 必须开着，
-          # 否则 libx264 的符号会被 kconfig 直接吞掉，独立 apk 也编不出来
-          check_y "CONFIG_BUILD_PATENTED"
-          for p in camlive go2rtc luci-app-camlive luci-app-go2rtc luci-compat \
-                   ffmpeg libx264 libopus alsa-utils; do
+          
+          # 应用层一律不进镜像（单编 apk，见 build-package.yml）：出现任何一个 =y 都算回归
+          APP_LAYER="sing-box luci-app-homeproxy libcronet mihomo-meta nikki luci-app-nikki \
+          omcproxy luci-app-omcproxy luci-app-iptv luci-app-airoha-npu luci-app-ddns \
+          luci-app-ttyd luci-theme-argon camlive go2rtc luci-app-camlive luci-app-go2rtc \
+          ffmpeg libx264 libopus alsa-utils luci-compat"
+          for p in $APP_LAYER; do
             if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
-              echo "::error::${p} 应只做独立包（未被选中），却出现在固件镜像里"
+              echo "::error::${p} 属于应用层，应只编独立包，却在固件镜像里"
               missing=$((missing+1))
             fi
           done
-
           # sing-box 的关键开关不允许为打开状态（naive outbound 在 CI 中必然编译失败）
           if grep -q '^CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND=' .config; then
             echo "::error::CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND 仍处于打开状态（naive outbound 在 CI 中必然编译失败）"
@@ -748,17 +716,20 @@ jobs:
           done
           exit 0
 
-      - name: 编译本地 luci 独立包与 feed 独立包（全部 best-effort）
+      - name: 补编 EXTRA_APK_PKGS（默认空；应用层请走 build-package.yml）
         if: always()
         working-directory: ./ponwrt
         run: |
           set +e
           set -o pipefail
           cp -f .config.firmware .config
-
+          
+          # 应用层（sing-box/homeproxy/mihomo/nikki/omcproxy/camlive/go2rtc/ffmpeg 等）
+          # 已全部移到 .github/workflows/build-package.yml 单独编译，本工作流只产出固件。
+          # 若临时想在这里补编一两个包，把名字加到作业级 env 的 EXTRA_APK_PKGS 即可。
           set_m() {
             local pkg="$1"
-            if grep -q "^CONFIG_PACKAGE_${pkg} is not set" .config; then
+            if grep -q "^# CONFIG_PACKAGE_${pkg} is not set" .config; then
               sed -i "s|^# CONFIG_PACKAGE_${pkg} is not set|CONFIG_PACKAGE_${pkg}=m|" .config
             elif grep -q "^CONFIG_PACKAGE_${pkg}=y" .config; then
               sed -i "s|^CONFIG_PACKAGE_${pkg}=y|CONFIG_PACKAGE_${pkg}=m|" .config
@@ -766,100 +737,24 @@ jobs:
               echo "CONFIG_PACKAGE_${pkg}=m" >> .config
             fi
           }
-
-          compile_dir() {
-            local pkg="$1"
-            local dir="$2"
-            local log="$3"
-            echo ""
-            echo "==== $pkg ($dir) ===="
-            if [ ! -d "$dir" ]; then
-              echo "::warning::$pkg 目录 $dir 不存在，跳过"
-              return 0
-            fi
-            set_m "$pkg"
-            make oldconfig < /dev/null >/dev/null 2>&1
-            if make "$dir/compile" V=s 2>&1 | tee "logs/$log" | tail -n 8; then
-              echo ">>> $pkg 编译成功"
-            else
-              echo "::warning::$pkg 编译失败（不影响固件，日志 logs/$log）"
-              grep -nE 'error:|Error [0-9]|No rule|nothing provides|missing dependency' "logs/$log" | head -n 15 || true
-            fi
-            return 0
-          }
-
-          IPTV_DIR=$(ls -d package/feeds/*/luci-app-iptv 2>/dev/null | head -1)
-          [ -n "$IPTV_DIR" ] && compile_dir "luci-app-iptv" "$IPTV_DIR" "iptv-pkg.log.txt"
-          compile_dir "luci-app-airoha-npu" "package/luci-app-airoha-npu" "npu-pkg.log.txt"
-          compile_dir "luci-app-blueaudio" "package/pon-local/luci-app-blueaudio" "blueaudio-pkg.log.txt"
-          compile_dir "luci-app-btsp" "package/pon-local/luci-app-btsp" "btsp-pkg.log.txt"
-          # ---- go2rtc 链路的用户态依赖（全部 feed 包，按依赖顺序，best-effort）----
-          X264_DIR=$(ls -d package/feeds/*/libx264 2>/dev/null | head -1)
-          OPUS_DIR=$(ls -d package/feeds/*/libopus 2>/dev/null | head -1)
-          FFMPEG_DIR=$(ls -d package/feeds/*/ffmpeg 2>/dev/null | head -1)
-          ALSAUTIL_DIR=$(ls -d package/feeds/*/alsa-utils 2>/dev/null | head -1)
-          LUALLR_DIR=$(ls -d package/feeds/*/luci-lua-runtime 2>/dev/null | head -1)
-          LUACOMPAT_DIR=$(ls -d package/feeds/*/luci-compat 2>/dev/null | head -1)
-          [ -n "$X264_DIR" ]     && compile_dir "libx264" "$X264_DIR" "libx264-pkg.log.txt"
-          [ -n "$OPUS_DIR" ]     && compile_dir "libopus" "$OPUS_DIR" "libopus-pkg.log.txt"
-          # ffmpeg 编译时会自动带上 libx264/libopus（DEPENDS 里有条件依赖）
-          [ -n "$FFMPEG_DIR" ]   && compile_dir "ffmpeg" "$FFMPEG_DIR" "ffmpeg-pkg.log.txt"
-          [ -n "$ALSAUTIL_DIR" ] && compile_dir "alsa-utils" "$ALSAUTIL_DIR" "alsa-utils-pkg.log.txt"
-          # LuCI Lua 应用要 luci-lua-runtime + luci-compat 才能显示菜单
-          [ -n "$LUALLR_DIR" ]   && compile_dir "luci-lua-runtime" "$LUALLR_DIR" "luci-lua-runtime-pkg.log.txt"
-          [ -n "$LUACOMPAT_DIR" ] && compile_dir "luci-compat" "$LUACOMPAT_DIR" "luci-compat-pkg.log.txt"
-
-          # camlive 后端必须在 luci 前端之前编出来（前端 DEPENDS 里有 +camlive）
-          compile_dir "camlive" "package/pon-local/camlive" "camlive-backend-pkg.log.txt"
-          compile_dir "luci-app-camlive" "package/pon-local/luci-app-camlive" "camlive-pkg.log.txt"
-          compile_dir "go2rtc" "package/pon-local/go2rtc" "go2rtc-pkg.log.txt"
-          compile_dir "luci-app-go2rtc" "package/pon-local/luci-app-go2rtc" "luci-app-go2rtc-pkg.log.txt"
-          compile_dir "gensio" "package/pon-local/gensio" "gensio-pkg.log.txt"
-          compile_dir "ser2net" "package/pon-local/ser2net" "ser2net-pkg.log.txt"
-          compile_dir "luci-app-ser2net" "package/pon-local/luci-app-ser2net" "luci-ser2net-pkg.log.txt"
           
-          # ---- 扩展点：用同一棵树的源码再补编 EXTRA_APK_PKGS 里列出的包 ----
           for p in $EXTRA_APK_PKGS; do
             d=$(ls -d "package/$p" "package/pon-local/$p" package/feeds/*/"$p" 2>/dev/null | head -1)
-            if [ -z "$d" ]; then
-              echo "::warning::$p 在树里找不到目录，跳过"
-              continue
-            fi
-            compile_dir "$p" "$d" "${p}-pkg.log.txt"
-          done
-          
-          # ---- mihomo-alpha：与 mihomo-meta 都 PROVIDES:=mihomo，不能同时选中 ----
-          # 所以单独跑一轮配置：临时把 mihomo-meta 关掉，编完立刻恢复 .config.firmware
-          MIHOMO_ALPHA_DIR=$(ls -d package/feeds/*/mihomo-alpha 2>/dev/null | head -1)
-          if [ -n "$MIHOMO_ALPHA_DIR" ]; then
-            echo ""
-            echo "==== mihomo-alpha（与 mihomo-meta 互斥，单独一轮配置）===="
-            sed -i 's|^CONFIG_PACKAGE_mihomo-meta=y|# CONFIG_PACKAGE_mihomo-meta is not set|' .config
-            set_m "mihomo-alpha"
+            if [ -z "$d" ]; then echo "::warning::$p 在树里找不到目录，跳过"; continue; fi
+            echo "==== 补编 $p ($d) ===="
+            set_m "$p"
             make oldconfig < /dev/null >/dev/null 2>&1
-            if make "$MIHOMO_ALPHA_DIR/compile" V=s 2>&1 | tee "logs/mihomo-alpha-pkg.log.txt" | tail -n 8; then
-              echo ">>> mihomo-alpha 编译成功"
+            if make "$d/compile" V=s 2>&1 | tee "logs/${p}-pkg.log.txt" | tail -n 8; then
+              echo ">>> $p 编译成功"
             else
-              echo "::warning::mihomo-alpha 编译失败（日志 logs/mihomo-alpha-pkg.log.txt）"
-              grep -nE 'error:|Error [0-9]|nothing provides' "logs/mihomo-alpha-pkg.log.txt" | head -n 15 || true
+              echo "::warning::$p 编译失败（日志 logs/${p}-pkg.log.txt）"
+              grep -nE 'error:|Error [0-9]|No rule|nothing provides' "logs/${p}-pkg.log.txt" | head -n 15 || true
             fi
-            cp -f .config.firmware .config
-          else
-            echo "::warning::mihomo-alpha 目录未找到，跳过"
-          fi
-
-          echo ""
-          echo ">>> go2rtc 链路独立包产出核对"
-          : > logs/go2rtc-packages.txt
-          for p in libx264 libopus ffmpeg alsa-utils luci-lua-runtime luci-compat \
-                   camlive luci-app-camlive go2rtc luci-app-go2rtc mihomo-alpha; do
-            hit=$(find bin -type f \( -name "${p}*.apk" -o -name "${p}*.ipk" \) 2>/dev/null | head -1)
-            if [ -n "$hit" ]; then echo "OK   $p -> $hit" | tee -a logs/go2rtc-packages.txt
-            else echo "MISS $p（未产出）" | tee -a logs/go2rtc-packages.txt; fi
           done
-
+          cp -f .config.firmware .config
+          
+          echo ""
           echo ">>> bin 目录结构"
-          ls -la bin/packages/*/ 2>/dev/null || true
           ls -la bin/targets/airoha/an7581/packages/ 2>/dev/null | head -n 40 || true
           exit 0
 
