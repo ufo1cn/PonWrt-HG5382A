@@ -35,6 +35,7 @@ jobs:
       #   package/kernel/linux/modules/{usb,bluetooth,video}.mk
       #   package/kernel/mac80211/realtek.mk  （rtw88 / rtl8xxxu 就在这里！）
       DRIVER_PKGS: >-
+        audio-support kmod-input-core
         kmod-usb-serial kmod-usb-serial-ch341 kmod-usb-serial-cp210x
         kmod-usb-serial-ftdi kmod-usb-serial-pl2303 kmod-usb-acm
         kmod-usb-net kmod-usb-net-cdc-ether kmod-usb-net-cdc-ncm
@@ -70,6 +71,7 @@ jobs:
         CONFIG_BT_HCIBTUSB_RTL CONFIG_BT_HCIUART CONFIG_BT_BREDR CONFIG_BT_LE
         CONFIG_RTW88 CONFIG_RTW88_USB CONFIG_RTW88_8822CU CONFIG_RTW88_8821CU
         CONFIG_RTW88_8723DU CONFIG_RTL8XXXU CONFIG_CFG80211 CONFIG_MAC80211
+        CONFIG_SND CONFIG_SND_PCM CONFIG_SND_USB_AUDIO
       # 以 =m 单独出包的附加内核模块（全部来自 package/kernel/linux/modules）
       EXTRA_KMODS: >-
         kmod-usb-serial kmod-usb-serial-ch341 kmod-usb-serial-cp210x
@@ -405,6 +407,13 @@ jobs:
           printf '# ============================================================\n' >> .config
           for p in $DRIVER_PKGS; do printf 'CONFIG_PACKAGE_%s=y\n' "$p" >> .config; done
           for p in $DRIVER_FW_PKGS; do printf 'CONFIG_PACKAGE_%s=y\n' "$p" >> .config; done
+          printf '# --- 音频：UVC 摄像头麦克风/喇叭需要 ALSA，链路依赖全为硬依赖 ---\n' >> .config
+          printf '# kmod-sound-core 的 DEPENDS 是 audio-support（无 +），不显式开 audio-support\n' >> .config
+          printf '# 时 kconfig 会把 kmod-sound-core / kmod-usb-audio 整个判为不可选。\n' >> .config
+          printf 'CONFIG_PACKAGE_audio-support=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-input-core=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-sound-core=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-usb-audio=y\n' >> .config
           printf '# --- 驱动依赖的内核符号（kmod 打包要求 .ko 必须真的被编出来）---\n' >> .config
           for k in $DRIVER_KCONFIGS; do printf 'CONFIG_KERNEL_%s=m\n' "${k#CONFIG_}" >> .config; done
           printf '# --- 独立包不参与固件镜像 ---\n' >> .config
@@ -607,7 +616,7 @@ jobs:
             echo "### 驱动 .ko 产物"
             echo '```'
             find build_dir -name 'rtw88_*.ko' -o -name 'rtl8xxxu.ko' -o -name 'btusb.ko' \
-                 -o -name 'ch341.ko' -o -name 'usbnet.ko' 2>/dev/null | head -n 40
+                 -o -name 'ch341.ko' -o -name 'usbnet.ko' -o -name 'snd-usb-audio.ko' 2>/dev/null | head -n 40
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
