@@ -678,7 +678,7 @@ jobs:
             echo "== $p -> $d ==" | tee -a logs/usbutils.log.txt
             set_m "$p"
             make oldconfig < /dev/null >/dev/null 2>&1
-            make -C "$d" V=s compile -j1 2>&1 | tee "logs/${p}-pkg.log.txt" | tail -n 5
+            make "$d/compile" V=s -j1 2>&1 | tee "logs/${p}-pkg.log.txt" | tail -n 5
             echo ">>> $p 退出码：$?" | tee -a logs/usbutils.log.txt
             grep -nE 'error:|Error [0-9]|No rule|not found' "logs/${p}-pkg.log.txt" | head -n 12 || true
           done
@@ -727,7 +727,7 @@ jobs:
             fi
             set_m "$pkg"
             make oldconfig < /dev/null >/dev/null 2>&1
-            if make -C "$dir" V=s compile 2>&1 | tee "logs/$log" | tail -n 8; then
+            if make "$dir/compile" V=s 2>&1 | tee "logs/$log" | tail -n 8; then
               echo ">>> $pkg 编译成功"
             else
               echo "::warning::$pkg 编译失败（不影响固件，日志 logs/$log）"
