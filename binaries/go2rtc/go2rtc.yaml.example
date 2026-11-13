@@ -1,0 +1,39 @@
+# go2rtc 配置样例（HG5585F-CT / PonWrt）
+# 用法: go2rtc -c /etc/go2rtc/go2rtc.yaml
+# 面板: http://<光猫IP>:1984        文档: https://github.com/AlexxIT/go2rtc/wiki
+
+log:
+  level: info
+
+# Web 面板 / API / 各类播放接口
+api:
+  listen: ":1984"
+  origin: "*"
+
+# 本机 RTSP（给局域网播放器用；不要直接暴露公网）
+rtsp:
+  listen: ":8554"
+
+# WebRTC（浏览器视频通话）。外网使用时需要光猫把 8555/UDP 映射出去
+webrtc:
+  listen: ":8555"
+
+# 转码用 ffmpeg，需要系统里有 ffmpeg >= 5.0（OpenWrt 为 6.x）
+ffmpeg:
+  bin: ffmpeg
+
+streams:
+  # 摄像头画面：来自本仓库 camlive 的 HTTP MJPEG
+  # 端口约定：camlive 用 -p 8556（RTSP 8556），HTTP 自动 = 8557
+  camera: "http://127.0.0.1:8557/stream"
+
+  # WebRTC 观看必需：MJPEG 不被 WebRTC 支持，要转成 H264。
+  # 只做 RTSP/MJPEG 观看时可以删掉这条（省 CPU）。
+  camera_h264: "ffmpeg:camera#video=h264#audio=copy"
+
+  # USB 摄像头内置麦克风 -> 浏览器（双向语音的上行）
+  # 设备名用 `arecord -l` 或 /api/alsa 查；常见是 default 或 plughw:CARD=xxx
+  # microphone: "alsa:default"
+
+  # 浏览器里的声音 -> 光猫上的喇叭（双向语音的下行）
+  # speaker: "alsa:default"
