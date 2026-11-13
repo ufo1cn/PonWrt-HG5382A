@@ -1,0 +1,554 @@
+# ==============================================================================
+# PonWrt HG5585F-CT 应用层软件包编译工作流（只出 apk/ipk，不产固件）
+# ------------------------------------------------------------------------------
+# 【定位】固件（build-hg5585f.yml）只负责"能开机 + 底层驱动"，应用层由本文件负责。
+#
+# 一、为什么单独拆出来
+#   1) 应用层软件数量多、上游更新快、编译容易失败；放在固件流水线里，
+#      任何一个应用编译失败都会拖住整份固件产出。
+#   2) 拆开后固件流水线只关心"内核/驱动"，成功率与耗时都可控；
+#      应用层随时可以重编，不影响已在用的固件。
+#   3) 应用层软件装错/装坏可以卸载重装，不需要重新刷机。
+#
+# 二、与固件的关系（必须保持一致的两件事）
+#   1) 同一个 SOURCE_REF（PonWrt 源码版本）——版本不一致会出现依赖名对不上。
+#   2) 同一套内核配置（DRIVER_KCONFIGS）——本文件会把和固件一样的 CONFIG_KERNEL_*
+#      覆盖写进 .config，保证万一需要在这里补编某个 kmod，其 vermagic 与固件一致。
+#
+# 三、为什么这里不再逐个枚举 feeds install 的包名
+#   历史版本写了 kmod-usb-xhci / kmod-video-v4l2 / usb-modeswitch(-data) /
+#   kmod-rtl8723bu 这些**在这套树里根本不存在的包名**，配合 set -e 会让整条
+#   流水线在第一步就失败。现在统一用 `feeds install -a` 全量安装，
+#   包名的正确性只在"写 .config 的 pkg_list"阶段才有意义。
+#
+# 四、pkg_list 的两处用途
+#   - 第 1 处：把清单里的包设为 =m，随后 make package/compile 统一编译
+#   - 第 2 处：编译完成后按清单把 .apk/.ipk 收进 ipk_out 供打包
+#   两处必须保持同一份清单，否则会出现"编出来了但没被收集"。
+#
+# 五、本文件是 mihomo-alpha 变体（另一个变体是 build-package.yml = mihomo-meta）
+#   - meta：稳定分支，nikki 官方默认，功能完整
+#   - alpha：更新更快、实验特性多，稳定性略差
+#   - 两者只能装一个；产物文件名已带 -mihomo-alpha 前缀，不会和 meta 版混淆
+#
+# 五、互斥注意
+#   mihomo-meta 与 mihomo-alpha 都 PROVIDES:=mihomo，二者只能选一个。
+#   本工作流统一用 mihomo-alpha（nikki 依赖的虚拟名 mihomo 由它提供）。
+#   与 build-package.yml（mihomo-meta 版）**互斥**：二者都 PROVIDES:=mihomo，
+#   同一份 .config 里只能存在一个，所以拆成两个工作流，各自产出完整的一套 apk，
+#   你按需要装哪一版就只跑哪一条，装错版本会导致 mihomo 同名文件冲突。
+# ==============================================================================
+name: 【独立包编译·mihomo-alpha】PonWrt HG5585F-CT 全部可选IPK（编译成功后预发布｜防循环依赖+防Tag重复）
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: ipk-hg5585f-alpha-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build_ipk:
+    name: 编译HG5585F-CT全部独立插件包（mihomo-alpha 变体）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
+      TAR_NAME: HG5585F-CT-all-ipk-mihomo-alpha.tar.zst
+      SHA_NAME: SHA256SUMS
+      # 与 build-hg5585f.yml 保持同一套内核配置：万一在这里补编 kmod，
+      # 生成的 .ko 的 vermagic 才会和固件匹配，装得上也加载得上。
+      DRIVER_KCONFIGS: >-
+        CONFIG_USB_USBNET CONFIG_USB_SERIAL CONFIG_USB_SERIAL_CH341
+        CONFIG_USB_SERIAL_CP210X CONFIG_USB_SERIAL_FTDI_SIO CONFIG_USB_SERIAL_PL2303
+        CONFIG_USB_ACM CONFIG_USB_STORAGE CONFIG_USB_UAS CONFIG_USB_XHCI_HCD
+        CONFIG_BT CONFIG_BT_HCIBTUSB CONFIG_BT_HCIUART
+        CONFIG_RTW88 CONFIG_RTW88_USB CONFIG_RTW88_8822CU CONFIG_RTW88_8821CU
+        CONFIG_RTW88_8723DU CONFIG_RTL8XXXU CONFIG_RTL8192CU
+        CONFIG_CFG80211 CONFIG_MAC80211 CONFIG_SND CONFIG_SND_USB_AUDIO
+        CONFIG_MEDIA_SUPPORT CONFIG_VIDEO_DEV CONFIG_USB_VIDEO_CLASS
+        CONFIG_NETLINK_DIAG CONFIG_INET_DIAG CONFIG_TUN
+        CONFIG_WIREGUARD CONFIG_CIFS CONFIG_NFS_FS CONFIG_NFSD
+        CONFIG_MACVLAN CONFIG_VETH CONFIG_NFT_NAT
+    steps:
+      - name: 签出工作流仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 清理磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/local/share/swift /usr/local/.ghcup \
+            /opt/hostedtoolcache
+          sudo docker system prune -af || true
+          sudo apt-get clean
+          sudo swapoff /swapfile || true
+          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          df -h
+
+      - name: 初始化编译环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
+            subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
+            libzstd-dev jq dos2unix upx-ucl
+
+      - name: 拉取 PonWrt 指定 commit
+        run: |
+          git init ponwrt
+          git -C ponwrt remote add origin https://github.com/pbs05/ponwrt.git
+          git -C ponwrt fetch --depth=1 -- origin "$SOURCE_REF"
+          git -C ponwrt checkout --detach FETCH_HEAD
+          echo ">>> PonWrt pinned: $SOURCE_REF"
+
+      - name: 配置 feeds
+        working-directory: ./ponwrt
+        run: |
+          if [ ! -f feeds.conf.default ]; then touch feeds.conf.default; fi
+          sed -i '/nikki/d;/homeproxy/d;/openwrt-iptv/d;/emortal/d' feeds.conf.default
+          [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
+          echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
+          echo 'src-git iptv https://github.com/yveming/openwrt-iptv.git' >> feeds.conf.default
+          # homeproxy 的 LuCI 应用 + sing-box 相关包（缺了它 sing-box 系全没有）
+          echo 'src-git homeproxy https://github.com/immortalwrt/homeproxy.git;master' >> feeds.conf.default
+          echo 'src-git emortal https://github.com/emortal/OpenWrt-packages.git;main' >> feeds.conf.default
+          dos2unix feeds.conf.default 2>/dev/null || true
+          cat feeds.conf.default
+          ./scripts/feeds update -a
+
+      - name: 前置依赖检查 & 分步 feeds install（防循环依赖）
+        working-directory: ./ponwrt
+        run: |
+          set -e
+          # 为什么不再逐个枚举包名：这条步骤原来写的 kmod-usb-xhci / kmod-video-v4l2 /
+          # usb-modeswitch(-data) / kmod-rtl8723bu 在这套树里根本不存在，set -e 下会直接失败。
+          # 包清单只在实际写 .config 的阶段使用（见后面的 pkg_list）。
+          ./scripts/feeds install -a
+          echo ">>> feeds 全量安装完成"
+          make prereq
+
+      - name: 注入 libffi
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p package/libs/libffi
+          curl -fsSL -o package/libs/libffi/Makefile \
+            https://raw.githubusercontent.com/openwrt/openwrt/master/package/libs/libffi/Makefile
+          grep -q 'PKG_NAME:=libffi' package/libs/libffi/Makefile && echo ">>> libffi 注入成功" || exit 1
+
+      - name: 克隆 luci-app-airoha-npu
+        working-directory: ./ponwrt
+        run: |
+          rm -rf package/luci-app-airoha-npu
+          git clone --depth=1 https://github.com/rchen14b/luci-app-airoha-npu.git package/luci-app-airoha-npu
+          if [ -f package/luci-app-airoha-npu/.gitmodules ]; then
+            git -C package/luci-app-airoha-npu submodule update --init --recursive --depth=1
+          fi
+          rm -rf package/luci-app-airoha-npu/.git package/luci-app-airoha-npu/.github package/luci-app-airoha-npu/screenshots
+          rm -rf package/luci-app-airoha-npu/luci-app-airoha-npu
+          grep -m1 'LUCI_TITLE' package/luci-app-airoha-npu/Makefile || echo "::warning::未找到 LUCI_TITLE"
+
+      - name: 部署仓库自带的本地包到 package/pon-local
+        working-directory: ./ponwrt
+        run: |
+          rm -rf package/pon-local
+          mkdir -p package/pon-local
+          for d in camlive go2rtc luci-app-go2rtc luci-app-blueaudio luci-app-btsp luci-app-camlive; do
+            if [ -d "../pon_userspace/$d" ]; then
+              cp -a "../pon_userspace/$d" package/pon-local/
+              echo ">>> 复制 $d"
+            else
+              echo "::warning::../pon_userspace/$d 不存在，跳过"
+            fi
+          done
+          if [ -d "../pon_userspace/ser2net4" ]; then
+            for d in gensio ser2net luci-app-ser2net; do
+              [ -d "../pon_userspace/ser2net4/$d" ] && cp -a "../pon_userspace/ser2net4/$d" package/pon-local/ && echo ">>> 复制 $d"
+            done
+          fi
+          MK=package/pon-local/luci-app-ser2net/Makefile
+          if [ -f "$MK" ]; then
+            sed -i 's|include $(TOPDIR)/luci.mk|include $(TOPDIR)/feeds/luci/luci.mk|' "$MK"
+            sed -i '/\$(eval \$(call BuildPackage,luci-app-ser2net))/d' "$MK"
+          fi
+          ls -1 package/pon-local || true
+
+      - name: 预修改 luci-app-iptv Makefile
+        working-directory: ./ponwrt
+        run: |
+          if [ -f pon_userspace/luci-app-iptv/Makefile ]; then
+            MK="pon_userspace/luci-app-iptv/Makefile"
+            cp -f "$MK" "$MK.orig"
+            sed -i 's/+kmod-iptv/kmod-iptv/g' "$MK"
+            sed -i '/\/etc\/config\/iptv/d' "$MK"
+            sed -i '/\/etc\/init\.d\/iptv/d' "$MK"
+            echo ">>> luci-app-iptv Makefile 预修改完成"
+          fi
+
+      - name: 应用 GPON feed 补丁
+        env:
+          PONWRT_DIR: ponwrt
+          FEED_PATCHES_STRICT: '1'
+        run: bash scripts/apply-feed-patches.sh
+
+      - name: 生成基础配置，锁定HG5585F-CT机型
+        working-directory: ./ponwrt
+        run: |
+          rm -rf tmp
+          perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
+          make defconfig
+
+          sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
+          sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
+          sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
+          sed -i '/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
+
+          cat >> .config << 'EOF'
+          # CONFIG_TARGET_ALL_PROFILES is not set
+          # CONFIG_TARGET_MULTI_PROFILE is not set
+          CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y
+          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y
+          CONFIG_BUILD_PATENTED=y
+          CONFIG_PACKAGE_ca-bundle=y
+          EOF
+
+          make WARN_RECURSIVE_DEP=1 olddefconfig
+          sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
+          if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y$'; then
+            echo "::error::HG5585F-CT 机型锁定校验失败！"; exit 1
+          fi
+          echo ">>> 机型配置校验OK"
+
+      - name: 写入与固件一致的内核配置覆盖
+        working-directory: ./ponwrt
+        run: |
+          # 目的：让本工作流的内核配置和固件一致。这样即使有人在这里补编
+          # 某个 kmod，产出的 .ko 也能在固件的内核上正常加载（vermagic/符号一致）。
+          for k in $DRIVER_KCONFIGS; do
+            printf 'CONFIG_KERNEL_%s=m\n' "${k#CONFIG_}" >> .config
+          done
+          make olddefconfig
+          echo ">>> 内核配置覆盖写入完成（共 $(echo $DRIVER_KCONFIGS | wc -w) 个符号）"
+
+      - name: 批量设置目标包为 =m
+        working-directory: ./ponwrt
+        run: |
+          set_pkg_m() {
+            local pkg="$1"
+            sed -i "/^CONFIG_PACKAGE_${pkg}/d" .config
+            echo "CONFIG_PACKAGE_${pkg}=m" >> .config
+          }
+
+          pkg_list=(
+            luci-app-iptv
+            luci-app-airoha-npu
+            luci-app-blueaudio
+            luci-app-btsp
+            luci-app-camlive
+            gensio
+            ser2net
+            luci-app-ser2net
+            samba4
+            luci-app-samba4
+            autosamba
+            ksmbd
+            luci-app-ksmbd
+            avahi-daemon
+            luci-app-avahi
+            nfs-kernel-server
+            nfs-kernel-server-utils
+            nfs-utils
+            nfs-utils-libs
+            kmod-fs-nfs-common
+            kmod-fs-nfs
+            kmod-fs-nfs-v4
+            kmod-fs-nfsd
+            kmod-rtw88
+            kmod-rtw88-usb
+            kmod-rtw88-8822c
+            kmod-rtw88-8821c
+            kmod-rtw88-8822cu
+            kmod-rtw88-8821cu
+            kmod-rtw88-8723du
+            kmod-rtl8xxxu
+            kmod-rtl8192cu
+            kmod-usb-xhci-hcd
+            kmod-usb-xhci-mtk
+            kmod-video-core
+            kmod-video-videobuf2
+            kmod-video-uvc
+            kmod-usb-serial-ch341
+            kmod-usb-net-rtl8152
+            kmod-usb-net-asix-ax88179
+            kmod-usb-audio
+            kmod-sound-core
+            audio-support
+            camlive
+            go2rtc
+            luci-app-go2rtc
+            ffmpeg
+            libx264
+            libopus
+            alsa-utils
+            luci-compat
+            luci-lua-runtime
+            lsblk
+            sing-box
+            luci-app-homeproxy
+            libcronet
+            mihomo-alpha
+            nikki
+            luci-app-nikki
+            luci-i18n-nikki-zh-cn
+            omcproxy
+            luci-app-omcproxy
+            luci-app-ttyd
+            ttyd
+            usbutils
+            luci-theme-argon
+            luci-app-ddns
+            ddns-scripts
+            lua5.3
+            zerotier
+            luci-app-zerotier
+            tailscale
+            luci-app-tailscale
+            wireguard
+            luci-proto-wireguard
+            kmod-wireguard
+            nebula
+            luci-proto-nebula
+            n2n
+            luci-app-n2n
+            frpc
+            luci-app-frpc
+          )
+
+          for p in "${pkg_list[@]}"; do
+            set_pkg_m "$p"
+          done
+          make WARN_RECURSIVE_DEP=1 olddefconfig
+          echo ">>> 所有包设为模块，依赖解析完成"
+
+      - name: 下载源码包
+        working-directory: ./ponwrt
+        run: |
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+          export GO111MODULE=on
+          make download -j"$(nproc)" || true
+          find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
+          make download -j1 V=s || { echo "::warning::仍有下载失败"; }
+          find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
+
+      - name: 批量编译全部模块 package/compile
+        working-directory: ./ponwrt
+        run: |
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+          export GO111MODULE=on
+          set -o pipefail
+          mkdir -p ../build_log
+          make WARN_RECURSIVE_DEP=1 package/compile -j"$(nproc)" V=s 2>&1 | tee ../build_log/full-build.log
+          echo ">>> package/compile 执行结束"
+
+      - name: 收集全部IPK
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p ../ipk_out
+          pkg_list=(
+            luci-app-iptv
+            luci-app-airoha-npu
+            luci-app-blueaudio
+            luci-app-btsp
+            luci-app-camlive
+            gensio
+            ser2net
+            luci-app-ser2net
+            samba4
+            luci-app-samba4
+            autosamba
+            ksmbd
+            luci-app-ksmbd
+            avahi-daemon
+            luci-app-avahi
+            nfs-kernel-server
+            nfs-kernel-server-utils
+            nfs-utils
+            nfs-utils-libs
+            kmod-fs-nfs-common
+            kmod-fs-nfs
+            kmod-fs-nfs-v4
+            kmod-fs-nfsd
+            kmod-rtw88
+            kmod-rtw88-usb
+            kmod-rtw88-8822c
+            kmod-rtw88-8821c
+            kmod-rtw88-8822cu
+            kmod-rtw88-8821cu
+            kmod-rtw88-8723du
+            kmod-rtl8xxxu
+            kmod-rtl8192cu
+            kmod-usb-xhci-hcd
+            kmod-usb-xhci-mtk
+            kmod-video-core
+            kmod-video-videobuf2
+            kmod-video-uvc
+            kmod-usb-serial-ch341
+            kmod-usb-net-rtl8152
+            kmod-usb-net-asix-ax88179
+            kmod-usb-audio
+            kmod-sound-core
+            audio-support
+            camlive
+            go2rtc
+            luci-app-go2rtc
+            ffmpeg
+            libx264
+            libopus
+            alsa-utils
+            luci-compat
+            luci-lua-runtime
+            lsblk
+            sing-box
+            luci-app-homeproxy
+            libcronet
+            mihomo-alpha
+            nikki
+            luci-app-nikki
+            luci-i18n-nikki-zh-cn
+            omcproxy
+            luci-app-omcproxy
+            luci-app-ttyd
+            ttyd
+            usbutils
+            luci-theme-argon
+            luci-app-ddns
+            ddns-scripts
+            # mihomo-meta 与 mihomo-alpha 互斥（都 PROVIDES:=mihomo），本工作流用 alpha
+            zerotier
+            luci-app-zerotier
+            tailscale
+            luci-app-tailscale
+            wireguard
+            luci-proto-wireguard
+            kmod-wireguard
+            nebula
+            luci-proto-nebula
+            n2n
+            luci-app-n2n
+            frpc
+            luci-app-frpc
+          )
+          for pkg in "${pkg_list[@]}"; do
+            found=0
+            while IFS= read -r -d '' f; do
+              cp -f "$f" ../ipk_out/
+              found=1
+            done < <(find bin -type f \( -name "${pkg}*.ipk" \) -print0 )
+            [ "$found" -eq 1 ] && echo ">>> 已收集 $pkg" || echo "::notice::$pkg 未生成，跳过"
+          done
+          ls -lh ../ipk_out/*.ipk 2>/dev/null || true
+
+      - name: 打包制品 & 生成校验和
+        run: |
+          mkdir -p release_out
+          cp -f ipk_out/* release_out/ 2>/dev/null || true
+          cd release_out
+          shopt -s nullglob
+          files=( *)
+          [ "${#files[@]}" -eq 0 ] && { echo "::error::无IPK产出，终止发布"; exit 1; }
+          tar --zstd -cf ../${{ env.TAR_NAME }} "${files[@]}"
+          sha256sum ../${{ env.TAR_NAME }} > ../${{ env.SHA_NAME }}
+          ls -lh ../
+
+      - name: 制品存在校验
+        run: |
+          if [ ! -f "${{ env.TAR_NAME }}" ] || [ ! -f "${{ env.SHA_NAME }}" ]; then
+            echo "::error::制品缺失，禁止发布"
+            exit 1
+          fi
+
+      - name: 生成唯一Tag（自动防重）
+        id: taggen
+        run: |
+          BASE_TAG="ipk-$(date +%Y%m%d-%H%M)"
+          TAG="${BASE_TAG}"
+          SUFFIX=1
+          while gh api -s "/repos/${{ github.repository }}/git/ref/tags/${TAG}" >/dev/null 2>&1; do
+            TAG="${BASE_TAG}-${SUFFIX}"
+            SUFFIX=$((SUFFIX+1))
+          done
+          echo "TAG=${TAG}" >> $GITHUB_OUTPUT
+          echo "Final tag: ${TAG}"
+
+      - name: 预发布 Release（仅编译成功才执行）
+        if: success()
+        uses: softprops/action-gh-release@v2.0.8
+        with:
+          tag_name: ${{ steps.taggen.outputs.TAG }}
+          name: PonWrt HG5585F-CT IPK 插件包 ${{ steps.taggen.outputs.TAG }}
+          prerelease: true
+          make_latest: false
+          generate_release_notes: false
+          body: |
+            【预发布｜HG5585F-CT 独立IPK插件包】
+            基准源码 commit: `${{ env.SOURCE_REF }}`
+            编译方式：`make package/compile`，分组 feeds install 规避循环依赖
+            ✅ 包含组件：
+            1. luci-app-iptv、luci-app-airoha-npu、luci-app-blueaudio、luci-app-btsp、luci-app-camlive
+            2. ser2net4串口服务器套件：gensio、ser2net、luci-app-ser2net
+            3. SMB共享两套（运行时二选一）
+               - samba4 + luci-app-samba4 + autosamba
+               - ksmbd + luci-app-ksmbd
+            4. NFS服务套件
+            5. mDNS局域网发现 avahi-daemon + luci-app-avahi
+            6. USB网卡驱动：rtw88、rtl8723bu、usb-modeswitch
+            7. mihomo-alpha（和固件内置mihomo-meta互斥）
+            8. 远程Mesh互联VPN（CGNAT可用，运行时**只启用一个**）
+               ZeroTier / Tailscale / WireGuard / Nebula / N2N / FRP frpc
+            ⚠️ 重要提醒
+            - 全部为模块ipk，编译阶段共存；运行阶段大量服务互斥
+            - SMB两套不能同时启用；多VPN不要同时运行
+            - 校验文件：`SHA256SUMS`
+            - 日志与.config一并上传，用于排障
+          files: |
+            ${{ env.TAR_NAME }}
+            ${{ env.SHA_NAME }}
+            build_log/full-build.log
+            ponwrt/.config
+
+      - name: 上传IPK Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PonWrt-HG5585F-CT-all-ipk
+          path: |
+            ./ipk_out/
+            ./${{ env.TAR_NAME }}
+            ./${{ env.SHA_NAME }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: 上传完整编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: IPK-build-diagnostics
+          path: |
+            ponwrt/.config
+            build_log/full-build.log
+          if-no-files-found: ignore
+          retention-days: 3
