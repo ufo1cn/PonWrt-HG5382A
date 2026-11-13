@@ -576,12 +576,15 @@ static int rtsp_handle(struct client *c)
 static int http_handle(struct client *c)
 {
 	if (strstr(c->req, "GET /stream") || strstr(c->req, "GET /?action=stream")) {
-		if (send_nb(c->fd,
-			    "HTTP/1.1 200 OK\r\n"
-			    "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n"
-			    "Cache-Control: no-cache\r\n"
-			    "Pragma: no-cache\r\n"
-			    "Connection: close\r\n\r\n", 150) != 0)
+		/* 长度必须用 sizeof-1：硬编码长度会把尾部 NUL 一起发出去，
+		 * 标准 multipart 解析器（go2rtc/ffmpeg）会报 wrong boundary。 */
+		static const char hdr[] =
+			"HTTP/1.1 200 OK\r\n"
+			"Content-Type: multipart/x-mixed-replace; boundary=frame\r\n"
+			"Cache-Control: no-cache\r\n"
+			"Pragma: no-cache\r\n"
+			"Connection: close\r\n\r\n";
+		if (send_nb(c->fd, hdr, sizeof(hdr) - 1) != 0)
 			return -1;
 		c->state = ST_PLAYING;
 		c->last_seq = g_seq;
