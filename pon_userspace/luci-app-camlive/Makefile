@@ -7,7 +7,7 @@ PKG_MAINTAINER:=Self
 PKG_LICENSE:=GPLv3
 
 LUCI_TITLE:=CamLive USB摄像头RTSP推流
-LUCI_DEPENDS:=+camlive +ffmpeg +kmod-video-uvc
+LUCI_DEPENDS:=+camlive +kmod-video-uvc
 LUCI_PKGARCH:=all
 
 include $(TOPDIR)/feeds/luci/luci.mk
