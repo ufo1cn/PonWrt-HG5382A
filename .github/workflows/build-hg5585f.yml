@@ -230,7 +230,7 @@ jobs:
         run: |
           rm -rf package/pon-local
           mkdir -p package/pon-local
-          for d in camlive go2rtc luci-app-blueaudio luci-app-btsp luci-app-camlive; do
+          for d in camlive go2rtc luci-app-go2rtc luci-app-blueaudio luci-app-btsp luci-app-camlive; do
             if [ -d "../pon_userspace/$d" ]; then
               cp -a "../pon_userspace/$d" package/pon-local/
               echo ">>> 复制 $d"
@@ -754,6 +754,7 @@ jobs:
           compile_dir "camlive" "package/pon-local/camlive" "camlive-backend-pkg.log.txt"
           compile_dir "luci-app-camlive" "package/pon-local/luci-app-camlive" "camlive-pkg.log.txt"
           compile_dir "go2rtc" "package/pon-local/go2rtc" "go2rtc-pkg.log.txt"
+          compile_dir "luci-app-go2rtc" "package/pon-local/luci-app-go2rtc" "luci-app-go2rtc-pkg.log.txt"
           compile_dir "gensio" "package/pon-local/gensio" "gensio-pkg.log.txt"
           compile_dir "ser2net" "package/pon-local/ser2net" "ser2net-pkg.log.txt"
           compile_dir "luci-app-ser2net" "package/pon-local/luci-app-ser2net" "luci-ser2net-pkg.log.txt"
@@ -804,7 +805,7 @@ jobs:
         run: |
           set +e
           mkdir -p ../ipk_out
-          pkg_list="camlive go2rtc usbutils luci-app-iptv luci-app-airoha-npu luci-app-blueaudio luci-app-btsp luci-app-camlive gensio ser2net luci-app-ser2net mihomo-meta mihomo-alpha $EXTRA_KMODS $DRIVER_PKGS $DRIVER_FW_PKGS $BT_USER_PKGS"
+          pkg_list="camlive go2rtc luci-app-go2rtc usbutils luci-app-iptv luci-app-airoha-npu luci-app-blueaudio luci-app-btsp luci-app-camlive gensio ser2net luci-app-ser2net mihomo-meta mihomo-alpha $EXTRA_KMODS $DRIVER_PKGS $DRIVER_FW_PKGS $BT_USER_PKGS"
           : > ../ipk_out/collected.txt
           for pkg in $pkg_list; do
             found=0
