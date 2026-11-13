@@ -1,3 +1,35 @@
+# ==============================================================================
+# PonWrt HG5585F-CT 应用层软件包编译工作流（只出 apk/ipk，不产固件）
+# ------------------------------------------------------------------------------
+# 【定位】固件（build-hg5585f.yml）只负责"能开机 + 底层驱动"，应用层由本文件负责。
+#
+# 一、为什么单独拆出来
+#   1) 应用层软件数量多、上游更新快、编译容易失败；放在固件流水线里，
+#      任何一个应用编译失败都会拖住整份固件产出。
+#   2) 拆开后固件流水线只关心"内核/驱动"，成功率与耗时都可控；
+#      应用层随时可以重编，不影响已在用的固件。
+#   3) 应用层软件装错/装坏可以卸载重装，不需要重新刷机。
+#
+# 二、与固件的关系（必须保持一致的两件事）
+#   1) 同一个 SOURCE_REF（PonWrt 源码版本）——版本不一致会出现依赖名对不上。
+#   2) 同一套内核配置（DRIVER_KCONFIGS）——本文件会把和固件一样的 CONFIG_KERNEL_*
+#      覆盖写进 .config，保证万一需要在这里补编某个 kmod，其 vermagic 与固件一致。
+#
+# 三、为什么这里不再逐个枚举 feeds install 的包名
+#   历史版本写了 kmod-usb-xhci / kmod-video-v4l2 / usb-modeswitch(-data) /
+#   kmod-rtl8723bu 这些**在这套树里根本不存在的包名**，配合 set -e 会让整条
+#   流水线在第一步就失败。现在统一用 `feeds install -a` 全量安装，
+#   包名的正确性只在"写 .config 的 pkg_list"阶段才有意义。
+#
+# 四、pkg_list 的两处用途
+#   - 第 1 处：把清单里的包设为 =m，随后 make package/compile 统一编译
+#   - 第 2 处：编译完成后按清单把 .apk/.ipk 收进 ipk_out 供打包
+#   两处必须保持同一份清单，否则会出现"编出来了但没被收集"。
+#
+# 五、互斥注意
+#   mihomo-meta 与 mihomo-alpha 都 PROVIDES:=mihomo，二者只能选一个。
+#   本工作流统一用 mihomo-meta（nikki 依赖的虚拟名 mihomo 由它提供）。
+# ==============================================================================
 name: 【独立包编译】PonWrt HG5585F-CT 全部可选IPK（编译成功后预发布｜防循环依赖+防Tag重复）
 on:
   workflow_dispatch:
@@ -16,6 +48,20 @@ jobs:
       SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
       TAR_NAME: HG5585F-CT-all-ipk.tar.zst
       SHA_NAME: SHA256SUMS
+      # 与 build-hg5585f.yml 保持同一套内核配置：万一在这里补编 kmod，
+      # 生成的 .ko 的 vermagic 才会和固件匹配，装得上也加载得上。
+      DRIVER_KCONFIGS: >-
+        CONFIG_USB_USBNET CONFIG_USB_SERIAL CONFIG_USB_SERIAL_CH341
+        CONFIG_USB_SERIAL_CP210X CONFIG_USB_SERIAL_FTDI_SIO CONFIG_USB_SERIAL_PL2303
+        CONFIG_USB_ACM CONFIG_USB_STORAGE CONFIG_USB_UAS CONFIG_USB_XHCI_HCD
+        CONFIG_BT CONFIG_BT_HCIBTUSB CONFIG_BT_HCIUART
+        CONFIG_RTW88 CONFIG_RTW88_USB CONFIG_RTW88_8822CU CONFIG_RTW88_8821CU
+        CONFIG_RTW88_8723DU CONFIG_RTL8XXXU CONFIG_RTL8192CU
+        CONFIG_CFG80211 CONFIG_MAC80211 CONFIG_SND CONFIG_SND_USB_AUDIO
+        CONFIG_MEDIA_SUPPORT CONFIG_VIDEO_DEV CONFIG_USB_VIDEO_CLASS
+        CONFIG_NETLINK_DIAG CONFIG_INET_DIAG CONFIG_TUN
+        CONFIG_WIREGUARD CONFIG_CIFS CONFIG_NFS_FS CONFIG_NFSD
+        CONFIG_MACVLAN CONFIG_VETH CONFIG_NFT_NAT
     steps:
       - name: 签出工作流仓库
         uses: actions/checkout@v4
@@ -178,6 +224,17 @@ jobs:
             echo "::error::HG5585F-CT 机型锁定校验失败！"; exit 1
           fi
           echo ">>> 机型配置校验OK"
+
+      - name: 写入与固件一致的内核配置覆盖
+        working-directory: ./ponwrt
+        run: |
+          # 目的：让本工作流的内核配置和固件一致。这样即使有人在这里补编
+          # 某个 kmod，产出的 .ko 也能在固件的内核上正常加载（vermagic/符号一致）。
+          for k in $DRIVER_KCONFIGS; do
+            printf 'CONFIG_KERNEL_%s=m\n' "${k#CONFIG_}" >> .config
+          done
+          make olddefconfig
+          echo ">>> 内核配置覆盖写入完成（共 $(echo $DRIVER_KCONFIGS | wc -w) 个符号）"
 
       - name: 批量设置目标包为 =m
         working-directory: ./ponwrt
