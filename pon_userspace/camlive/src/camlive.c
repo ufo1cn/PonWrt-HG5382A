@@ -62,6 +62,7 @@ struct client {
 	unsigned int rtp_ts;
 	char req[REQ_BUF];
 	int req_len;
+	char host[64];		/* 客户端请求 URL 中的主机名，用于 Content-Base/c= */
 };
 
 /* ------------------------------------------------------------------ */
@@ -446,26 +447,28 @@ static int rtsp_describe(struct client *c)
 
 	n = snprintf(sdp, sizeof(sdp),
 		     "v=0\r\n"
-		     "o=- %u 1 IN IP4 0.0.0.0\r\n"
+		     "o=- %u 1 IN IP4 %s\r\n"
 		     "s=CamLive UVC\r\n"
-		     "c=IN IP4 0.0.0.0\r\n"
+		     "c=IN IP4 %s\r\n"
 		     "t=0 0\r\n"
 		     "a=control:*\r\n"
 		     "m=video 0 RTP/AVP %d\r\n"
 		     "a=rtpmap:%d JPEG/90000\r\n"
 		     "a=framerate:%d\r\n"
 		     "a=control:streamid=0\r\n",
-		     c->ssrc, RTP_PT_JPEG, RTP_PT_JPEG, g_fps);
+		     c->ssrc, c->host[0] ? c->host : "0.0.0.0",
+		     c->host[0] ? c->host : "0.0.0.0",
+		     RTP_PT_JPEG, RTP_PT_JPEG, g_fps);
 	if (n <= 0)
 		return -1;
 
 	hn = snprintf(head, sizeof(head),
 		      "RTSP/1.0 200 OK\r\n"
 		      "CSeq: %d\r\n"
-		      "Content-Base: rtsp://0.0.0.0:%d/\r\n"
+		      "Content-Base: rtsp://%s:%d/\r\n"
 		      "Content-Type: application/sdp\r\n"
 		      "Content-Length: %d\r\n\r\n",
-		      c->cseq, g_rtsp_port, n);
+		      c->cseq, c->host[0] ? c->host : "0.0.0.0", g_rtsp_port, n);
 	if (hn <= 0)
 		return -1;
 	if (send_nb(c->fd, head, (size_t)hn) != 0)
@@ -497,6 +500,25 @@ static void rtsp_parse_transport(struct client *c, const char *req)
 	}
 }
 
+static void rtsp_parse_host(struct client *c)
+{
+	const char *u = strstr(c->req, "rtsp://");
+	const char *e;
+	int n;
+
+	if (!u)
+		return;
+	u += 7;
+	e = u;
+	while (*e && *e != '/' && *e != ':' && *e != ' ' && *e != '\r')
+		e++;
+	n = (int)(e - u);
+	if (n <= 0 || n >= (int)sizeof(c->host))
+		return;
+	memcpy(c->host, u, (size_t)n);
+	c->host[n] = 0;
+}
+
 static int rtsp_handle(struct client *c)
 {
 	char method[32];
@@ -505,6 +527,7 @@ static int rtsp_handle(struct client *c)
 
 	if (sscanf(p, "%31s", method) != 1)
 		return -1;
+	rtsp_parse_host(c);
 
 	c->cseq = 1;
 	if (hdr_value(c->req, "CSeq", v, sizeof(v)))
@@ -686,8 +709,11 @@ int main(int argc, char **argv)
 		g_fps = 15;
 	if (g_rtsp_port <= 0 || g_rtsp_port > 65535)
 		g_rtsp_port = 8554;
-	if (g_http_port <= 0 || g_http_port > 65535)
+	if (g_http_port <= 0 || g_http_port > 65535) {
 		g_http_port = g_rtsp_port + 1;
+		if (g_http_port > 65535)
+			g_http_port = 0;	/* 端口用尽 -> 只提供 RTSP */
+	}
 
 	signal(SIGPIPE, SIG_IGN);
 
@@ -707,18 +733,26 @@ int main(int argc, char **argv)
 		logmsg("pipe 失败: %s", strerror(errno));
 		return 1;
 	}
+	/* 读端必须非阻塞：写端始终打开，阻塞读会在排空后永久等待 */
+	fcntl(g_wake[0], F_SETFL, fcntl(g_wake[0], F_GETFL, 0) | O_NONBLOCK);
+	fcntl(g_wake[1], F_SETFL, fcntl(g_wake[1], F_GETFL, 0) | O_NONBLOCK);
 
 	lrtsp = listen_tcp(g_rtsp_port);
 	if (lrtsp < 0)
 		return 1;
-	lhttp = listen_tcp(g_http_port);
-	if (lhttp < 0) {
-		logmsg("HTTP 端口 %d 不可用，仅提供 RTSP", g_http_port);
-		lhttp = -1;
+	if (g_http_port > 0) {
+		lhttp = listen_tcp(g_http_port);
+		if (lhttp < 0) {
+			logmsg("HTTP 端口 %d 不可用，仅提供 RTSP", g_http_port);
+			lhttp = -1;
+		}
 	}
 
-	logmsg("RTSP: rtsp://<本机IP>:%d/   HTTP: http://<本机IP>:%d/",
-	       g_rtsp_port, lhttp >= 0 ? g_http_port : g_rtsp_port);
+	if (lhttp >= 0)
+		logmsg("RTSP: rtsp://<本机IP>:%d/   HTTP: http://<本机IP>:%d/",
+		       g_rtsp_port, g_http_port);
+	else
+		logmsg("RTSP: rtsp://<本机IP>:%d/   HTTP: 未启用", g_rtsp_port);
 
 	if (pthread_create(&cap, NULL, capture_thread, NULL) != 0) {
 		logmsg("创建采集线程失败");
@@ -728,7 +762,7 @@ int main(int argc, char **argv)
 	while (g_run) {
 		struct pollfd pfd[MAX_CLIENTS + 3];
 		int slot[MAX_CLIENTS + 3];
-		int nfd = 0, rts, hts = -1, tres, k;
+		int nfd = 0, tres, k;
 
 		pfd[nfd].fd = g_wake[0];
 		pfd[nfd].events = POLLIN;
@@ -738,14 +772,12 @@ int main(int argc, char **argv)
 		pfd[nfd].fd = lrtsp;
 		pfd[nfd].events = POLLIN;
 		pfd[nfd].revents = 0;
-		rts = nfd;
 		slot[nfd++] = -2;
 
 		if (lhttp >= 0) {
 			pfd[nfd].fd = lhttp;
 			pfd[nfd].events = POLLIN;
 			pfd[nfd].revents = 0;
-			hts = nfd;
 			slot[nfd++] = -3;
 		}
 
