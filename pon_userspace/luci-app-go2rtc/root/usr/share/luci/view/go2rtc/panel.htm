@@ -1,0 +1,56 @@
+<%+Header%>
+<%+CBI/isvalidmap%>
+
+<h2 name="content"><%:go2rtc 面板%></h2>
+
+<div class="cbi-section">
+	<div class="cbi-section-node" style="padding:12px">
+		<p>
+			<%:go2rtc 自带完整的网页面板。下面的框里嵌入的就是它（同机不同端口）；若浏览器禁止内嵌，%>
+			<a id="open-panel" href="#" target="_blank" rel="noopener"><%:点这里直接打开%></a>。
+		</p>
+		<p id="g2r-state" style="font-weight:bold"><%:状态：读取中…%></p>
+		<p>
+			<%:端口来自“设置”页的“Web 面板 / API 端口”。%>
+		</p>
+	</div>
+</div>
+
+<div class="cbi-section">
+	<iframe id="g2r-frame" src="about:blank" style="width:100%;height:82vh;border:1px solid #ddd;border-radius:4px"></iframe>
+</div>
+
+<script type="text/javascript">
+(function() {
+	var base = '<%=url("admin/services/go2rtc/status")%>';
+	var frame = document.getElementById('g2r-frame');
+	var state = document.getElementById('g2r-state');
+	var link  = document.getElementById('open-panel');
+
+	function apply(info) {
+		var url = 'http://' + window.location.hostname + ':' + info.api_port + '/';
+		link.href = url;
+		if (!info.running) {
+			state.innerHTML = '<%=translate("状态：未运行（先在“设置”里启用，或执行 /etc/init.d/go2rtc start")%>';
+			frame.src = 'about:blank';
+			return;
+		}
+		state.innerHTML = '<%=translate("状态：运行中")%>' + ' — ' + url;
+		frame.src = url;
+	}
+
+	XHR.get(base, null, function(xhr) {
+		if (xhr.status !== 200) {
+			state.innerHTML = '<%=translate("状态：读取失败")%>';
+			return;
+		}
+		try {
+			apply(JSON.parse(xhr.responseText));
+		} catch (e) {
+			state.innerHTML = '<%=translate("状态：返回内容无法解析")%>';
+		}
+	});
+})();
+</script>
+
+<%+footer%>
