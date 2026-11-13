@@ -47,8 +47,10 @@ jobs:
       DRIVER_FW_PKGS: >-
         rtl8822ce-firmware rtl8821ce-firmware rtl8723bu-firmware rtl8723de-firmware
       # 蓝牙用户态栈（feed: immortalwrt/packages utils/bluez）
+      # 注意：bluez 仓库里**没有**名为 bluez 的包，只有 bluez-libs / bluez-utils /
+      # bluez-utils-btmon / bluez-utils-extra / bluez-daemon，所以不能写 CONFIG_PACKAGE_bluez。
       BT_USER_PKGS: >-
-        bluez bluez-libs bluez-utils bluez-utils-btmon bluez-utils-extra bluez-daemon
+        bluez-libs bluez-utils bluez-utils-btmon bluez-utils-extra bluez-daemon
       # 上述驱动所依赖的内核 Kconfig（只列会产出 .ko 的模块符号，强制 =m；
       # bool 型子选项（BT_BREDR/BT_HCIBTUSB_RTL 等）由 kmod 包自带的 KCONFIG 负责，
       # 不在这里强改写，避免把 bool 塞成 m）。历史上 usbnet.ko 缺失就是
@@ -251,6 +253,23 @@ jobs:
             grep -n 'luci.mk' "$MK" || true
           fi
 
+          # luci-app-btsp 依赖写的是 +bluez，但 bluez 仓库里没有 bluez 这个包
+          # （只有 bluez-daemon / bluez-utils / bluez-libs），必须改成 bluez-daemon
+          MK=package/pon-local/luci-app-btsp/Makefile
+          if [ -f "$MK" ]; then
+            sed -i 's|+bluez\b|+bluez-daemon|g' "$MK"
+            echo ">>> luci-app-btsp 依赖已修正："; grep -n 'LUCI_DEPENDS' "$MK" || true
+          fi
+
+          # luci-app-blueaudio 依赖 bluez-alsa，但本树任何 feed 都没有 bluez-alsa
+          # （bluez-alsa 属于独立项目，不在 immortalwrt/openwrt 的 packages 中），
+          # 先摘掉这个依赖让包本身能编出来；运行时如需 A2DP 请自行安装 bluez-alsa。
+          MK=package/pon-local/luci-app-blueaudio/Makefile
+          if [ -f "$MK" ]; then
+            sed -i 's|+bluez-alsa||g' "$MK"
+            echo ">>> luci-app-blueaudio 依赖已修正（bluez-alsa 在本树不存在）："; grep -n 'LUCI_DEPENDS' "$MK" || true
+          fi
+
       - name: 预修改 luci-app-iptv Makefile（独立包阶段再编译）
         working-directory: ./ponwrt
         run: |
@@ -411,6 +430,17 @@ jobs:
           printf 'CONFIG_BUSYBOX_CONFIG_DEVMEM=y\n' >> .config
 
           make defconfig
+
+          # ⚠️ defconfig 会把 SING_BOX_BUILD_NAIVE_OUTBOUND 重新打开（它的默认值是 y），
+          # 所以这条"必须关闭"的覆盖一定要放在最后一次 defconfig 之后，
+          # 并且之后不再跑 defconfig（PonWrt1 也是这个顺序）。
+          if grep -q '^CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND=' .config; then
+            sed -i 's|^CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND=.*$|# CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set|' .config
+          elif ! grep -q '^# CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set$' .config; then
+            printf '# CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set\n' >> .config
+          fi
+          grep -n 'SING_BOX_BUILD_NAIVE_OUTBOUND' .config || echo "::warning::sing-box 配置里没有 naive outbound 符号（可能当前版本无此选项）"
+
           mkdir -p logs
           cp .config .config.firmware
           echo ">>> 固件配置已生成，保存到 .config.firmware"
@@ -461,10 +491,12 @@ jobs:
           for p in $DRIVER_FW_PKGS; do check_y "CONFIG_PACKAGE_${p}"; done
           for p in $BT_USER_PKGS; do check_y "CONFIG_PACKAGE_${p}"; done
 
-          # sing-box 的关键开关必须真的是 "not set"
-          if ! grep -q '^# CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set$' .config; then
-            echo "::error::CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND 未按要求关闭（naive outbound 在 CI 中必然编译失败）"
+          # sing-box 的关键开关不允许为打开状态（naive outbound 在 CI 中必然编译失败）
+          if grep -q '^CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND=' .config; then
+            echo "::error::CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND 仍处于打开状态（naive outbound 在 CI 中必然编译失败）"
             missing=$((missing+1))
+          else
+            echo "OK: naive outbound 未开启"
           fi
 
           echo "==== 配置预检结果 ===="
