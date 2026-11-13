@@ -242,7 +242,20 @@ jobs:
             luci-compat
             luci-lua-runtime
             lsblk
-            mihomo-alpha
+            sing-box
+            luci-app-homeproxy
+            libcronet
+            mihomo-meta
+            nikki
+            luci-app-nikki
+            luci-i18n-nikki-zh-cn
+            omcproxy
+            luci-app-omcproxy
+            luci-app-ttyd
+            ttyd
+            lua5.3
+            luci-lua-runtime
+            libyang
             zerotier
             luci-app-zerotier
             tailscale
@@ -342,7 +355,7 @@ jobs:
             luci-compat
             luci-lua-runtime
             lsblk
-            mihomo-alpha
+            # mihomo-alpha 与 mihomo-meta 互斥（都 PROVIDES:=mihomo），本工作流用 meta
             zerotier
             luci-app-zerotier
             tailscale
