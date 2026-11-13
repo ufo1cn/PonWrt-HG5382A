@@ -72,6 +72,12 @@ jobs:
         CONFIG_RTW88 CONFIG_RTW88_USB CONFIG_RTW88_8822CU CONFIG_RTW88_8821CU
         CONFIG_RTW88_8723DU CONFIG_RTL8XXXU CONFIG_CFG80211 CONFIG_MAC80211
         CONFIG_SND CONFIG_SND_PCM CONFIG_SND_USB_AUDIO
+        CONFIG_USB_XHCI_HCD CONFIG_USB_STORAGE CONFIG_USB_UAS CONFIG_USB_SERIAL
+        CONFIG_USB_ACM CONFIG_USB_NET_CDCETHER CONFIG_USB_NET_CDC_NCM
+        CONFIG_USB_NET_RTL8152 CONFIG_USB_NET_AX88179_178A
+        CONFIG_EXT4_FS CONFIG_VFAT_FS CONFIG_EXFAT_FS CONFIG_NTFS3_FS
+        CONFIG_MEDIA_SUPPORT CONFIG_VIDEO_DEV CONFIG_USB_VIDEO_CLASS
+        CONFIG_RTW88 CONFIG_RTW88_USB CONFIG_INET_DIAG CONFIG_NETLINK_DIAG CONFIG_TUN
       # 以 =m 单独出包的附加内核模块（全部来自 package/kernel/linux/modules）
       EXTRA_KMODS: >-
         kmod-usb-serial kmod-usb-serial-ch341 kmod-usb-serial-cp210x
@@ -79,6 +85,10 @@ jobs:
         kmod-usb-net kmod-usb-net-cdc-ether kmod-usb-net-cdc-ncm
         kmod-usb-net-rtl8152 kmod-usb-net-asix-ax88179
         kmod-video-core kmod-video-videobuf2 kmod-video-uvc kmod-usbip-client
+      # 固件编完之后，用同一棵树的内核/应用源码再补编的独立包（只出 apk，不进镜像）
+      # 目录会自动在 package/ 、package/pon-local/ 、package/feeds/*/ 下解析，
+      # 所以以后想补编任何软件，只需在这里加名字，不用改下面的步骤逻辑。
+      EXTRA_APK_PKGS: ""
     steps:
       - name: 签出工作流仓库
         uses: actions/checkout@v4
@@ -645,8 +655,11 @@ jobs:
           {
             echo "### 驱动 .ko 产物"
             echo '```'
-            find build_dir -name 'rtw88_*.ko' -o -name 'rtl8xxxu.ko' -o -name 'btusb.ko' \
-                 -o -name 'ch341.ko' -o -name 'usbnet.ko' -o -name 'snd-usb-audio.ko' 2>/dev/null | head -n 40
+          find build_dir \( -name 'rtw88_*.ko' -o -name 'rtl8xxxu.ko' -o -name 'rtl8192cu.ko' \
+               -o -name 'btusb.ko' -o -name 'ch341.ko' -o -name 'usbserial.ko' \
+               -o -name 'usbnet.ko' -o -name 'cdc_ether.ko' -o -name 'r8152.ko' \
+               -o -name 'ax88179_178a.ko' -o -name 'snd-usb-audio.ko' \
+               -o -name 'uvcvideo.ko' -o -name 'videobuf2-common.ko' \) 2>/dev/null | head -n 60
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -804,12 +817,42 @@ jobs:
           compile_dir "gensio" "package/pon-local/gensio" "gensio-pkg.log.txt"
           compile_dir "ser2net" "package/pon-local/ser2net" "ser2net-pkg.log.txt"
           compile_dir "luci-app-ser2net" "package/pon-local/luci-app-ser2net" "luci-ser2net-pkg.log.txt"
+          
+          # ---- 扩展点：用同一棵树的源码再补编 EXTRA_APK_PKGS 里列出的包 ----
+          for p in $EXTRA_APK_PKGS; do
+            d=$(ls -d "package/$p" "package/pon-local/$p" package/feeds/*/"$p" 2>/dev/null | head -1)
+            if [ -z "$d" ]; then
+              echo "::warning::$p 在树里找不到目录，跳过"
+              continue
+            fi
+            compile_dir "$p" "$d" "${p}-pkg.log.txt"
+          done
+          
+          # ---- mihomo-alpha：与 mihomo-meta 都 PROVIDES:=mihomo，不能同时选中 ----
+          # 所以单独跑一轮配置：临时把 mihomo-meta 关掉，编完立刻恢复 .config.firmware
+          MIHOMO_ALPHA_DIR=$(ls -d package/feeds/*/mihomo-alpha 2>/dev/null | head -1)
+          if [ -n "$MIHOMO_ALPHA_DIR" ]; then
+            echo ""
+            echo "==== mihomo-alpha（与 mihomo-meta 互斥，单独一轮配置）===="
+            sed -i 's|^CONFIG_PACKAGE_mihomo-meta=y|# CONFIG_PACKAGE_mihomo-meta is not set|' .config
+            set_m "mihomo-alpha"
+            make oldconfig < /dev/null >/dev/null 2>&1
+            if make "$MIHOMO_ALPHA_DIR/compile" V=s 2>&1 | tee "logs/mihomo-alpha-pkg.log.txt" | tail -n 8; then
+              echo ">>> mihomo-alpha 编译成功"
+            else
+              echo "::warning::mihomo-alpha 编译失败（日志 logs/mihomo-alpha-pkg.log.txt）"
+              grep -nE 'error:|Error [0-9]|nothing provides' "logs/mihomo-alpha-pkg.log.txt" | head -n 15 || true
+            fi
+            cp -f .config.firmware .config
+          else
+            echo "::warning::mihomo-alpha 目录未找到，跳过"
+          fi
 
           echo ""
           echo ">>> go2rtc 链路独立包产出核对"
           : > logs/go2rtc-packages.txt
           for p in libx264 libopus ffmpeg alsa-utils luci-lua-runtime luci-compat \
-                   camlive luci-app-camlive go2rtc luci-app-go2rtc; do
+                   camlive luci-app-camlive go2rtc luci-app-go2rtc mihomo-alpha; do
             hit=$(find bin -type f \( -name "${p}*.apk" -o -name "${p}*.ipk" \) 2>/dev/null | head -1)
             if [ -n "$hit" ]; then echo "OK   $p -> $hit" | tee -a logs/go2rtc-packages.txt
             else echo "MISS $p（未产出）" | tee -a logs/go2rtc-packages.txt; fi
