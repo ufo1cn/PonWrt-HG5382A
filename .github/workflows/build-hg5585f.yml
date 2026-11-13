@@ -1,15 +1,6 @@
 name: 编译 PonWrt HG5585F 电信版集成版固件
-# （最小化固件 + 独立包逐包切换编译 + 重复符号清理 + WARN_RECURSIVE_DEP 降级诊断）
-# ----------------------------------------------------------------------------
-# 关键修正：
-#   1. 全部使用 make defconfig，移除不稳定 olddefconfig，避免kconfig递归依赖直接报错退出
-#   2. 追加配置前先清理 .config 重复符号，保证每个符号只出现一次
-#   3. 固件本体不编译 usbutils，移到独立包单独编译并输出完整诊断日志
-#   4. 固件配置与独立包彻底隔离，独立包只操作配置副本，不污染固件编译结果
-#   5. 日志直接输出 *.log.txt，Windows下载可直接双击打开
-#   6. ser2net4 集合拆分为 gensio / ser2net / luci‑app‑ser2net 分别编译
-#   7. 修复 continue‑on‑error 层级 & 非法Unicode长破折号语法错误
-
+# 正式固件Job + usbutils独立调试Job
+# 正式固件：排除usbutils，保证固件产出；debug‑usbutils专门抓usbutils编译日志，失败不影响固件
 on:
   workflow_dispatch:
 permissions:
@@ -19,7 +10,7 @@ concurrency:
   group: build-hg5585f-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  build:
+  build-firmware:
     name: 编译 HG5585F‑CT 集成版固件
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -131,7 +122,7 @@ jobs:
             https://raw.githubusercontent.com/openwrt/openwrt/master/package/libs/libffi/Makefile
           grep -q 'PKG_NAME:=libffi' package/libs/libffi/Makefile && echo ">>> libffi 注入成功" || exit 1
 
-      - name: 更新 Feeds 并最小化安装 ✅【只装固件必需包，循环包不进索引】
+      - name: 更新 Feeds 并最小化安装 ✅【usbutils不install，避免带入主编译链】
         working-directory: ./ponwrt
         run: |
           ./scripts/feeds update -a
@@ -146,10 +137,9 @@ jobs:
             kmod-iptv \
             omcproxy luci-app-omcproxy \
             kmod-usb-xhci kmod-usb-storage kmod-usb-storage-extras \
-            kmod-fs-ext4 kmod-fs-vfat kmod-fs-ntfs3 block-mount \
+            kmod-fs-ext4 kmod-fs-vfat kmod-fs-ntfs3 block-mount usb-modeswitch usb-modeswitch-data kmod-rtl8723bu \
             kmod-video-v4l2 kmod-video-uvc kmod-usb-serial kmod-usb-net \
-            kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822c kmod-rtw88-8822cu \
-            usb-modeswitch usb-modeswitch-data kmod-rtl8723bu
+            kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822c kmod-rtw88-8822cu
 
           ./scripts/feeds install mihomo-meta nikki luci-app-nikki luci-i18n-nikki-zh-cn
 
@@ -158,7 +148,7 @@ jobs:
             ip-full yq libcronet \
             luci-app-ttyd luci-app-ddns ddns-scripts openssh-sftp-server
 
-          echo ">>> 最小化 feeds install 完成"
+          echo ">>> 最小化 feeds install 完成（usbutils跳过，交给debug‑usbutils job）"
 
       - name: 将 luci-app-airoha-npu 克隆到 package 目录
         working-directory: ./ponwrt
@@ -172,7 +162,7 @@ jobs:
           rm -rf package/luci-app-airoha-npu/luci-app-airoha-npu
           grep -m1 'LUCI_TITLE' package/luci-app-airoha-npu/Makefile || echo "::warning::未找到 LUCI_TITLE"
 
-      - name: 预修改 luci-app-iptv Makefile（独立包阶段再 install）
+      - name: 预修改 luci-app-iptv Makefile（独立包阶段再编译）
         working-directory: ./ponwrt
         run: |
           if [ -f pon_userspace/luci-app-iptv/Makefile ]; then
@@ -200,7 +190,7 @@ jobs:
           echo "OK: GPON patches are present."
 
       # ============================================================================
-      # 固件配置：使用 make defconfig，清理全部重复符号
+      # 固件配置：使用 make defconfig，usbutils 关闭，不进入主编译链
       # ============================================================================
       - name: 生成并锁定 HG5585F‑CT 固件配置 ✅【清理重复符号】
         working-directory: ./ponwrt
@@ -209,7 +199,6 @@ jobs:
           perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
           make defconfig
 
-          # 删除旧target profile行
           sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
           sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
           sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
@@ -283,7 +272,7 @@ jobs:
           # --- omcproxy ---
           CONFIG_PACKAGE_omcproxy=y
           CONFIG_PACKAGE_luci-app-omcproxy=y
-          # --- USB底层模块 usbutils移到独立包编译，固件本体不内置
+          # --- USB底层模块 feed包 设置=m，usbutils不参与固件编译
           CONFIG_PACKAGE_kmod-usb-xhci=m
           CONFIG_PACKAGE_kmod-usb-storage=m
           CONFIG_PACKAGE_kmod-usb-storage-extras=m
@@ -303,7 +292,7 @@ jobs:
           CONFIG_PACKAGE_usb-modeswitch=m
           CONFIG_PACKAGE_usb-modeswitch-data=m
           CONFIG_PACKAGE_kmod-rtl8723bu=m
-          # --- 独立包不参与固件 ---
+          # --- pon_userspace独立包不参与固件镜像 ---
           # CONFIG_PACKAGE_luci-app-iptv is not set
           # CONFIG_PACKAGE_luci-app-airoha-npu is not set
           # CONFIG_PACKAGE_luci-app-airoha-soc is not set
@@ -347,7 +336,6 @@ jobs:
           grep -E 'CONFIG_PACKAGE_(qt5base|fwknopd|squeezelite-custom|mihomo-alpha)=' .config || \
             echo ">>> 循环相关包均未以激活状态出现在 .config 中"
 
-          # 保存固件基准配置，独立包阶段拷贝副本使用，绝不修改本文件
           cp .config .config.firmware
           mkdir -p logs
           echo ">>> 固件配置完成，已保存 .config.firmware"
@@ -413,13 +401,13 @@ jobs:
           )
 
       # ============================================================================
-      # 独立包阶段：拷贝固件配置副本，逐包切换配置编译
+      # 独立包阶段：仅编译 pon_userspace 本地包 + mihomo‑alpha
       # ============================================================================
-      - name: 尝试编译独立软件包 ✅【逐包切换配置】
+      - name: 尝试编译 pon_userspace 本地独立软件包
         working-directory: ./ponwrt
         run: |
           set +e
-          echo ">>> 开始独立包编译（拷贝固件配置副本，保护原始固件配置）"
+          echo ">>> 独立包编译：拷贝固件配置副本"
           cp .config.firmware .config
 
           enable_pkg_m() {
@@ -461,7 +449,7 @@ jobs:
             make defconfig >/dev/null 2>&1
             enable_pkg_m "$pkg"
 
-            make "$path/compile" -j"$(nproc)" V=s 2>&1 | tee "logs/$log" | tail -8
+            make -C "$path" V=s compile 2>&1 | tee "logs/$log" | tail -8
             local rc=${PIPESTATUS[0]}
             if [ $rc -ne 0 ]; then
               echo "::warning::$pkg 编译失败（不影响固件）"
@@ -490,21 +478,8 @@ jobs:
           fi
 
           echo ""
-          echo ">>> 编译 rtw88 系列驱动"
-          make package/kernel/rtw88/compile -j"$(nproc)" V=s 2>&1 | tee logs/rtw88-pkg.log.txt | tail -5
-          [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::rtw88 编译失败" || echo ">>> rtw88 成功"
-
-          echo ">>> 编译 usb-modeswitch"
-          make package/feeds/packages/usb-modeswitch/compile -j"$(nproc)" V=s 2>&1 | tee logs/usb-modeswitch-pkg.log.txt | tail -5
-          [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::usb-modeswitch 编译失败" || echo ">>> usb-modeswitch 成功"
-
-          echo ">>> 编译 rtl8723bu"
-          make package/kernel/rtl8723bu/compile -j"$(nproc)" V=s 2>&1 | tee logs/rtl8723bu-pkg.log.txt | tail -5
-          [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::rtl8723bu 编译失败" || echo ">>> rtl8723bu 成功"
-
-          echo ""
           echo "============================================================"
-          echo ">>> 处理 mihomo‑alpha（切换配置，单独编译）"
+          echo ">>> 处理 mihomo‑alpha（feed包，使用顶层make target）"
           echo "============================================================"
           if [ -d "package/feeds/nikki/mihomo-alpha" ] || [ -d "feeds/nikki/mihomo-alpha" ]; then
             disable_pkg "mihomo-meta"
@@ -514,14 +489,15 @@ jobs:
             grep -E 'CONFIG_PACKAGE_mihomo-(meta|alpha)' .config || true
 
             make package/feeds/nikki/mihomo-alpha/compile -j"$(nproc)" V=s 2>&1 | tee logs/mihomo-alpha-pkg.log.txt | tail -8
-            [ ${PIPESTATUS[0]} -ne 0 ] && echo "::warning::mihomo-alpha 编译失败" || echo ">>> mihomo-alpha 编译成功"
+            local rc_mh=${PIPESTATUS[0]}
+            [ $rc_mh -ne 0 ] && echo "::warning::mihomo-alpha 编译失败" || echo ">>> mihomo-alpha 编译成功"
 
             disable_pkg "mihomo-alpha"
             enable_pkg_m "mihomo-meta"
             sed -i "s|^CONFIG_PACKAGE_mihomo-meta=m|CONFIG_PACKAGE_mihomo-meta=y|" .config
             make defconfig >/dev/null 2>&1
           else
-            echo "::warning::mihomo-alpha 目录不存在，跳过"
+            echo "::warning::mihomo‑alpha 目录不存在，跳过"
           fi
 
           echo ""
@@ -530,16 +506,8 @@ jobs:
           ls -la bin/packages/*/ 2>/dev/null || true
           ls -la bin/targets/*/*/packages/ 2>/dev/null || true
 
-          echo ">>> 独立包编译尝试结束"
+          echo ">>> pon_userspace独立包编译尝试结束"
           exit 0
-
-      - name: 单独捕获usbutils完整编译日志（always，失败也保存日志）
-        if: always()
-        working-directory: ./ponwrt
-        run: |
-          mkdir -p logs
-          make package/feeds/packages/usbutils/clean
-          make package/feeds/packages/usbutils/compile V=s -j1 2>&1 | tee logs/usbutils-build.log.txt
 
       - name: 打包全部软件包
         if: always()
@@ -558,7 +526,7 @@ jobs:
         working-directory: ./ponwrt
         run: |
           mkdir -p ../ipk_out
-          pkg_list="luci-app-iptv luci-app-airoha-npu luci-app-blueaudio luci-app-btsp luci-app-camlive gensio ser2net luci-app-ser2net kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822c kmod-rtw88-8822cu usb-modeswitch usb-modeswitch-data kmod-rtl8723bu mihomo-meta mihomo-alpha usbutils"
+          pkg_list="luci-app-iptv luci-app-airoha-npu luci-app-blueaudio luci-app-btsp luci-app-camlive gensio ser2net luci-app-ser2net kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822c kmod-rtw88-8822cu usb-modeswitch usb-modeswitch-data kmod-rtl8723bu mihomo-meta mihomo-alpha"
           for pkg in $pkg_list; do
             found=0
             while IFS= read -r -d '' f; do
@@ -616,12 +584,13 @@ jobs:
           make_latest: false
           generate_release_notes: true
           body: |
-            PonWrt HG5585F‑CT 集成版自动预发布（最小化固件 + 独立包逐包切换编译）。
-            固件镜像内置：PON 修复、透明代理内核模块、mihomo‑meta（稳定版）、IPTV 驱动、omcproxy、USB 底层驱动。
+            PonWrt HG5585F‑CT 集成版自动预发布（最小化固件 + pon_userspace本地包独立编译）。
+            固件镜像内置：PON 修复、透明代理内核模块、mihomo‑meta（稳定版）、IPTV 驱动、omcproxy、USB底层驱动。
             独立 ipk：luci‑app‑iptv、luci‑app‑airoha‑npu、luci‑app‑blueaudio、luci‑app‑btsp、luci‑app‑camlive、
-            gensio、ser2net、luci‑app‑ser2net、RTL8821CU/RTL8723BU 网卡驱动、usb‑modeswitch，usbutils，
+            gensio、ser2net、luci‑app‑ser2net、RTL8821CU/RTL8723BU网卡驱动、usb‑modeswitch，
             以及可选产出的 mihomo‑alpha 独立 ipk（与 meta 互斥，设备上只能二选一安装）。
             ⚠️ homeproxy / sing‑box 因 feed 索引缺失未纳入本次构建。
+            ⚠️ usbutils 未纳入固件编译链，请查看 debug‑usbutils Job日志。
           files: release_out/*
 
       - name: 保存 staging 缓存
@@ -644,3 +613,82 @@ jobs:
             ponwrt/logs/
           if-no-files-found: ignore
           retention-days: 3
+
+  # 独立调试Job：专门编译usbutils，失败不影响固件产出
+  debug-usbutils:
+    name: Debug‑usbutils 单独编译调试
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
+    steps:
+      - name: 签出工作流仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 初始化编译环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
+            subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
+            libzstd-dev jq dos2unix upx-ucl
+
+      - name: 拉取 PonWrt 指定 commit
+        run: |
+          git init ponwrt
+          git -C ponwrt remote add origin https://github.com/pbs05/ponwrt.git
+          git -C ponwrt fetch --depth=1 -- origin "$SOURCE_REF"
+          git -C ponwrt checkout --detach FETCH_HEAD
+
+      - name: 配置feeds源，和正式固件保持一致
+        working-directory: ./ponwrt
+        run: |
+          if [ ! -f feeds.conf.default ]; then touch feeds.conf.default; fi
+          sed -i '/nikki/d;/homeproxy/d;/openwrt-iptv/d' feeds.conf.default
+          echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
+          echo 'src-git iptv https://github.com/yveming/openwrt-iptv.git' >> feeds.conf.default
+          dos2unix feeds.conf.default 2>/dev/null || true
+          ./scripts/feeds update -a
+          ./scripts/feeds install usbutils
+
+      - name: 生成基础target配置
+        working-directory: ./ponwrt
+        run: |
+          rm -rf tmp
+          perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
+          sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
+          sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
+          sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
+          cat >> .config <<'EOF'
+CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y
+CONFIG_PACKAGE_usbutils=m
+EOF
+          make defconfig
+          mkdir -p logs
+
+      - name: usbutils 单独编译，抓取完整日志
+        working-directory: ./ponwrt
+        run: |
+          make package/feeds/packages/usbutils/clean
+          make package/feeds/packages/usbutils/compile V=s -j1 2>&1 | tee logs/usbutils-debug.log.txt; true
+
+      - name: 上传usbutils调试产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: usbutils-debug-artifact
+          path: |
+            ponwrt/logs/usbutils-debug.log.txt
+            ponwrt/bin/targets/airoha/an7581/packages/usbutils*.ipk*
+          if-no-files-found: warn
+          retention-days: 7
