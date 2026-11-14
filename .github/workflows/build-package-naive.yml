@@ -124,12 +124,12 @@ jobs:
 
           mkdir -p logs
           set +e
-          make -j1 V=sc WARN_RECURSIVE_DEP=1 olddefconfig > logs/olddefconfig.log 2>&1
+          make -j1 V=sc WARN_RECURSIVE_DEP=1 defconfig > logs/defconfig.log 2>&1
           odrc=$?
           set -e
           if [ $odrc -ne 0 ]; then
-            echo "::error::olddefconfig 失败（rc=$odrc），真实日志末尾："
-            tail -n 40 logs/olddefconfig.log
+            echo "::error::defconfig 失败（rc=$odrc），真实日志末尾："
+            tail -n 40 logs/defconfig.log
             exit $odrc
           fi
 
@@ -150,12 +150,12 @@ jobs:
 
           mkdir -p logs
           set +e
-          make -j1 V=sc WARN_RECURSIVE_DEP=1 olddefconfig > logs/olddefconfig2.log 2>&1
+          make -j1 V=sc WARN_RECURSIVE_DEP=1 defconfig > logs/defconfig2.log 2>&1
           odrc=$?
           set -e
           if [ $odrc -ne 0 ]; then
-            echo "::error::打开 naive 符号后 olddefconfig 失败（rc=$odrc）："
-            tail -n 40 logs/olddefconfig2.log
+            echo "::error::打开 naive 符号后 defconfig 失败（rc=$odrc）："
+            tail -n 40 logs/defconfig2.log
             exit $odrc
           fi
 
