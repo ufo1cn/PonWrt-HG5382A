@@ -75,6 +75,10 @@ jobs:
     name: 编译 HG5585F 集成版固件（USB 全支持）
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    # 注意：下面 env 里的多行值（>- 折叠块）中**不能写 # 注释**——
+    # YAML 会把 # 和后面的文字当成字面 token，进而被写成
+    # CONFIG_PACKAGE_#=y 这种非法行，.config 直接报 missing separator。
+    # 要写说明请写在块外面的注释里。
     env:
       SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
       # 目标支持多机型之前只能是单机型，机型由触发时的输入决定
@@ -98,22 +102,13 @@ jobs:
         kmod-rtw88-8723du kmod-rtl8xxxu kmod-rtl8192cu
         kmod-video-core kmod-video-videobuf2 kmod-video-uvc
         kmod-sound-core kmod-usb-audio
-        # ---- 下面这些是"预先打开、给后期独立包用"的底层设施 ----
-        # sing-box 依赖 NETLINK_DIAG（没有它 sing-box 起来就报 diag 相关错误）
         kmod-netlink-diag
-        # USB 键鼠 / 手柄 / UPS 等 HID 设备
         kmod-usb-hid
-        # 后续装 wireguard 工具就能直接用
         kmod-wireguard
-        # NFS 客户端与服务端（后期装 nfs-utils / nfs-kernel-server 需要）
         kmod-fs-nfs kmod-fs-nfs-common kmod-fs-nfs-v4 kmod-fs-nfsd
-        # 挂载 Windows/SMB 共享
         kmod-fs-cifs
-        # 虚拟网卡/网桥：容器、透明代理分流、多网卡场景常用
         kmod-macvlan kmod-veth
-        # 网桥上的 netfilter：透明代理（tproxy）经网桥时必须
         kmod-br-netfilter
-        # NAT：nftables/iptables 做 NAT 的底层模块
         kmod-nft-nat kmod-nf-nat
       # 无线网卡 / 蓝牙所需固件（package/firmware/linux-firmware/realtek.mk）
       DRIVER_FW_PKGS: >-
@@ -136,20 +131,12 @@ jobs:
         CONFIG_RTW88_8821C CONFIG_RTW88_8821CU CONFIG_RTW88_8723D CONFIG_RTW88_8723DU
         CONFIG_RTL8XXXU CONFIG_RTL8192CU CONFIG_CFG80211 CONFIG_MAC80211
         CONFIG_NETLINK_DIAG CONFIG_USB_HID CONFIG_HID CONFIG_WIREGUARD
-        # ---- 无线：没有这三行，rtw88/rtl8xxxu 的 kmod 会被 kconfig 直接丢弃 ----
         CONFIG_CFG80211 CONFIG_MAC80211
         CONFIG_RTW88 CONFIG_RTW88_USB CONFIG_RTW88_8822CU CONFIG_RTW88_8821CU
         CONFIG_RTW88_8723DU CONFIG_RTW88_8822CE CONFIG_RTW88_8821CE
         CONFIG_RTL8XXXU CONFIG_RTL8192CU
-        # ---- Airoha NPU 状态页（luci-app-airoha-npu）要读的东西 ----
-        # NET_AIROHA / NET_AIROHA_NPU：an7581 target 默认就是 =y，
-        #   但显式写一遍，保证以后换 target 分支也不会丢
         CONFIG_NET_AIROHA CONFIG_NET_AIROHA_NPU
-        # DEBUG_FS：页面读 /sys/kernel/debug/clk/npu/clk_rate 与 /sys/kernel/debug/ppe/*
         CONFIG_DEBUG_FS CONFIG_COMMON_CLK
-        # DEVMEM：页面用 busybox devmem 读 0x1fa202b4/b8 两个 PLL 寄存器算出实际主频
-        #   注意：打开 /dev/mem 等于放开物理内存读写，属于安全权衡项；
-        #   如果不需要"实际 PLL 主频"这一栏，把这行注释掉即可（页面仍可用，只是该栏为 0）
         CONFIG_DEVMEM
         CONFIG_CIFS CONFIG_NFS_FS CONFIG_NFSD CONFIG_MACVLAN CONFIG_VETH
         CONFIG_BRIDGE CONFIG_BRIDGE_NF_EBTABLES CONFIG_NFT_NAT CONFIG_NF_NAT
