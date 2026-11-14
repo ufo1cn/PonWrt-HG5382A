@@ -163,6 +163,31 @@ jobs:
             echo "::error::naive 相关符号未生效（可能被依赖条件静默丢弃）"; exit 1; }
           echo ">>> naive 符号已生效"
 
+      - name: 准备主机工具（gn 依赖 host ninja，libcronet 依赖 gn）
+        working-directory: ./ponwrt
+        run: |
+          # 实测根因：编译 libcronet 时先要编 host 包 gn，而 gn 的构建脚本直接调用
+          # staging_dir/host/bin/ninja；本工作流没跑过 make tools，ninja 尚未生成，
+          # 于是 `bash: .../host/bin/ninja: No such file or directory`（Error 127）。
+          # 这里显式先编 host 版 ninja，再编 host 版 gn，最后才轮到 libcronet。
+          mkdir -p logs
+          for d in ninja gn; do
+            if [ -d "feeds/packages/devel/$d" ]; then
+              set +e
+              make -j1 V=s "package/feeds/packages/$d/host/compile" > "logs/host-$d.log" 2>&1
+              rc=$?
+              set -e
+              if [ $rc -ne 0 ]; then
+                echo "::error::host 包 $d 编译失败（rc=$rc），末尾 40 行："
+                tail -n 40 "logs/host-$d.log"
+                exit $rc
+              fi
+              echo ">>> host 包 $d 编译成功"
+            else
+              echo "::warning::feeds/packages/devel/$d 不存在，跳过"
+            fi
+          done
+
       - name: 编译 libcronet（探路，失败即停）
         working-directory: ./ponwrt
         run: |
