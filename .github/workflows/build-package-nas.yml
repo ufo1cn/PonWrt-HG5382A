@@ -141,6 +141,64 @@ jobs:
           fi
           echo ">>> 机型锁定 OK：fiberhome_hg5585f-ct"
 
+      - name: 预编译 host 工具与工具链（独立包工作流必需）
+        working-directory: ./ponwrt
+        run: |
+          # 为什么必须单独做这一步：
+          # `make package/feeds/<feed>/<包名>/compile` 只编这个包，**不会**顺带把
+          # tools/ 下的 host 工具编出来。于是解包/签名阶段就会报：
+          #   bash: .../staging_dir/host/bin/libdeflate-gzip: No such file or directory
+          #   bash: .../staging_dir/host/bin/openssl: No such file or directory
+          # （实测分别卡住 NAS 的 host lua 和 libcronet 的 private-key.pem 生成）
+          # 另外 target 包还需要工具链，否则 staging_dir/toolchain-* 不存在。
+          # 这里先按 tools/Makefile 的清单逐个编 host 工具，再编工具链。
+          mkdir -p logs
+          TOOL_LIST="libdeflate libressl patch tar zstd xz zlib expat m4 pkgconf \
+                     autoconf automake libtool flex bison gnulib missing-macros \
+                     util-linux findutils dosfstools mtools e2fsprogs squashfs4 \
+                     mkimage sstrip patchelf cpio lzma ninja meson gengetopt \
+                     mtd-utils padjffs2 patch-image mklibs fakeroot elfutils zip quilt"
+          for t in $TOOL_LIST; do
+            if [ -d "tools/$t" ]; then
+              echo "=== tools/$t ==="
+              set +e
+              make -j1 V=s "tools/$t/compile" > "logs/host-tool-$t.log" 2>&1
+              rc=$?
+              set -e
+              if [ $rc -ne 0 ]; then
+                echo "::warning::tools/$t 编译失败(rc=$rc)，末尾 15 行："
+                tail -n 15 "logs/host-tool-$t.log"
+              fi
+            else
+              echo "=== 跳过 tools/$t（该工具不在本树里）==="
+            fi
+          done
+
+          # 关键 host 可执行：缺一个后面必然崩，直接在这里明确报错
+          for b in libdeflate-gzip openssl patch tar zstd; do
+            if [ ! -x "staging_dir/host/bin/$b" ]; then
+              echo "::error::host 工具 $b 未生成（staging_dir/host/bin 现状如下）"
+              ls -l staging_dir/host/bin | head -n 30
+              exit 1
+            fi
+          done
+          echo ">>> host 工具就绪：$(staging_dir/host/bin/openssl version 2>/dev/null)"
+
+          # 工具链：target 包编译的必要前提
+          if ! ls -d staging_dir/toolchain-* >/dev/null 2>&1; then
+            echo "=== 工具链编译 ==="
+            set +e
+            make -j$(nproc) V=s toolchain/compile > logs/toolchain.log 2>&1
+            rc=$?
+            set -e
+            if [ $rc -ne 0 ] || ! ls -d staging_dir/toolchain-* >/dev/null 2>&1; then
+              echo "::error::工具链编译失败(rc=$rc)，末尾 30 行："
+              tail -n 30 logs/toolchain.log
+              exit 1
+            fi
+          fi
+          echo ">>> 工具链就绪：$(ls -d staging_dir/toolchain-* | head -n 1)"
+
       - name: 编译 NAS 用户态包（逐个目录编译，单个失败不影响其它）
         working-directory: ./ponwrt
         run: |
