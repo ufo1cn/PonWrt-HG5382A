@@ -377,7 +377,10 @@ jobs:
                     rc=0
                     break
                   fi
-                  syms=$(sed -n 's/.*\((\w*)\)) \[\([^]]*\)\] (NEW).*/\1 \2/p' "$LOGDIR/kernel-compile-$pass.log" | sort -u)
+                  syms=$(sed -nE 's/.*\(([A-Za-z0-9_]+)\) \[([^]]*)\] \(NEW\).*/\1 \2/p' "$LOGDIR/kernel-compile-$pass.log" | sort -u)
+                  # 注意：不要换成 BRE 的 "\((\w*)\))" 写法——实测（run 43647582865）它在
+                  # "MediaTek SPI NAND Flash Interface (SPI_MTK_SNFI) [N/m/y/?] (NEW) make[7]: ***"
+                  # 这种"提示符与报错同一行"的日志里输出为空，于是第 1 轮就被误判成非配置问题而退出。
                   if [ -z "$syms" ]; then
                     echo "::error::target/linux/compile 第 $pass 轮失败但日志里没有 (NEW) 符号，属于真实编译错误，末尾 80 行："
                     tail -n 80 "$LOGDIR/kernel-compile-$pass.log"
