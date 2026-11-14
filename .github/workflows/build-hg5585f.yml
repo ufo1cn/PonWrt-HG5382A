@@ -141,6 +141,16 @@ jobs:
         CONFIG_RTW88 CONFIG_RTW88_USB CONFIG_RTW88_8822CU CONFIG_RTW88_8821CU
         CONFIG_RTW88_8723DU CONFIG_RTW88_8822CE CONFIG_RTW88_8821CE
         CONFIG_RTL8XXXU CONFIG_RTL8192CU
+        # ---- Airoha NPU 状态页（luci-app-airoha-npu）要读的东西 ----
+        # NET_AIROHA / NET_AIROHA_NPU：an7581 target 默认就是 =y，
+        #   但显式写一遍，保证以后换 target 分支也不会丢
+        CONFIG_NET_AIROHA CONFIG_NET_AIROHA_NPU
+        # DEBUG_FS：页面读 /sys/kernel/debug/clk/npu/clk_rate 与 /sys/kernel/debug/ppe/*
+        CONFIG_DEBUG_FS CONFIG_COMMON_CLK
+        # DEVMEM：页面用 busybox devmem 读 0x1fa202b4/b8 两个 PLL 寄存器算出实际主频
+        #   注意：打开 /dev/mem 等于放开物理内存读写，属于安全权衡项；
+        #   如果不需要"实际 PLL 主频"这一栏，把这行注释掉即可（页面仍可用，只是该栏为 0）
+        CONFIG_DEVMEM
         CONFIG_CIFS CONFIG_NFS_FS CONFIG_NFSD CONFIG_MACVLAN CONFIG_VETH
         CONFIG_BRIDGE CONFIG_BRIDGE_NF_EBTABLES CONFIG_NFT_NAT CONFIG_NF_NAT
       # 编译完成后用内核 .config 反查这些符号（bool 子选项也一起查）
@@ -159,6 +169,7 @@ jobs:
         CONFIG_USB_HID CONFIG_HID CONFIG_WIREGUARD CONFIG_CIFS
         CONFIG_NFS_FS CONFIG_NFSD CONFIG_MACVLAN CONFIG_VETH
         CONFIG_BRIDGE_NF_EBTABLES CONFIG_NFT_NAT
+        CONFIG_NET_AIROHA CONFIG_NET_AIROHA_NPU CONFIG_DEBUG_FS CONFIG_DEVMEM
       # 以 =m 单独出包的附加内核模块（全部来自 package/kernel/linux/modules）
       EXTRA_KMODS: >-
         kmod-usb-serial kmod-usb-serial-ch341 kmod-usb-serial-cp210x
