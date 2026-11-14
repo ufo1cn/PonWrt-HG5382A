@@ -138,7 +138,7 @@ jobs:
         CONFIG_INET_DIAG CONFIG_TUN
       # 编译完成后用内核 .config 反查这些符号（bool 子选项也一起查）
       DRIVER_KCONFIG_CHECK: >-
-        CONFIG_USB_USBNET CONFIG_USB_SERIAL_CH341 CONFIG_BT CONFIG_BT_HCIBTUSB
+        CONFIG_ARCH_AIROHA CONFIG_PCS_AIROHA_AN7581 CONFIG_USB_USBNET CONFIG_USB_SERIAL_CH341 CONFIG_BT CONFIG_BT_HCIBTUSB
         CONFIG_BT_HCIBTUSB_RTL CONFIG_BT_HCIUART CONFIG_BT_BREDR CONFIG_BT_LE
         CONFIG_RTW88 CONFIG_RTW88_USB CONFIG_RTW88_8822CU CONFIG_RTW88_8821CU
         CONFIG_RTW88_8723DU CONFIG_RTL8XXXU CONFIG_CFG80211 CONFIG_MAC80211
@@ -796,9 +796,23 @@ jobs:
         working-directory: ./ponwrt
         run: |
           mkdir -p logs
-          KC=$(find build_dir -maxdepth 4 -path '*linux-6*' -name '.config' 2>/dev/null | head -n 1)
+          # 【这个反查以前会给出错误结论，必须先自证“文件选对了”】
+          # 曾经出现过：target/linux/airoha/an7581/config-6.18 里明明写着
+          #   CONFIG_NET_AIROHA=y、CONFIG_NET_AIROHA_NPU=y
+          # 但反查结果全是“（未出现）”，据此差点误判“NPU 驱动没打开”。
+          # 所以这里先锁定唯一正确路径，并用基线符号自证文件确实是这颗 SoC 的内核配置：
+          #   build_dir/target-*/linux-airoha_an7581/linux-6.18.55/.config
+          # 若基线符号（CONFIG_ARCH_AIROHA / CONFIG_PCS_AIROHA_AN7581）都不在，
+          # 说明读到的是别的/未 merge 的文件，本次结论不采信，只报警告。
+          KC=""
+          for c in $(find build_dir -maxdepth 5 -name '.config' -path '*linux-airoha_an7581*' 2>/dev/null); do
+            if grep -q '^CONFIG_ARCH_AIROHA=' "$c"; then KC="$c"; break; fi
+          done
           if [ -z "$KC" ]; then
-            KC=$(find build_dir -maxdepth 5 -name '.config' -path '*linux*' 2>/dev/null | head -n 1)
+            echo "::warning::没有找到 linux-airoha_an7581 的真实内核 .config，本次内核反查结论不采信"
+            echo "候选文件："
+            find build_dir -maxdepth 5 -name '.config' 2>/dev/null | head -n 20
+            KC=""
           fi
           echo ">>> 内核 .config: ${KC:-未找到}"
           {
