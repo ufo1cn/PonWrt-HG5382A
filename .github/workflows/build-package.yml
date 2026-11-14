@@ -440,6 +440,30 @@ jobs:
           export GO111MODULE=on
           set -o pipefail
           mkdir -p ../build_log
+          # 【内核树预置】两类硬伤都在这里根治：
+          #  1) 固件：CI 无 TTY，kbuild 遇到 Kconfig 新增符号会停在 "(NEW) [N/y/?]"，syncconfig 直接失败；
+          #  2) 独立包：kmod 型包依赖 build_dir 里的内核 .config，没有就先报 "No rule to make target '.../.config'"。
+          # 做法：先编工具链 → 跑 target/linux/prepare 落地内核源码与 .config → 用 olddefconfig 非交互
+          # 把 NEW 符号按 Kconfig 默认值补齐 → modules_prepare 生成 include/config 与模块构建前置。
+          LOGDIR="$PWD/../build_log"
+          mkdir -p "$LOGDIR"
+          make -j"$(nproc)" V=s toolchain/compile > "$LOGDIR/toolchain-prep.log" 2>&1 \
+            || { echo "::warning::toolchain/compile 有告警，尾部："; tail -n 20 "$LOGDIR/toolchain-prep.log"; }
+          if make -j1 V=s target/linux/prepare > "$LOGDIR/kernel-prepare.log" 2>&1; then
+            KD=$(ls -d build_dir/target-*/linux-*/linux-* 2>/dev/null | head -1)
+            if [ -n "$KD" ]; then
+              ( cd "$KD" && make ARCH=arm64 olddefconfig </dev/null > "$LOGDIR/kernel-olddefconfig.log" 2>&1 ) \
+                && echo ">>> 内核 olddefconfig 完成：$KD/.config（$(grep -c '^CONFIG_' "$KD/.config") 个显式符号）" \
+                || { echo "::warning::olddefconfig 失败，尾部："; tail -n 30 "$LOGDIR/kernel-olddefconfig.log"; }
+              ( cd "$KD" && make ARCH=arm64 modules_prepare </dev/null > "$LOGDIR/kernel-modules-prepare.log" 2>&1 ) \
+                || { echo "::warning::modules_prepare 失败，kmod 型包可能编不了"; tail -n 20 "$LOGDIR/kernel-modules-prepare.log"; }
+            else
+              echo "::warning::未找到内核源码目录，跳过 olddefconfig"
+            fi
+          else
+            echo "::warning::target/linux/prepare 失败，尾部："
+            tail -n 30 "$LOGDIR/kernel-prepare.log"
+          fi
           make WARN_RECURSIVE_DEP=1 package/compile -j"$(nproc)" V=s 2>&1 | tee ../build_log/full-build.log
           echo ">>> package/compile 执行结束"
 
