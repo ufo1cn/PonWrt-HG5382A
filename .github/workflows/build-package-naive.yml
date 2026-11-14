@@ -171,7 +171,22 @@ jobs:
           # 于是 `bash: .../host/bin/ninja: No such file or directory`（Error 127）。
           # 这里显式先编 host 版 ninja，再编 host 版 gn，最后才轮到 libcronet。
           mkdir -p logs
-          for d in ninja gn; do
+          # ninja 是 host 工具（tools/ninja），不在 feeds 里；
+          # gn 才是 feeds/packages/devel/gn 的 host 包。
+          if [ ! -d tools/ninja ]; then
+            echo "::error::tools/ninja 不存在，无法提供 host ninja"; exit 1
+          fi
+          set +e
+          make -j1 V=s tools/ninja/compile > logs/host-ninja.log 2>&1
+          rc=$?
+          set -e
+          if [ $rc -ne 0 ] || [ ! -x "staging_dir/host/bin/ninja" ]; then
+            echo "::error::host ninja 构建失败（rc=$rc），末尾 40 行："
+            tail -n 40 logs/host-ninja.log
+            exit 1
+          fi
+          echo ">>> host ninja 就绪：$(staging_dir/host/bin/ninja --version 2>/dev/null)"
+          for d in gn; do
             if [ -d "feeds/packages/devel/$d" ]; then
               set +e
               make -j1 V=s "package/feeds/packages/$d/host/compile" > "logs/host-$d.log" 2>&1
