@@ -1,0 +1,273 @@
+# ==============================================================================
+# PonWrt HG5585F-CT 独立包：NaiveProxy（sing-box naive 出站 + libcronet）
+# ------------------------------------------------------------------------------
+# 【为什么单独建这个文件】
+#   1) sing-box 的 naive 出站必须链接 libcronet（Chromium 的 Cronet 网络库），
+#      它要编 BoringSSL / protobuf / abseil 等一大串 Chromium 组件，
+#      编译极其脆弱。放进主独立包流程（build-package.yml）会一条链拖垮全部应用。
+#   2) 它只在"确实要用 naive 协议"时才需要，属于可选特性，单独出包最合适。
+#
+# 【本工作流只做两件事】
+#   1) 编 libcronet  —— 这是探路：它编不出来，naive 就无从谈起
+#   2) 编带 naive 的 sing-box —— 依赖上一步的 libcronet
+#   两步分开单独编译（各自 tee 日志 + 失败时打印末尾 60 行），
+#   这样失败点一目了然，不会被后面的包掩盖。
+#
+# 【与固件/主独立包的关系】
+#   - SOURCE_REF 与前两者完全一致（同一个 PonWrt 版本）
+#   - 只编用户态，不编任何 kmod，所以本文件不带 DRIVER_KCONFIGS 覆盖：
+#     产物是纯 ELF/Go 二进制，不涉及内核 vermagic
+#   - 内核依赖靠固件已内置的 kmod 提供（kmod-tun、kmod-netlink-diag 都在固件 =y 里）
+#
+# 【产物怎么用（重要，二选一）】
+#   带 naive 的 sing-box 与普通 sing-box 是同一个包名 `sing-box`，二者不能共存：
+#   - 想用 naive：先卸载已装的 sing-box，再装本产物的 sing-box + libcronet
+#   - 想回普通版：卸载本产物，装回主独立包流程产出的 sing-box
+#   libcronet 本身是独立包名，装/卸都不影响别人。
+#
+# 【体积前提】
+#   libcronet 体积在数十 MB 量级，安装前请先确认 overlay 剩余空间
+#   （光猫 rootfs 很小，空间不足会表现为 "no space left on device"，
+#     那不是版本不兼容，而是装不下）。
+# ==============================================================================
+name: 【独立包编译】PonWrt HG5585F-CT NaiveProxy（libcronet + sing-box naive）
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: ipk-naive-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build_naive:
+    name: 编译 libcronet 与 sing-box(naive)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
+      TAR_NAME: HG5585F-CT-naive-ipk.tar.zst
+      SHA_NAME: SHA256SUMS
+    steps:
+      - name: 签出工作流仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 清理磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/local/share/swift /usr/local/.ghcup \
+            /opt/hostedtoolcache
+          sudo docker system prune -af || true
+          sudo apt-get clean
+          sudo swapoff /swapfile || true
+          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          df -h
+
+      - name: 初始化编译环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
+            subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
+            libzstd-dev jq dos2unix upx-ucl
+
+      - name: 拉取 PonWrt 指定 commit
+        run: |
+          git init ponwrt
+          git -C ponwrt remote add origin https://github.com/pbs05/ponwrt.git
+          git -C ponwrt fetch --depth=1 -- origin "$SOURCE_REF"
+          git -C ponwrt checkout --detach FETCH_HEAD
+          echo ">>> PonWrt pinned: $SOURCE_REF"
+
+      - name: 配置 feeds
+        working-directory: ./ponwrt
+        run: |
+          if [ ! -f feeds.conf.default ]; then touch feeds.conf.default; fi
+          dos2unix feeds.conf.default 2>/dev/null || true
+          cat feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          echo ">>> feeds 全量更新安装完成"
+          ls -d feeds/packages/libs/libcronet feeds/packages/net/sing-box
+
+      - name: 生成基础配置，锁定HG5585F-CT机型
+        working-directory: ./ponwrt
+        run: |
+          rm -rf tmp
+          perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
+          make WARN_RECURSIVE_DEP=1 defconfig
+
+          sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
+          sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
+          sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
+          sed -i '/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
+
+          printf '# CONFIG_TARGET_ALL_PROFILES is not set\n' >> .config
+          printf '# CONFIG_TARGET_MULTI_PROFILE is not set\n' >> .config
+          printf 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y\n' >> .config
+          printf 'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y\n' >> .config
+
+          mkdir -p logs
+          set +e
+          make -j1 V=sc WARN_RECURSIVE_DEP=1 olddefconfig > logs/olddefconfig.log 2>&1
+          odrc=$?
+          set -e
+          if [ $odrc -ne 0 ]; then
+            echo "::error::olddefconfig 失败（rc=$odrc），真实日志末尾："
+            tail -n 40 logs/olddefconfig.log
+            exit $odrc
+          fi
+
+          sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
+          if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y$' .config; then
+            echo "::error::HG5585F-CT 机型锁定校验失败！"; exit 1
+          fi
+          echo ">>> 机型锁定 OK：fiberhome_hg5585f-ct"
+
+      - name: 打开 naive 相关符号（libcronet + sing-box naive 出站）
+        working-directory: ./ponwrt
+        run: |
+          set -e
+          printf 'CONFIG_BUILD_PATENTED=y\n' >> .config
+          printf 'CONFIG_PACKAGE_libcronet=y\n' >> .config
+          printf 'CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND=y\n' >> .config
+          printf 'CONFIG_PACKAGE_sing-box=y\n' >> .config
+
+          mkdir -p logs
+          set +e
+          make -j1 V=sc WARN_RECURSIVE_DEP=1 olddefconfig > logs/olddefconfig2.log 2>&1
+          odrc=$?
+          set -e
+          if [ $odrc -ne 0 ]; then
+            echo "::error::打开 naive 符号后 olddefconfig 失败（rc=$odrc）："
+            tail -n 40 logs/olddefconfig2.log
+            exit $odrc
+          fi
+
+          grep -E '^CONFIG_(PACKAGE_libcronet|SING_BOX_BUILD_NAIVE_OUTBOUND|PACKAGE_sing-box)=y$' .config || {
+            echo "::error::naive 相关符号未生效（可能被依赖条件静默丢弃）"; exit 1; }
+          echo ">>> naive 符号已生效"
+
+      - name: 编译 libcronet（探路，失败即停）
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p logs
+          set +e
+          make -j1 V=s package/feeds/packages/libcronet/compile > logs/libcronet.log 2>&1
+          rc=$?
+          set -e
+          if [ $rc -ne 0 ]; then
+            echo "::error::libcronet 编译失败（rc=$rc），末尾 60 行："
+            tail -n 60 logs/libcronet.log
+            exit $rc
+          fi
+          echo ">>> libcronet 编译成功"
+          find bin -name 'libcronet*.apk' -o -name 'libcronet*.ipk' | head -20
+          du -h bin/packages/*/*/libcronet*.apk 2>/dev/null || true
+
+      - name: 编译 sing-box（带 naive 出站）
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p logs
+          set +e
+          make -j1 V=s package/feeds/packages/sing-box/compile > logs/singbox.log 2>&1
+          rc=$?
+          set -e
+          if [ $rc -ne 0 ]; then
+            echo "::error::sing-box(naive) 编译失败（rc=$rc），末尾 60 行："
+            tail -n 60 logs/singbox.log
+            exit $rc
+          fi
+          echo ">>> sing-box(naive) 编译成功"
+          find bin -name 'sing-box*.apk' -o -name 'sing-box*.ipk' | head -20
+          du -h bin/packages/*/*/sing-box*.apk 2>/dev/null || true
+
+      - name: 收集产物
+        working-directory: ./ponwrt
+        run: |
+          set -e
+          rm -rf ../ipk_out
+          mkdir -p ../ipk_out
+          cp -f bin/packages/*/*/libcronet*.apk ../ipk_out/ 2>/dev/null || true
+          cp -f bin/packages/*/*/sing-box*.apk ../ipk_out/ 2>/dev/null || true
+          ls -lh ../ipk_out
+          [ -n "$(ls -A ../ipk_out)" ] || { echo "::error::没有任何产物"; exit 1; }
+
+      - name: 打包制品 & 生成校验和
+        run: |
+          mkdir -p release_out
+          cp -f ipk_out/* release_out/ 2>/dev/null || true
+          cd release_out
+          shopt -s nullglob
+          files=( *)
+          [ "${#files[@]}" -eq 0 ] && { echo "::error::无产物，终止发布"; exit 1; }
+          tar --zstd -cf ../${{ env.TAR_NAME }} "${files[@]}"
+          sha256sum ../${{ env.TAR_NAME }} > ../${{ env.SHA_NAME }}
+          ls -lh ../
+
+      - name: 上传产物 Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PonWrt-HG5585F-CT-naive-ipk
+          path: |
+            ./ipk_out/
+            ./${{ env.TAR_NAME }}
+            ./${{ env.SHA_NAME }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: naive-build-diagnostics
+          path: |
+            ponwrt/.config
+            ponwrt/logs/
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: 预发布 Release（仅成功时）
+        if: success()
+        uses: softprops/action-gh-release@v2.0.8
+        with:
+          tag_name: naive-${{ github.run_number }}-${{ github.run_attempt }}
+          name: PonWrt HG5585F-CT NaiveProxy 包 ${{ github.run_number }}
+          prerelease: true
+          make_latest: false
+          generate_release_notes: false
+          body: |
+            【可选包｜HG5585F-CT NaiveProxy】
+            基准源码 commit: `${{ env.SOURCE_REF }}`
+
+            用途：给 sing-box 增加 naive 协议出站（NaiveProxy，HTTP/2 CONNECT 伪装成 HTTPS）。
+
+            包含：
+            - libcronet（Chromium Cronet 网络库，naive 出站的硬依赖）
+            - sing-box（编译标签带 with_naive_outbound）
+
+            安装注意：
+            1. 本产物的 sing-box 与普通 sing-box 是同一个包名，二者只能装一个。
+            2. 先确认 overlay 剩余空间充足（libcronet 为数十 MB 量级），否则会 no space left。
+            3. 内核依赖由固件提供：kmod-tun、kmod-netlink-diag 已在固件内置。
+            4. 只有 naive 协议需要它；日常 VLESS/VMess/Trojan/Hysteria2/TUIC 等不需要。
+          files: |
+            ${{ env.TAR_NAME }}
+            ${{ env.SHA_NAME }}
+            ponwrt/.config
