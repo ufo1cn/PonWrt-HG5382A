@@ -60,6 +60,7 @@ jobs:
         CONFIG_CFG80211 CONFIG_MAC80211 CONFIG_SND CONFIG_SND_USB_AUDIO
         CONFIG_MEDIA_SUPPORT CONFIG_VIDEO_DEV CONFIG_USB_VIDEO_CLASS
         CONFIG_NETLINK_DIAG CONFIG_INET_DIAG CONFIG_TUN
+        CONFIG_NET_AIROHA CONFIG_NET_AIROHA_NPU CONFIG_DEBUG_FS CONFIG_COMMON_CLK CONFIG_DEVMEM
         CONFIG_WIREGUARD CONFIG_CIFS CONFIG_NFS_FS CONFIG_NFSD
         CONFIG_MACVLAN CONFIG_VETH CONFIG_NFT_NAT
     steps:
@@ -159,12 +160,18 @@ jobs:
         run: |
           rm -rf package/pon-local
           mkdir -p package/pon-local
-          for d in camlive go2rtc luci-app-go2rtc luci-app-blueaudio luci-app-btsp luci-app-camlive; do
+          # 动态遍历：pon_userspace 下新增任何包都会自动部署，
+          # 不要写死列表（写死列表一旦漏项，编译阶段会报
+          # "No rule to make target 'package/pon-local/xxx/compile'"）
+          for d in $(ls -1 ../pon_userspace 2>/dev/null); do
+            [ "$d" = "ser2net4" ] && continue
             if [ -d "../pon_userspace/$d" ]; then
               cp -a "../pon_userspace/$d" package/pon-local/
-              echo ">>> 复制 $d"
-            else
-              echo "::warning::../pon_userspace/$d 不存在，跳过"
+              if [ -f "package/pon-local/$d/Makefile" ]; then
+                echo ">>> 复制 $d（含 Makefile）"
+              else
+                echo "::warning::$d 已复制但缺少 Makefile"
+              fi
             fi
           done
           if [ -d "../pon_userspace/ser2net4" ]; then
@@ -182,8 +189,8 @@ jobs:
       - name: 预修改 luci-app-iptv Makefile
         working-directory: ./ponwrt
         run: |
-          if [ -f pon_userspace/luci-app-iptv/Makefile ]; then
-            MK="pon_userspace/luci-app-iptv/Makefile"
+          if [ -f package/pon-local/luci-app-iptv/Makefile ]; then
+            MK="package/pon-local/luci-app-iptv/Makefile"
             cp -f "$MK" "$MK.orig"
             sed -i 's/+kmod-iptv/kmod-iptv/g' "$MK"
             sed -i '/\/etc\/config\/iptv/d' "$MK"
