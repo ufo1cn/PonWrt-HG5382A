@@ -186,6 +186,19 @@ jobs:
             exit 1
           fi
           echo ">>> host ninja 就绪：$(staging_dir/host/bin/ninja --version 2>/dev/null)"
+          # meson：host 包 apk 在 configure 阶段要读 staging_dir/host/lib/meson/openwrt-native.txt.in，
+          # 该文件由 tools/meson 安装产生；不编 tools/meson 就报
+          # "bash: .../host/lib/meson/openwrt-native.txt.in: No such file or directory"。
+          set +e
+          make -j1 V=s tools/meson/compile > logs/host-meson.log 2>&1
+          rc=$?
+          set -e
+          if [ $rc -ne 0 ] || [ ! -f "staging_dir/host/lib/meson/openwrt-native.txt.in" ]; then
+            echo "::error::tools/meson 构建失败或交叉文件缺失（rc=$rc），末尾 40 行："
+            tail -n 40 logs/host-meson.log
+            exit 1
+          fi
+          echo ">>> host meson 交叉文件就绪"
           for d in gn; do
             if [ -d "feeds/packages/devel/$d" ]; then
               set +e
