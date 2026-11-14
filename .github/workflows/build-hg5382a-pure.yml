@@ -818,7 +818,6 @@ jobs:
           mkdir -p logs
           # 先补 host 侧基础工具，否则 libffi 的 host lua 会报 sed: No such file or directory
           make -j1 V=s tools/sed/compile tools/coreutils/compile tools/libdeflate/compile tools/libressl/compile || true
-          make package/libs/libffi/compile -j"$(nproc)" V=s || true
           # 【内核树预置】三类硬伤都在这里根治：
           #  1) 固件：CI 无 TTY，kbuild 遇到 Kconfig 新增符号会停在 "(NEW) [N/y/?]"，syncconfig 直接失败；
           #     而且 OpenWrt 每次构建都用 target 的 config-6.18 重新合成 .config，olddefconfig 的结果会被覆盖，
@@ -827,12 +826,42 @@ jobs:
           #  3) kmod 编译还要内核 generated/ 头文件（如 generated/rq-offsets.h），必须用交叉工具链跑 modules_prepare。
           LOGDIR="$PWD/logs"
           mkdir -p "$LOGDIR"
-          TC_BIN=$(ls -d "$PWD"/staging_dir/toolchain-*/bin 2>/dev/null | head -1)
           CROSS="aarch64-openwrt-linux-musl-"
-          [ -n "$TC_BIN" ] && export PATH="$TC_BIN:$PWD/staging_dir/host/bin:$PATH"
-          echo ">>> 交叉工具链：${TC_BIN:-未找到}"
-          make -j"$(nproc)" V=s toolchain/compile > "$LOGDIR/toolchain-prep.log" 2>&1 \
-            || { echo "::warning::toolchain/compile 有告警，尾部："; tail -n 20 "$LOGDIR/toolchain-prep.log"; }
+          # 【工具链顺序修正 + 自愈】实测坑（run 43630994624）：
+          #   缓存恢复出来的 staging_dir/toolchain-* 可能缺 lib/libgcc_s.so.*，
+          #   于是 package/libs/toolchain 打包 libgcc1 时 "cp: cannot stat .../libgcc_s.so.*" 直接失败，
+          #   连带 libffi 失败；而旧代码先算 TC_BIN 再编 toolchain，编完也不重算，
+          #   导致 olddefconfig 用了不存在的 aarch64-openwrt-linux-musl-gcc。
+          # 这里改成：先判完整度 → 不完整就重建 gcc final → 仍不完整全量重建 toolchain → 再算 TC_BIN 并硬校验。
+          toolchain_ok() {
+            t=$(ls -d "$PWD"/staging_dir/toolchain-*/bin 2>/dev/null | head -1)
+            [ -n "$t" ] && [ -x "$t/aarch64-openwrt-linux-musl-gcc" ] && ls "$PWD"/staging_dir/toolchain-*/lib/libgcc_s.so* >/dev/null 2>&1
+          }
+          if toolchain_ok; then
+            echo ">>> 交叉工具链已完整，跳过重建"
+          else
+            echo "::warning::交叉工具链不完整（缺 bin/gcc 或 libgcc_s），重建 gcc final"
+            rm -rf "$PWD"/build_dir/toolchain-*/gcc-*-final
+            rm -f "$PWD"/staging_dir/toolchain-*/stamp/.gcc_final_*
+            make -j"$(nproc)" V=s toolchain/gcc/final/compile > "$LOGDIR/toolchain-final.log" 2>&1 || true
+          fi
+          if ! toolchain_ok; then
+            echo "::warning::gcc final 重建后仍不完整，全量重建 toolchain"
+            tail -n 20 "$LOGDIR/toolchain-final.log" 2>/dev/null || true
+            rm -rf "$PWD"/build_dir/toolchain-* "$PWD"/staging_dir/toolchain-*
+            make -j"$(nproc)" V=s toolchain/compile > "$LOGDIR/toolchain-prep.log" 2>&1 || true
+          fi
+          TC_BIN=$(ls -d "$PWD"/staging_dir/toolchain-*/bin 2>/dev/null | head -1)
+          if [ -z "$TC_BIN" ] || ! toolchain_ok; then
+            echo "::error::交叉工具链不可用（缺 bin/gcc 或 libgcc_s），尾部："
+            tail -n 40 "$LOGDIR/toolchain-prep.log" 2>/dev/null || true
+            tail -n 40 "$LOGDIR/toolchain-final.log" 2>/dev/null || true
+            exit 1
+          fi
+          export PATH="$TC_BIN:$PWD/staging_dir/host/bin:$PATH"
+          echo ">>> 交叉工具链：$TC_BIN"
+          make package/libs/libffi/compile -j"$(nproc)" V=s > "$LOGDIR/libffi-prep.log" 2>&1 \
+            || { echo "::warning::package/libs/libffi 预编失败（不阻断，真实构建会再编），尾部："; tail -n 20 "$LOGDIR/libffi-prep.log"; }
           if make -j1 V=s target/linux/prepare > "$LOGDIR/kernel-prepare.log" 2>&1; then
             KD=$(ls -d build_dir/target-*/linux-*/linux-* 2>/dev/null | head -1)
             if [ -n "$KD" ]; then
