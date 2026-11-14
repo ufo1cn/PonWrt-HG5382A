@@ -114,13 +114,13 @@ jobs:
         working-directory: ./ponwrt
         run: |
           if [ ! -f feeds.conf.default ]; then touch feeds.conf.default; fi
-          sed -i '/nikki/d;/homeproxy/d;/openwrt-iptv/d;/emortal/d' feeds.conf.default
+          sed -i '/nikki/d;/homeproxy/d;/openwrt-iptv/d' feeds.conf.default
           [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
           echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
-          echo 'src-git iptv https://github.com/yeming/openwrt-iptv.git' >> feeds.conf.default
+          echo 'src-git iptv https://github.com/yveming/openwrt-iptv.git' >> feeds.conf.default
+          # 说明：曾经加过 emortal/OpenWrt-packages，该仓库 404 会让 feeds update 整个失败，已移除
           # homeproxy 的 LuCI 应用 + sing-box 相关包（缺了它 sing-box 系全没有）
           echo 'src-git homeproxy https://github.com/immortalwrt/homeproxy.git;master' >> feeds.conf.default
-          echo 'src-git emortal https://github.com/emortal/OpenWrt-packages.git;main' >> feeds.conf.default
           dos2unix feeds.conf.default 2>/dev/null || true
           cat feeds.conf.default
           ./scripts/feeds update -a
