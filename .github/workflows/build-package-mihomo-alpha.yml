@@ -244,7 +244,6 @@ jobs:
           CONFIG_PACKAGE_ca-bundle=y
           EOF
 
-          make WARN_RECURSIVE_DEP=1 defconfig
           sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
           if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y$'; then
             echo "::error::HG5585F-CT 机型锁定校验失败！"; exit 1
@@ -259,7 +258,6 @@ jobs:
           for k in $DRIVER_KCONFIGS; do
             printf 'CONFIG_KERNEL_%s=m\n' "${k#CONFIG_}" >> .config
           done
-          make WARN_RECURSIVE_DEP=1 defconfig
           echo ">>> 内核配置覆盖写入完成（共 $(echo $DRIVER_KCONFIGS | wc -w) 个符号）"
 
       - name: 批量设置目标包为 =m
@@ -359,7 +357,6 @@ jobs:
           for p in "${pkg_list[@]}"; do
             set_pkg_m "$p"
           done
-          make WARN_RECURSIVE_DEP=1 defconfig
           echo ">>> 所有包设为模块，依赖解析完成"
 
       - name: 下载源码包
