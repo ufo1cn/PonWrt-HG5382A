@@ -302,6 +302,29 @@ jobs:
         working-directory: ./ponwrt
         run: |
           mkdir -p logs
+          # 【内核树预置】sing-box 会连带拉 kmod 依赖（gpio-button-hotplug 等），
+          # 而 kmod 型包必须有 build_dir 里的内核 .config，否则报
+          #   No rule to make target '.../linux-airoha_an7581/linux-6.18.55/.config'
+          # 所以先把内核树落地：工具链 → prepare → olddefconfig(非交互) → modules_prepare。
+          LOGDIR="$PWD/logs"
+          mkdir -p "$LOGDIR"
+          make -j"$(nproc)" V=s toolchain/compile > "$LOGDIR/toolchain-prep.log" 2>&1 \
+            || { echo "::warning::toolchain/compile 有告警，尾部："; tail -n 20 "$LOGDIR/toolchain-prep.log"; }
+          if make -j1 V=s target/linux/prepare > "$LOGDIR/kernel-prepare.log" 2>&1; then
+            KD=$(ls -d build_dir/target-*/linux-*/linux-* 2>/dev/null | head -1)
+            if [ -n "$KD" ]; then
+              ( cd "$KD" && make ARCH=arm64 olddefconfig </dev/null > "$LOGDIR/kernel-olddefconfig.log" 2>&1 ) \
+                && echo ">>> 内核 olddefconfig 完成：$KD/.config" \
+                || { echo "::warning::olddefconfig 失败，尾部："; tail -n 30 "$LOGDIR/kernel-olddefconfig.log"; }
+              ( cd "$KD" && make ARCH=arm64 modules_prepare </dev/null > "$LOGDIR/kernel-modules-prepare.log" 2>&1 ) \
+                || echo "::warning::modules_prepare 失败，kmod 依赖可能编不了"
+            else
+              echo "::warning::未找到内核源码目录，跳过 olddefconfig"
+            fi
+          else
+            echo "::warning::target/linux/prepare 失败，尾部："
+            tail -n 30 "$LOGDIR/kernel-prepare.log"
+          fi
           set +e
           make -j1 V=s package/feeds/packages/sing-box/compile > logs/singbox.log 2>&1
           rc=$?
