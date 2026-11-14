@@ -860,6 +860,25 @@ jobs:
                   esac
                 done < "$KD/.config"
                 echo ">>> 内核配置固化：向 $CFG 追加 $added 个符号（原文件备份 $LOGDIR/config-6.18.orig）"
+                # 用真实构建步骤 syncconfig 反复校验：仍报 (NEW) 的符号显式关掉后再来一轮，直到通过
+                for pass in 1 2 3 4 5 6; do
+                  ( cd "$KD" && make ARCH=arm64 CROSS_COMPILE="$CROSS" syncconfig </dev/null > "$LOGDIR/kernel-syncconfig-$pass.log" 2>&1 )
+                  if [ $? -eq 0 ]; then
+                    echo ">>> 内核 syncconfig 通过（第 $pass 轮）"
+                    break
+                  fi
+                  syms=$(sed -n 's/.*(\([A-Za-z0-9_]*\)) \[[^]]*\] (NEW).*/\1/p' "$LOGDIR/kernel-syncconfig-$pass.log" | sort -u)
+                  if [ -z "$syms" ]; then
+                    echo "::warning::syncconfig 第 $pass 轮失败且未解析到 (NEW) 符号，尾部："
+                    tail -n 30 "$LOGDIR/kernel-syncconfig-$pass.log"
+                    break
+                  fi
+                  for s in $syms; do
+                    printf '# CONFIG_%s is not set\n' "$s" >> "$CFG"
+                    grep -qE "^(# )?CONFIG_${s}[= ]" "$KD/.config" || printf '# CONFIG_%s is not set\n' "$s" >> "$KD/.config"
+                    echo ">>> syncconfig 补符号：CONFIG_$s → not set"
+                  done
+                done
               else
                 echo "::warning::未找到 $CFG，跳过内核配置固化"
               fi
