@@ -1,0 +1,296 @@
+# ==============================================================================
+# PonWrt HG5585F-CT 独立包：NAS 应用套件
+# ------------------------------------------------------------------------------
+# 【定位】只出 apk，不进固件镜像，装哪个选哪个。
+#
+# 【为什么按"包目录"编译，而不是按 CONFIG_PACKAGE_xxx=y】
+#   1) 这套树里 samba4 / ksmbd-tools / tgt 等目录会产出多个子包
+#      （samba4-libs / samba4-server / ksmbd-server ...），
+#      写 CONFIG 符号时名字容易写错，写错的表现是"静默丢弃"。
+#   2) 直接 `make package/feeds/packages/<目录>/compile` 会让 make 自己解析
+#      该目录下所有包及其依赖，符号名不必猜；依赖包也会自动编。
+#   3) 每个目录单独编 + 单独日志，某个重型包（qbittorrent）挂掉
+#      不会影响其它包产出。
+#
+# 【文件系统这一层不在本文件里】
+#   btrfs / xfs / exfat / ntfs3 / f2fs / md / dm / loop / nbd / usb-storage
+#   已由固件内置（=y），本文件只出用户态工具（progs 类）。
+#
+# 【与固件的一致性】
+#   - SOURCE_REF 与固件、其它独立包工作流完全一致
+#   - 关键内核对齐符号（DRIVER_KCONFIGS）与固件同源，保证若顺带重编
+#     某个 kmod，其 vermagic 也一致
+#
+# 【已知不在本 feed 的包】
+#   mdadm（软 RAID 管理工具）在 immortalwrt/packages 里不存在，
+#   本文件不写它，避免"包不存在 → 整条流程第一步失败"。
+#   软 RAID 内核能力（md-raid0/1/10/456、dm-raid）固件里已有。
+# ==============================================================================
+name: 【独立包编译】PonWrt HG5585F-CT NAS 套件（SMB/NFS/DLNA/下载/磁盘工具）
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: ipk-nas-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build_nas:
+    name: 编译NAS相关独立包
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
+      TAR_NAME: HG5585F-CT-nas-ipk.tar.zst
+      SHA_NAME: SHA256SUMS
+      DRIVER_KCONFIGS: >-
+        CONFIG_USB_STORAGE CONFIG_USB_UAS CONFIG_USB_XHCI_HCD CONFIG_SCSI CONFIG_BLK_DEV_SD
+        CONFIG_EXT4_FS CONFIG_VFAT_FS CONFIG_EXFAT_FS CONFIG_NTFS3_FS CONFIG_BTRFS_FS
+        CONFIG_XFS_FS CONFIG_F2FS_FS CONFIG_MD CONFIG_BLK_DEV_DM CONFIG_BLK_DEV_LOOP
+        CONFIG_BLK_DEV_NBD CONFIG_CIFS CONFIG_NFS_FS CONFIG_NFSD CONFIG_EXPORTFS
+        CONFIG_NETFILTER CONFIG_NF_CONNTRACK CONFIG_INET_DIAG CONFIG_TUN
+    steps:
+      - name: 签出工作流仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 清理磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/local/share/swift /usr/local/.ghcup \
+            /opt/hostedtoolcache
+          sudo docker system prune -af || true
+          sudo apt-get clean
+          sudo swapoff /swapfile || true
+          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          df -h
+
+      - name: 初始化编译环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
+            subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
+            libzstd-dev jq dos2unix upx-ucl intltool
+
+      - name: 拉取 PonWrt 指定 commit
+        run: |
+          git init ponwrt
+          git -C ponwrt remote add origin https://github.com/pbs05/ponwrt.git
+          git -C ponwrt fetch --depth=1 -- origin "$SOURCE_REF"
+          git -C ponwrt checkout --detach FETCH_HEAD
+          echo ">>> PonWrt pinned: $SOURCE_REF"
+
+      - name: 配置 feeds
+        working-directory: ./ponwrt
+        run: |
+          if [ ! -f feeds.conf.default ]; then touch feeds.conf.default; fi
+          dos2unix feeds.conf.default 2>/dev/null || true
+          cat feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          echo ">>> feeds 全量更新安装完成"
+
+      - name: 生成基础配置，锁定HG5585F-CT机型
+        working-directory: ./ponwrt
+        run: |
+          rm -rf tmp
+          perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
+          make WARN_RECURSIVE_DEP=1 defconfig
+
+          sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
+          sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
+          sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
+          sed -i '/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
+
+          printf '# CONFIG_TARGET_ALL_PROFILES is not set\n' >> .config
+          printf '# CONFIG_TARGET_MULTI_PROFILE is not set\n' >> .config
+          printf 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y\n' >> .config
+          printf 'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y\n' >> .config
+          printf 'CONFIG_BUILD_PATENTED=y\n' >> .config
+
+          mkdir -p logs
+          set +e
+          make -j1 V=sc WARN_RECURSIVE_DEP=1 defconfig > logs/defconfig.log 2>&1
+          rc=$?
+          set -e
+          if [ $rc -ne 0 ]; then
+            echo "::error::defconfig 失败（rc=$rc），真实日志末尾："
+            tail -n 40 logs/defconfig.log
+            exit $rc
+          fi
+
+          sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
+          if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y$' .config; then
+            echo "::error::HG5585F-CT 机型锁定校验失败！"; exit 1
+          fi
+          echo ">>> 机型锁定 OK：fiberhome_hg5585f-ct"
+
+      - name: 编译 NAS 用户态包（逐个目录编译，单个失败不影响其它）
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p logs
+          : > logs/nas-build-summary.txt
+
+          PKG_DIRS=(
+            feeds/packages/net/samba4
+            feeds/packages/net/ksmbd-tools
+            feeds/packages/net/nfs-kernel-server
+            feeds/packages/net/wsdd2
+            feeds/packages/net/cifs-utils
+            feeds/packages/multimedia/minidlna
+            feeds/packages/net/transmission
+            feeds/packages/net/aria2
+            feeds/packages/net/qbittorrent
+            feeds/packages/net/tgt
+            feeds/packages/net/rsync
+            feeds/packages/utils/filebrowser
+            feeds/packages/utils/syncthing
+            feeds/packages/utils/dufs
+            feeds/packages/utils/smartmontools
+            feeds/packages/utils/hdparm
+            feeds/packages/utils/hd-idle
+            feeds/packages/utils/parted
+            feeds/packages/utils/cryptsetup
+            feeds/packages/utils/btrfs-progs
+            feeds/packages/utils/xfsprogs
+            feeds/packages/utils/exfatprogs
+            feeds/packages/utils/dosfstools
+            feeds/packages/utils/lm-sensors
+            feeds/luci/applications/luci-app-samba4
+            feeds/luci/applications/luci-app-ksmbd
+            feeds/luci/applications/luci-app-nfs
+            feeds/luci/applications/luci-app-minidlna
+            feeds/luci/applications/luci-app-transmission
+            feeds/luci/applications/luci-app-aria2
+            feeds/luci/applications/luci-app-filebrowser
+            feeds/luci/applications/luci-app-filebrowser-go
+            feeds/luci/applications/luci-app-hd-idle
+            feeds/luci/applications/luci-app-diskman
+            feeds/luci/applications/luci-app-qbittorrent
+            feeds/luci/applications/luci-app-syncthing
+          )
+
+          ok=0
+          bad=0
+          for d in "${PKG_DIRS[@]}"; do
+            if [ ! -d "$d" ]; then
+              echo "SKIP $d （目录不存在，已跳过）" | tee -a logs/nas-build-summary.txt
+              continue
+            fi
+            name=$(basename "$d")
+            set +e
+            make -j1 V=s "$d/compile" > "logs/pkg-$name.log" 2>&1
+            rc=$?
+            set -e
+            if [ $rc -eq 0 ]; then
+              echo "OK   $name" | tee -a logs/nas-build-summary.txt
+              ok=$((ok+1))
+            else
+              echo "FAIL $name（日志 logs/pkg-$name.log 末尾 20 行见下）" | tee -a logs/nas-build-summary.txt
+              tail -n 20 "logs/pkg-$name.log" | sed 's/^/     /' || true
+              bad=$((bad+1))
+            fi
+          done
+
+          echo ">>> 成功 $ok 个目录，失败 $bad 个目录"
+          if [ $ok -eq 0 ]; then
+            echo "::error::没有任何 NAS 包编译成功"; exit 1
+          fi
+          echo ">>> 失败清单（若不为空，属于相应包上游问题，已记录日志）"
+          grep '^FAIL' logs/nas-build-summary.txt || true
+
+      - name: 收集产物
+        working-directory: ./ponwrt
+        run: |
+          rm -rf ../ipk_out
+          mkdir -p ../ipk_out
+          shopt -s nullglob
+          for f in bin/packages/*/*/*.apk bin/packages/*/*/*.ipk; do
+            cp -f "$f" ../ipk_out/ 2>/dev/null || true
+          done
+          echo ">>> 收集到 $(ls -1 ../ipk_out 2>/dev/null | wc -l) 个包"
+          ls -lh ../ipk_out | head -80
+          [ -n "$(ls -A ../ipk_out)" ] || { echo "::error::没有任何产物"; exit 1; }
+
+      - name: 打包制品 & 生成校验和
+        run: |
+          mkdir -p release_out
+          cp -f ipk_out/* release_out/ 2>/dev/null || true
+          cd release_out
+          shopt -s nullglob
+          files=( *)
+          [ "${#files[@]}" -eq 0 ] && { echo "::error::无产物，终止发布"; exit 1; }
+          tar --zstd -cf ../${{ env.TAR_NAME }} "${files[@]}"
+          sha256sum ../${{ env.TAR_NAME }} > ../${{ env.SHA_NAME }}
+          ls -lh ../
+
+      - name: 上传产物 Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PonWrt-HG5585F-CT-nas-ipk
+          path: |
+            ./ipk_out/
+            ./${{ env.TAR_NAME }}
+            ./${{ env.SHA_NAME }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: 上传编译日志与逐包结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nas-build-diagnostics
+          path: |
+            ponwrt/logs/
+            ponwrt/.config
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: 预发布 Release（仅成功时）
+        if: success()
+        uses: softprops/action-gh-release@v2.0.8
+        with:
+          tag_name: nas-${{ github.run_number }}-${{ github.run_attempt }}
+          name: PonWrt HG5585F-CT NAS 套件 ${{ github.run_number }}
+          prerelease: true
+          make_latest: false
+          generate_release_notes: false
+          body: |
+            【可选包｜HG5585F-CT NAS 套件】
+            基准源码 commit: `${{ env.SOURCE_REF }}`
+            编译方式：按包目录逐个 `make <dir>/compile`，单个包失败不阻断其它包。
+
+            包含（按能力分组，装哪个选哪个）：
+            - 文件共享：samba4 + luci-app-samba4 / ksmbd-tools + luci-app-ksmbd（二者运行时二选一）
+            - 网络文件：nfs-kernel-server + luci-app-nfs、cifs-utils、wsdd2（Windows 局域网发现）
+            - 媒体：minidlna + luci-app-minidlna
+            - 下载：transmission（含 web 控制）、aria2（含 luci-app-aria2）、qbittorrent（重型，按需）
+            - 同步/网盘：syncthing + luci-app-syncthing、filebrowser / filebrowser-go + LuCI 前端
+            - 磁盘工具：parted、dosfstools、exfatprogs、btrfs-progs、xfsprogs、hdparm、hd-idle、smartmontools、lm-sensors、cryptsetup
+            - iSCSI target：tgt
+
+            注意：
+            1. 文件系统与 USB 存储的内核支持已内置在固件（=y），本包只是用户态工具。
+            2. mdadm 在该 feed 中不存在，故未编；md-raid0/1/10/456 内核能力固件里已有。
+            3. 逐包成功/失败清单见 artifact `nas-build-diagnostics` 内的 logs/nas-build-summary.txt。
+          files: |
+            ${{ env.TAR_NAME }}
+            ${{ env.SHA_NAME }}
+            ponwrt/.config
