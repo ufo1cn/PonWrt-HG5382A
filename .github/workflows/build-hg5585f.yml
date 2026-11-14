@@ -420,6 +420,10 @@ jobs:
           # ---------- 无线网卡（rtw88 全系 USB + rtl8xxxu + rtl8192cu）----------
           CONFIG_CFG80211=y
           CONFIG_MAC80211=y
+          CONFIG_NL80211_TESTMODE=y
+          CONFIG_CFG80211_DEBUGFS=y
+          CONFIG_MAC80211_MESH=y
+          CONFIG_MAC80211_DEBUGFS=y
           CONFIG_RTW88=y
           CONFIG_RTW88_USB=y
           CONFIG_RTW88_8822CU=y
