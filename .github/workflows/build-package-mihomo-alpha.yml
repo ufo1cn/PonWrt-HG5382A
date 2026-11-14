@@ -235,18 +235,25 @@ jobs:
           sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
           sed -i '/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
 
-          cat >> .config << 'EOF'
-          # CONFIG_TARGET_ALL_PROFILES is not set
-          # CONFIG_TARGET_MULTI_PROFILE is not set
-          CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y
-          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y
-          CONFIG_BUILD_PATENTED=y
-          CONFIG_PACKAGE_ca-bundle=y
-          EOF
+          # 用 printf 逐行写，不用 heredoc：heredoc 的内容在 YAML 块里带缩进，
+          # 一旦缩进没被正确剥离，写进 .config 的行就会带前导空格，
+          # `grep '^CONFIG_...'` 直接失配（固件工作流早前就因为这个踩过坑）。
+          printf '%s\n' \
+            '# CONFIG_TARGET_ALL_PROFILES is not set' \
+            '# CONFIG_TARGET_MULTI_PROFILE is not set' \
+            'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' \
+            'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' \
+            'CONFIG_BUILD_PATENTED=y' \
+            'CONFIG_PACKAGE_ca-bundle=y' >> .config
 
           sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
           if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y$'; then
-            echo "::error::HG5585F-CT 机型锁定校验失败！"; exit 1
+            echo "::error::HG5585F-CT 机型锁定校验失败（sp=$sp）"
+            echo "----- .config 中所有 DEVICE 相关行（cat -A 可见行尾/行首问题）-----"
+            grep -nE 'DEVICE' .config | cat -A | head -n 20 || true
+            echo "----- .config 末尾 12 行 -----"
+            tail -n 12 .config | cat -A
+            exit 1
           fi
           echo ">>> 机型配置校验OK"
 
