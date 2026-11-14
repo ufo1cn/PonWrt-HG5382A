@@ -136,6 +136,11 @@ jobs:
         CONFIG_RTW88_8821C CONFIG_RTW88_8821CU CONFIG_RTW88_8723D CONFIG_RTW88_8723DU
         CONFIG_RTL8XXXU CONFIG_RTL8192CU CONFIG_CFG80211 CONFIG_MAC80211
         CONFIG_NETLINK_DIAG CONFIG_USB_HID CONFIG_HID CONFIG_WIREGUARD
+        # ---- 无线：没有这三行，rtw88/rtl8xxxu 的 kmod 会被 kconfig 直接丢弃 ----
+        CONFIG_CFG80211 CONFIG_MAC80211
+        CONFIG_RTW88 CONFIG_RTW88_USB CONFIG_RTW88_8822CU CONFIG_RTW88_8821CU
+        CONFIG_RTW88_8723DU CONFIG_RTW88_8822CE CONFIG_RTW88_8821CE
+        CONFIG_RTL8XXXU CONFIG_RTL8192CU
         CONFIG_CIFS CONFIG_NFS_FS CONFIG_NFSD CONFIG_MACVLAN CONFIG_VETH
         CONFIG_BRIDGE CONFIG_BRIDGE_NF_EBTABLES CONFIG_NFT_NAT CONFIG_NF_NAT
       # 编译完成后用内核 .config 反查这些符号（bool 子选项也一起查）
@@ -316,12 +321,18 @@ jobs:
         run: |
           rm -rf package/pon-local
           mkdir -p package/pon-local
-          for d in camlive go2rtc luci-app-go2rtc luci-app-blueaudio luci-app-btsp luci-app-camlive; do
+          # 动态遍历：仓库 pon_userspace 下新增任何一个包目录都会自动部署，
+          # 不再维护写死的列表（写死列表一旦漏项，编译阶段就报
+          # "No rule to make target 'package/pon-local/xxx/compile'"）
+          for d in $(ls -1 ../pon_userspace 2>/dev/null); do
+            [ "$d" = "ser2net4" ] && continue
             if [ -d "../pon_userspace/$d" ]; then
               cp -a "../pon_userspace/$d" package/pon-local/
-              echo ">>> 复制 $d"
-            else
-              echo "::warning::../pon_userspace/$d 不存在，跳过"
+              if [ -f "package/pon-local/$d/Makefile" ]; then
+                echo ">>> 复制 $d（含 Makefile）"
+              else
+                echo "::warning::$d 已复制但缺少 Makefile，编译时会报 No rule"
+              fi
             fi
           done
           if [ -d "../pon_userspace/ser2net4" ]; then
