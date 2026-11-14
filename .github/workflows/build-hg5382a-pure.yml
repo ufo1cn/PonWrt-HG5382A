@@ -1,0 +1,1132 @@
+# ==============================================================================
+# PonWrt HG5382A（光猫 FiberHome HG5382A 电信版 / CT）纯净固件编译工作流
+# ------------------------------------------------------------------------------
+# 【这一条工作流只干一件事】产出可以刷机的 HG5382A 纯净固件（itb），
+# 并且把"底层支持"一次开足，让后期单独编出来的应用包装上就能用。
+#
+# 一、与其它工作流的分工（改动前务必先看这里）
+#   1) 本文件 build-hg5382a-pure.yml（HG5382A 纯净版）
+#      - 责任：PonWrt 源码 + 机型锁定 + 内核/驱动（kmod）+ 必要底层库 → 出固件
+#      - 原则：应用层软件（代理、LuCI 前端、摄像头发布等）**一律不进镜像**
+#      - 与旧 PonWrt1.yml 的关系：PonWrt1.yml 是 HG5382A 的**集成版基线，禁止修改**；
+#        本文件是它的"纯净版"姊妹流程，只保留底层，应用层改由独立工作流出包。
+#   2) .github/workflows/build-hg5585f.yml（HG5585F 纯净版，同一套思路）
+#   3) .github/workflows/build-package.yml（应用层独立包，刷完机按需安装）
+#
+# 二、为什么镜像里要"预先打开尽可能多的底层支持"
+#   ---- 这是本项目最容易返工的地方，写清楚原因：
+#   1) 内核模块（kmod）必须与固件内核严格配套：同样的内核版本、同样的内核配置、
+#      同样的 vermagic。后期在别的工作流里单独编出来的 kmod，装到另一份内核上
+#      很可能"装得上但加载失败"。所以 kmod 必须跟着固件一起编、一起进镜像。
+#   2) 用户态软件（sing-box / mihomo / ffmpeg / go2rtc / LuCI 前端 …）不挑内核，
+#      它们只挑"内核有没有对应的内核设施"。例如 sing-box 需要 NETLINK_DIAG、
+#      nikki 需要 DUMMY 网卡、摄像头需要 UVC/V4L2、语音需要 SND_USB_AUDIO。
+#      只要这些设施在固件里预先是打开的，后期单编的 apk 装上就能用。
+#   3) 反过来，如果固件里没开，后期单编的 apk 就会出现"装上去了但功能不工作"，
+#      而且几乎查不到原因（kmod 自己没法在运行时再要内核支持）。
+#   => 结论：kmod 与内核符号尽量在固件里一次开足；
+#      用户态软件则全部走独立工作流后期编，固件不背它们的编译风险。
+#
+# 三、内核"真打开"的做法（踩过的坑，别改回去）
+#   往 .config 里写 CONFIG_KERNEL_xxx=y 是**不可靠**的：只有当某个被选中的 kmod
+#   包引用该 KCONFIG 时，这个符号才会在 .config 里生成；没人引用的符号会被
+#   kconfig 直接丢弃，内核根本没打开，后期装包就会"装上但不工作"。
+#   所以本流程把底层驱动符号直接写进 target 的内核配置文件：
+#       target/linux/airoha/an7581/config-6.18
+#   这个文件是字面内核配置，build 时直接 merge 进内核 .config，一定生效。
+#
+# 四、三道校验（缺一不可，全部为"失败就报错"，不允许静默通过）
+#   step 预检   配置预检：逐个核对 .config 里的符号是否真的生效（=y），
+#               并反向校验应用层包**没有**混进镜像
+#   step 反查   内核反查：锁定 build_dir/target-*/linux-airoha_an7581/linux-6.18.55/.config，
+#               先用基线符号（CONFIG_ARCH_AIROHA）自证"文件选对了"，再逐个核对驱动符号，
+#               最后列出实际产出的 .ko。注意：以前这里随便 find 一个 .config，
+#               结果和源码默认配置自相矛盾，差点误判"驱动没开"。
+#   step 产物   产物核对：确认 hg5382a 的 itb 真的生成，列出附加包 apk 是否产出
+#
+# 五、已知的"静默丢弃"陷阱（编译不报错，但包直接消失）
+#   - libx264：包依赖是 @BUILD_PATENTED，不开全局 CONFIG_BUILD_PATENTED 时
+#     连 kconfig 符号都不生成
+#   - kmod-sound-core / kmod-usb-audio：硬依赖 audio-support（默认关闭）与
+#     kmod-input-core，没打开时包与符号一起消失，.config 里连 "is not set" 都不留
+#   - luci-compat：Lua 风格的 LuCI 应用缺它菜单不显示，但编译完全不报错
+#   - kmod-usb-net：包选中但内核 CONFIG_USB_USNBNET 未开时，打包阶段才报
+#     "usbnet.ko is missing"
+# ==============================================================================
+name: 编译 PonWrt HG5382A 电信版纯净固件（仅底层｜内核驱动全开）
+on:
+  # 5382A 在 ponwrt 里只有 fiberhome_hg5382a 一个机型，没有 ct / cu / usb-sfp 变体，
+  # 所以这里不需要机型输入，直接手动触发即可。
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: build-hg5382a-pure-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-firmware:
+    name: 编译 HG5382A 纯净固件（仅底层｜内核驱动全开）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    # 注意：下面 env 里的多行值（>- 折叠块）中**不能写 # 注释**——
+    # YAML 会把 # 和后面的文字当成字面 token，进而被写成
+    # CONFIG_PACKAGE_#=y 这种非法行，.config 直接报 missing separator。
+    # 要写说明请写在块外面的注释里。
+    env:
+      SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
+      # 5382A 只有单一机型，机型符号固定为 fiberhome_hg5382a（没有 -ct 后缀）
+      # 固件镜像内置的 USB / 存储支持（与 image/an7581.mk 的 DEVICE_PACKAGES 保持一致）
+      USB_CORE_PKGS: >-
+        kmod-usb3 kmod-usb-storage kmod-usb-storage-uas kmod-usb-storage-extras
+        kmod-fs-ext4 kmod-fs-vfat kmod-fs-exfat kmod-fs-ntfs3 block-mount
+      # 镜像内置的 USB 串口/网卡/蓝牙/无线网卡驱动（=y，开机即可用）
+      # 名字全部来自 base 仓库：
+      #   package/kernel/linux/modules/{usb,bluetooth,video}.mk
+      #   package/kernel/mac80211/realtek.mk  （rtw88 / rtl8xxxu 就在这里！）
+      DRIVER_PKGS: >-
+        audio-support kmod-input-core
+        kmod-usb-serial kmod-usb-serial-ch341 kmod-usb-serial-cp210x
+        kmod-usb-serial-ftdi kmod-usb-serial-pl2303 kmod-usb-acm
+        kmod-usb-net kmod-usb-net-cdc-ether kmod-usb-net-cdc-ncm
+        kmod-usb-net-rtl8152 kmod-usb-net-asix-ax88179
+        kmod-bluetooth kmod-btusb kmod-btbcm kmod-btmtk kmod-hci-uart
+        kmod-rtw88 kmod-rtw88-usb kmod-rtw88-8822cu kmod-rtw88-8821cu
+        kmod-rtw88-8723du kmod-rtl8xxxu kmod-rtl8192cu
+        kmod-video-core kmod-video-videobuf2 kmod-video-uvc
+        kmod-sound-core kmod-usb-audio
+        kmod-netlink-diag
+        kmod-usb-hid
+        kmod-wireguard
+        kmod-fs-nfs kmod-fs-nfs-common kmod-fs-nfs-v4 kmod-fs-nfsd
+        kmod-fs-cifs
+        kmod-macvlan kmod-veth
+        kmod-br-netfilter
+        kmod-nft-nat kmod-nf-nat
+      # 无线网卡 / 蓝牙所需固件（package/firmware/linux-firmware/realtek.mk）
+      DRIVER_FW_PKGS: >-
+        rtl8822ce-firmware rtl8821ce-firmware rtl8723bu-firmware rtl8723de-firmware
+      # 蓝牙用户态栈（feed: immortalwrt/packages utils/bluez）
+      # 注意：bluez 仓库里**没有**名为 bluez 的包，只有 bluez-libs / bluez-utils /
+      # bluez-utils-btmon / bluez-utils-extra / bluez-daemon，所以不能写 CONFIG_PACKAGE_bluez。
+      BT_USER_PKGS: >-
+        bluez-libs bluez-utils bluez-utils-btmon bluez-utils-extra bluez-daemon
+      # 上述驱动所依赖的内核 Kconfig（只列会产出 .ko 的模块符号，强制 =m；
+      # bool 型子选项（BT_BREDR/BT_HCIBTUSB_RTL 等）由 kmod 包自带的 KCONFIG 负责，
+      # 不在这里强改写，避免把 bool 塞成 m）。历史上 usbnet.ko 缺失就是
+      # "包选中了但内核符号没打开"造成的，编译后还会用内核 .config 反查核验。
+      DRIVER_KCONFIGS: >-
+        CONFIG_USB_USBNET CONFIG_USB_SERIAL CONFIG_USB_SERIAL_CH341 CONFIG_USB_SERIAL_CP210X CONFIG_USB_SERIAL_FTDI_SIO
+        CONFIG_USB_SERIAL_PL2303 CONFIG_USB_ACM CONFIG_USB_WDM CONFIG_BT CONFIG_BT_HCIBTUSB
+        CONFIG_BT_HCIUART CONFIG_RTW88 CONFIG_RTW88_USB CONFIG_RTW88_8822C CONFIG_RTW88_8822CU
+        CONFIG_RTW88_8821C CONFIG_RTW88_8821CU CONFIG_RTW88_8723D CONFIG_RTW88_8723DU CONFIG_RTL8XXXU
+        CONFIG_RTL8192CU CONFIG_CFG80211 CONFIG_MAC80211 CONFIG_NETLINK_DIAG CONFIG_USB_HID
+        CONFIG_HID CONFIG_WIREGUARD CONFIG_CFG80211 CONFIG_MAC80211 CONFIG_RTW88
+        CONFIG_RTW88_USB CONFIG_RTW88_8822CU CONFIG_RTW88_8821CU CONFIG_RTW88_8723DU CONFIG_RTW88_8822CE
+        CONFIG_RTW88_8821CE CONFIG_RTL8XXXU CONFIG_RTL8192CU CONFIG_NET_AIROHA CONFIG_NET_AIROHA_NPU
+        CONFIG_DEBUG_FS CONFIG_COMMON_CLK CONFIG_DEVMEM CONFIG_CIFS CONFIG_NFS_FS
+        CONFIG_NFSD CONFIG_MACVLAN CONFIG_VETH CONFIG_BRIDGE CONFIG_BRIDGE_NF_EBTABLES
+        CONFIG_NFT_NAT CONFIG_NF_NAT CONFIG_USB_STORAGE CONFIG_USB_UAS CONFIG_USB_XHCI_HCD
+        CONFIG_SND CONFIG_SND_USB_AUDIO CONFIG_MEDIA_SUPPORT CONFIG_VIDEO_DEV CONFIG_USB_VIDEO_CLASS
+        CONFIG_INET_DIAG CONFIG_TUN
+      # 编译完成后用内核 .config 反查这些符号（bool 子选项也一起查）
+      DRIVER_KCONFIG_CHECK: >-
+        CONFIG_ARCH_AIROHA CONFIG_PCS_AIROHA_AN7581 CONFIG_USB_USBNET CONFIG_USB_SERIAL_CH341 CONFIG_BT CONFIG_BT_HCIBTUSB
+        CONFIG_BT_HCIBTUSB_RTL CONFIG_BT_HCIUART CONFIG_BT_BREDR CONFIG_BT_LE
+        CONFIG_RTW88 CONFIG_RTW88_USB CONFIG_RTW88_8822CU CONFIG_RTW88_8821CU
+        CONFIG_RTW88_8723DU CONFIG_RTL8XXXU CONFIG_CFG80211 CONFIG_MAC80211
+        CONFIG_SND CONFIG_SND_PCM CONFIG_SND_USB_AUDIO
+        CONFIG_USB_XHCI_HCD CONFIG_USB_STORAGE CONFIG_USB_UAS CONFIG_USB_SERIAL
+        CONFIG_USB_ACM CONFIG_USB_NET_CDCETHER CONFIG_USB_NET_CDC_NCM
+        CONFIG_USB_NET_RTL8152 CONFIG_USB_NET_AX88179_178A
+        CONFIG_EXT4_FS CONFIG_VFAT_FS CONFIG_EXFAT_FS CONFIG_NTFS3_FS
+        CONFIG_MEDIA_SUPPORT CONFIG_VIDEO_DEV CONFIG_USB_VIDEO_CLASS
+        CONFIG_RTW88 CONFIG_RTW88_USB CONFIG_INET_DIAG CONFIG_NETLINK_DIAG CONFIG_TUN
+        CONFIG_USB_HID CONFIG_HID CONFIG_WIREGUARD CONFIG_CIFS
+        CONFIG_NFS_FS CONFIG_NFSD CONFIG_MACVLAN CONFIG_VETH
+        CONFIG_BRIDGE_NF_EBTABLES CONFIG_NFT_NAT
+        CONFIG_NET_AIROHA CONFIG_NET_AIROHA_NPU CONFIG_DEBUG_FS CONFIG_DEVMEM
+      # 以 =m 单独出包的附加内核模块（全部来自 package/kernel/linux/modules）
+      EXTRA_KMODS: >-
+        kmod-usb-serial kmod-usb-serial-ch341 kmod-usb-serial-cp210x
+        kmod-usb-serial-ftdi kmod-usb-serial-pl2303 kmod-usb-acm kmod-usb-hid
+        kmod-usb-net kmod-usb-net-cdc-ether kmod-usb-net-cdc-ncm
+        kmod-usb-net-rtl8152 kmod-usb-net-asix-ax88179
+        kmod-video-core kmod-video-videobuf2 kmod-video-uvc kmod-usbip-client
+      # 固件编完之后，用同一棵树的内核/应用源码再补编的独立包（只出 apk，不进镜像）
+      # 目录会自动在 package/ 、package/pon-local/ 、package/feeds/*/ 下解析，
+      # 所以以后想补编任何软件，只需在这里加名字，不用改下面的步骤逻辑。
+      EXTRA_APK_PKGS: ""
+    steps:
+      - name: 签出工作流仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 清理磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/share/swift /usr/local/.ghcup \
+            /opt/hostedtoolcache
+          sudo docker system prune -af || true
+          sudo apt-get clean
+          sudo swapoff /swapfile || true
+          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          df -h
+
+      - name: 初始化编译环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
+            subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
+            libzstd-dev jq dos2unix upx-ucl
+
+      - name: 拉取 PonWrt 指定 commit
+        run: |
+          git init ponwrt
+          git -C ponwrt remote add origin https://github.com/pbs05/ponwrt.git
+          git -C ponwrt fetch --depth=1 -- origin "$SOURCE_REF"
+          git -C ponwrt checkout --detach FETCH_HEAD
+          echo ">>> PonWrt pinned: $SOURCE_REF"
+
+      - name: 加入外挂来源（nikki + homeproxy + iptv，与 PonWrt1 一致）
+        working-directory: ./ponwrt
+        run: |
+          if [ ! -f feeds.conf.default ]; then touch feeds.conf.default; fi
+          sed -i '/nikki/d;/homeproxy/d;/openwrt-iptv/d;/airoha-npu/d' feeds.conf.default
+          [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
+          echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
+          # homeproxy feed = sing-box + luci-app-homeproxy + libcronet 的来源，
+          # 缺了它 sing-box 根本不存在（HG5382A 之所以能编 sing-box 就靠这一行）
+          echo 'src-git homeproxy https://github.com/immortalwrt/homeproxy.git;master' >> feeds.conf.default
+          echo 'src-git iptv https://github.com/yveming/openwrt-iptv.git' >> feeds.conf.default
+          dos2unix feeds.conf.default 2>/dev/null || true
+          tail -n 10 feeds.conf.default
+
+      - name: 缓存 dl
+        uses: actions/cache@v4
+        with:
+          path: ponwrt/dl
+          key: ponwrt-dl-an7581-${{ hashFiles('ponwrt/feeds.conf.default', 'ponwrt/configs/*.config') }}
+          restore-keys: |
+            ponwrt-dl-an7581-
+            ponwrt-dl-
+
+      - name: 缓存 toolchain + host
+        uses: actions/cache@v4
+        with:
+          path: |
+            ponwrt/staging_dir/toolchain-*
+            ponwrt/staging_dir/host
+          key: hg5382a-toolchain-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config') }}
+          restore-keys: |
+            hg5382a-toolchain-
+
+      - name: 恢复 staging 缓存
+        uses: actions/cache/restore@v4
+        with:
+          path: ponwrt/staging_dir/target-aarch64_cortex-a53_musl
+          key: hg5382a-stage-${{ github.run_id }}
+          restore-keys: |
+            hg5382a-stage-
+
+      - name: 缓存慢包构建目录
+        uses: actions/cache@v4
+        with:
+          path: |
+            ponwrt/build_dir/hostpkg/golang-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/python3-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/golang-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/sing-box-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/libcronet-*
+            ponwrt/build_dir/target-aarch64_cortex-a53_musl/openssl-*
+          key: hg5382a-slow-${{ hashFiles('ponwrt/configs/an7581.config', 'ponwrt/configs/release.config', 'ponwrt/feeds.conf.default') }}
+          restore-keys: |
+            hg5382a-slow-
+
+      - name: 注入 libffi 包（在 feeds install 之前）
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p package/libs/libffi
+          curl -fsSL -o package/libs/libffi/Makefile \
+            https://raw.githubusercontent.com/openwrt/openwrt/master/package/libs/libffi/Makefile
+          grep -q 'PKG_NAME:=libffi' package/libs/libffi/Makefile && echo ">>> libffi 注入成功" || exit 1
+
+      - name: 更新 Feeds 并安装（与 PonWrt1 一致：feeds install -a）
+        working-directory: ./ponwrt
+        run: |
+          set +e
+          ./scripts/feeds update -a
+          if [ -d feeds/nikki ]; then
+            find feeds/nikki -name Makefile -exec sed -i -E 's/[[:space:]]*\+yq\b//g' {} + || true
+          fi
+
+          # 关键：HG5382A 那套能编出 sing-box / mihomo / omcproxy / bluez /
+          # luci-app-homeproxy，靠的就是全量 feeds install。hg5382a 以前只做
+          # "最小化 install"，导致大量包在 package/ 里根本没有目录，
+          # 于是 make 报 "No rule to make target" / 包符号被丢弃。
+          ./scripts/feeds install -a
+
+          echo ">>> feeds install 完成，关键包是否就位："
+          for d in usbutils bluez sing-box luci-app-homeproxy omcproxy \
+                   luci-app-omcproxy luci-app-iptv mihomo nikki libcronet \
+                   bluez-alsa; do
+            if [ -z "$(find package/feeds -maxdepth 2 -name "$d" -type d 2>/dev/null)" ]; then
+              echo "::warning::feed 中未找到 $d（该包在本树不可用）"
+            else
+              echo "OK: $d"
+            fi
+          done
+
+      - name: 将 luci-app-airoha-npu 克隆到 package 目录
+        working-directory: ./ponwrt
+        run: |
+          rm -rf package/luci-app-airoha-npu
+          git clone --depth=1 https://github.com/rchen14b/luci-app-airoha-npu.git package/luci-app-airoha-npu
+          if [ -f package/luci-app-airoha-npu/.gitmodules ]; then
+            git -C package/luci-app-airoha-npu submodule update --init --recursive --depth=1
+          fi
+          rm -rf package/luci-app-airoha-npu/.git package/luci-app-airoha-npu/.github package/luci-app-airoha-npu/screenshots
+          grep -m1 'LUCI_TITLE' package/luci-app-airoha-npu/Makefile || echo "::warning::未找到 LUCI_TITLE"
+
+      - name: 部署仓库自带的本地 luci 包到 package/pon-local
+        working-directory: ./ponwrt
+        run: |
+          rm -rf package/pon-local
+          mkdir -p package/pon-local
+          # 动态遍历：仓库 pon_userspace 下新增任何一个包目录都会自动部署，
+          # 不再维护写死的列表（写死列表一旦漏项，编译阶段就报
+          # "No rule to make target 'package/pon-local/xxx/compile'"）
+          for d in $(ls -1 ../pon_userspace 2>/dev/null); do
+            [ "$d" = "ser2net4" ] && continue
+            if [ -d "../pon_userspace/$d" ]; then
+              cp -a "../pon_userspace/$d" package/pon-local/
+              if [ -f "package/pon-local/$d/Makefile" ]; then
+                echo ">>> 复制 $d（含 Makefile）"
+              else
+                echo "::warning::$d 已复制但缺少 Makefile，编译时会报 No rule"
+              fi
+            fi
+          done
+          if [ -d "../pon_userspace/ser2net4" ]; then
+            for d in gensio ser2net luci-app-ser2net; do
+              [ -d "../pon_userspace/ser2net4/$d" ] && cp -a "../pon_userspace/ser2net4/$d" package/pon-local/ && echo ">>> 复制 $d"
+            done
+          fi
+          ls -1 package/pon-local || true
+
+          # 修 luci-app-ser2net 的 include 路径：它写的是 $(TOPDIR)/luci.mk，
+          # 而这个文件只在 luci 仓库根目录存在；在 OpenWrt 树里必须用
+          # $(TOPDIR)/feeds/luci/luci.mk，否则要么报不存在、要么包定义重复。
+          MK=package/pon-local/luci-app-ser2net/Makefile
+          if [ -f "$MK" ]; then
+            sed -i 's|include $(TOPDIR)/luci.mk|include $(TOPDIR)/feeds/luci/luci.mk|' "$MK"
+            sed -i '/\$(eval \$(call BuildPackage,luci-app-ser2net))/d' "$MK"
+            echo ">>> luci-app-ser2net Makefile 已修正 include 路径："
+            grep -n 'luci.mk' "$MK" || true
+          fi
+
+          # luci-app-btsp 依赖写的是 +bluez，但 bluez 仓库里没有 bluez 这个包
+          # （只有 bluez-daemon / bluez-utils / bluez-libs），必须改成 bluez-daemon
+          MK=package/pon-local/luci-app-btsp/Makefile
+          if [ -f "$MK" ]; then
+            sed -i 's|+bluez\b|+bluez-daemon|g' "$MK"
+            echo ">>> luci-app-btsp 依赖已修正："; grep -n 'LUCI_DEPENDS' "$MK" || true
+          fi
+
+          # luci-app-blueaudio 依赖 bluez-alsa，但本树任何 feed 都没有 bluez-alsa
+          # （bluez-alsa 属于独立项目，不在 immortalwrt/openwrt 的 packages 中），
+          # 先摘掉这个依赖让包本身能编出来；运行时如需 A2DP 请自行安装 bluez-alsa。
+          MK=package/pon-local/luci-app-blueaudio/Makefile
+          if [ -f "$MK" ]; then
+            sed -i 's|+bluez-alsa||g' "$MK"
+            echo ">>> luci-app-blueaudio 依赖已修正（bluez-alsa 在本树不存在）："; grep -n 'LUCI_DEPENDS' "$MK" || true
+          fi
+
+      - name: 预修改 luci-app-iptv Makefile（独立包阶段再编译）
+        working-directory: ./ponwrt
+        run: |
+          MK=""
+          for cand in package/feeds/*/luci-app-iptv/Makefile feeds/*/luci-app-iptv/Makefile; do
+            [ -f "$cand" ] && MK="$cand" && break
+          done
+          if [ -n "$MK" ]; then
+            cp -f "$MK" "$MK.orig"
+            sed -i 's/+kmod-iptv/kmod-iptv/g' "$MK"
+            sed -i '/\/etc\/config\/iptv/d' "$MK"
+            sed -i '/\/etc\/init\.d\/iptv/d' "$MK"
+            echo ">>> luci-app-iptv Makefile 已预修改：$MK"
+          else
+            echo "::warning::未找到 luci-app-iptv 的 Makefile（feed 中可能不存在）"
+          fi
+
+      - name: 应用 GPON feed 补丁
+        env:
+          PONWRT_DIR: ponwrt
+          FEED_PATCHES_STRICT: '1'
+        run: bash scripts/apply-feed-patches.sh
+
+      - name: 校验 GPON 补丁已生效
+        working-directory: ./ponwrt
+        run: |
+          set -e
+          test -f feeds/pon_drivers/airoha-xpon/src/airoha-xpon-gpon.c
+          grep -q 'AIROHA_PON_FRONTEND_MODE_GPON' feeds/pon_drivers/airoha-pon-frontends/src/airoha-paged-bosa-ux3363.c
+          grep -q "o.value('gpon'" feeds/pon_userspace/luci-app-pon/htdocs/luci-static/resources/view/pon/config.js
+          echo "OK: GPON patches are present."
+
+      - name: 强制打开底层驱动内核符号（直接写进 target 内核配置，绕开 CONFIG_KERNEL_* 不生成的问题）
+        working-directory: ./ponwrt
+        run: |
+          # 【为什么必须这么干】
+          # 先前用的是往 .config 里加 CONFIG_KERNEL_RTW88=m 这类写法，但实测产物 diagnostics 里
+          # logs/kernel-config-check.txt 显示 CONFIG_RTW88 / RTL8XXXU / USB_SERIAL_CH341 /
+          # SND_USB_AUDIO / USB_UAS / EXFAT_FS / NTFS3_FS / WIREGUARD / CIFS / NFSD /
+          # NETLINK_DIAG / BRIDGE_NF_EBTABLES / NFT_NAT / BT_LE / NET_AIROHA 全部“（未出现）”。
+          # 原因是 CONFIG_KERNEL_xxx 这类符号只有在某个“被选中的 kmod 包”引用它时才会在 .config 里
+          # 出现；没人引用的符号会被 kconfig 直接丢弃，于是内核根本没打开这些驱动（.ko 自然不存在）。
+          # 唯一确定生效的入口是 target 的内核配置文件：build 时它会被 merge 进内核 .config。
+          # 这里同时统一改成 =y（编进内核镜像里，而不是 =m 生成 .ko 却没人打包），
+          # 这样后期单独编出来的应用包只要用驱动就能直接工作，不必再回来重编固件。
+          KCFG=target/linux/airoha/an7581/config-6.18
+          if [ ! -f "$KCFG" ]; then
+            echo "::error::找不到 $KCFG，无法注入底层驱动符号"
+            exit 1
+          fi
+          cp -f "$KCFG" /tmp/config-6.18.orig
+          cat > /tmp/pon_extra_kconfig.txt << 'KEOF'
+          # ---------- 无线网卡（rtw88 全系 USB + rtl8xxxu + rtl8192cu）----------
+          CONFIG_CFG80211=y
+          CONFIG_MAC80211=y
+          CONFIG_RTW88=y
+          CONFIG_RTW88_USB=y
+          CONFIG_RTW88_8822CU=y
+          CONFIG_RTW88_8821CU=y
+          CONFIG_RTW88_8723DU=y
+          CONFIG_RTW88_8822CE=y
+          CONFIG_RTW88_8821CE=y
+          CONFIG_RTL8XXXU=y
+          CONFIG_RTL8192CU=y
+          CONFIG_BT=y
+          CONFIG_BT_LE=y
+          CONFIG_BT_HCIBTUSB=y
+          CONFIG_BT_HCIUART=y
+          # ---------- USB 串口 / 网卡 / 存储 / 摄像头 / 声卡 ----------
+          CONFIG_USB_SERIAL=y
+          CONFIG_USB_SERIAL_CH341=y
+          CONFIG_USB_SERIAL_CP210X=y
+          CONFIG_USB_SERIAL_FTDI_SIO=y
+          CONFIG_USB_SERIAL_PL2303=y
+          CONFIG_USB_ACM=y
+          CONFIG_USB_UAS=y
+          CONFIG_USB_STORAGE=y
+          CONFIG_USB_NET_RTL8152=y
+          CONFIG_USB_NET_AX88179_178A=y
+          CONFIG_USB_NET_CDCETHER=y
+          CONFIG_USB_NET_CDC_NCM=y
+          CONFIG_MEDIA_SUPPORT=y
+          CONFIG_MEDIA_USB_SUPPORT=y
+          CONFIG_VIDEO_DEV=y
+          CONFIG_VIDEO_V4L2=y
+          CONFIG_USB_VIDEO_CLASS=y
+          CONFIG_SND=y
+          CONFIG_SND_USB=y
+          CONFIG_SND_USB_AUDIO=y
+          # ---------- 文件系统（U 盘 / 移动硬盘直接挂载）----------
+          CONFIG_EXT4_FS=y
+          CONFIG_VFAT_FS=y
+          CONFIG_EXFAT_FS=y
+          CONFIG_NTFS3_FS=y
+          CONFIG_CIFS=y
+          CONFIG_NFS_FS=y
+          CONFIG_NFSD=y
+          # ---------- 网络（代理 / 隧道 / 桥接相关底层）----------
+          CONFIG_INET_DIAG=y
+          CONFIG_NETLINK_DIAG=y
+          CONFIG_TUN=y
+          CONFIG_WIREGUARD=y
+          CONFIG_MACVLAN=y
+          CONFIG_VETH=y
+          CONFIG_BRIDGE_NF_EBTABLES=y
+          CONFIG_NFT_NAT=y
+          CONFIG_NF_CONNTRACK=y
+          # ---------- Airoha NPU（luci-app-airoha-npu 状态页需要）----------
+          CONFIG_NET_AIROHA=y
+          CONFIG_NET_AIROHA_NPU=y
+          CONFIG_DEBUG_FS=y
+          CONFIG_DEBUG_FS_ALLOW_ALL=y
+          CONFIG_COMMON_CLK=y
+          CONFIG_DEVMEM=y
+          KEOF
+          # 先删掉同名旧行（含 "# CONFIG_X is not set"），再整体追加，保证后写的生效
+          while read -r line; do
+            case "$line" in
+              CONFIG_*)
+                sym="${line%%=*}"
+                sed -i "/^${sym}=/d; /^# ${sym} is not set/d" "$KCFG"
+                ;;
+            esac
+          done < /tmp/pon_extra_kconfig.txt
+          cat /tmp/pon_extra_kconfig.txt >> "$KCFG"
+          echo ">>> 已向 $KCFG 注入 $(( $(grep -c '^CONFIG_' /tmp/pon_extra_kconfig.txt) )) 个底层驱动符号（=y 编进内核）"
+          grep -c '^CONFIG_' "$KCFG" | sed 's/^/>>> 该文件当前 CONFIG_ 行数: /'
+
+      - name: 把驱动对应用户态包/固件 blob 一并装进镜像
+        working-directory: ./ponwrt
+        run: |
+          # 内核里编了驱动不等于能用：无线网卡还要固件 blob，USB 摄像头还要 kmod 的配套工具。
+          # 这里用 =y 直接进镜像（不是 =m 单独出包），保证装上就能工作。
+          # 注：若某个包名在这套树里不存在，kconfig 会静默忽略该行，不会让构建失败。
+          for p in kmod-usb-serial-ch341 kmod-usb-serial-cp210x kmod-usb-serial-ftdi \
+                   kmod-usb-serial-pl2303 kmod-usb-acm kmod-usb-storage-uas kmod-usb-storage-extras \
+                   kmod-usb-net-rtl8152 kmod-usb-net-asix-ax88179 kmod-usb-net-cdc-ether \
+                   kmod-usb-net-cdc-ncm kmod-usb-hid kmod-fs-exfat kmod-fs-ntfs3 kmod-fs-cifs \
+                   kmod-nfs-kernel-server kmod-wireguard kmod-netlink-diag kmod-bridge \
+                   kmod-video-core kmod-video-uvc kmod-usb-audio kmod-usb-core kmod-usb2 kmod-usb3 \
+                   linux-firmware-rtw88 linux-firmware-rtl8192cu linux-firmware-rtl8188eu \
+                   usbutils usbids libudev-zero; do
+            grep -q "^CONFIG_PACKAGE_${p}=" .config || echo "CONFIG_PACKAGE_${p}=y" >> .config
+          done
+          make olddefconfig > /dev/null 2>&1 || true
+          echo ">>> 用户态包/blo 处理完成，实际命中（=y）："
+          for p in kmod-usb-serial-ch341 kmod-fs-exfat kmod-fs-ntfs3 kmod-wireguard linux-firmware-rtw88 usbutils; do
+            printf '  %-32s %s\n' "$p" "$(grep -m1 "^CONFIG_PACKAGE_${p}=" .config || echo '（该树无此包，已忽略）')"
+          done
+
+      - name: 生成并锁定 HG5382A 固件配置 ✅【printf 逐行写 config，不依赖 heredoc】
+        working-directory: ./ponwrt
+        run: |
+          rm -rf tmp
+          perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
+          make defconfig
+
+          sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
+          sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
+          sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
+          sed -i '/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
+
+          clear_sym() {
+            local sym="$1"
+            sed -i "/^# ${sym} is not set$/d; /^${sym}=/d" .config
+          }
+          clear_sym CONFIG_PACKAGE_kmod-iptv
+          clear_sym CONFIG_PACKAGE_kmod-tun
+          clear_sym CONFIG_PACKAGE_kmod-nft-tproxy
+          clear_sym CONFIG_PACKAGE_mihomo-alpha
+          clear_sym CONFIG_PACKAGE_qt5base
+          clear_sym CONFIG_PACKAGE_fwknopd
+          clear_sym CONFIG_PACKAGE_squeezelite-custom
+          clear_sym CONFIG_KERNEL_DEBUG_FS
+          clear_sym CONFIG_KERNEL_DEVMEM
+          clear_sym CONFIG_BUSYBOX_CONFIG_DEVMEM
+          clear_sym CONFIG_PACKAGE_usbutils
+
+          printf '# CONFIG_TARGET_ALL_PROFILES is not set\n' >> .config
+          # 单机型锁定：本 target 的 Kconfig 不支持同时选多个 device
+          printf 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5382a=y\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-theme-bootstrap is not set\n' >> .config
+          printf 'CONFIG_PACKAGE_openssh-sftp-server=y\n' >> .config
+          printf '# --- PON 修复 ---\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-airoha-paged-bosa=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-airoha-pon-frontend=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-airoha-xpon=y\n' >> .config
+          printf 'CONFIG_PACKAGE_airoha-ponctl=y\n' >> .config
+          printf 'CONFIG_PACKAGE_airoha-pond=y\n' >> .config
+          printf '# --- 透明代理内核模块 ---\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-tun=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-nft-tproxy=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-nft-socket=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-inet-diag=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-dummy=y\n' >> .config
+          printf '# --- mihomo（仅稳定版 meta） ---\n' >> .config
+          printf '# --- curl / libcurl ---\n' >> .config
+          printf '# --- 工具 ---\n' >> .config
+          printf '# --- IPTV 核心驱动 ---\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-iptv=y\n' >> .config
+          printf '# --- omcproxy ---\n' >> .config
+          printf '# ============================================================\n' >> .config
+          printf '# USB 支持（镜像内置）：主机控制器 kmod-usb3 会在 airoha 上\n' >> .config
+          printf '# 自动拉入 kmod-usb-xhci-hcd + kmod-usb-xhci-mtk；其余为存储/文件系统\n' >> .config
+          printf '# ============================================================\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-usb3=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-usb-xhci-hcd=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-usb-xhci-mtk=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-usb-storage=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-usb-storage-uas=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-usb-storage-extras=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-fs-ext4=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-fs-vfat=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-fs-exfat=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-fs-ntfs3=y\n' >> .config
+          printf 'CONFIG_PACKAGE_block-mount=y\n' >> .config
+          printf '# --- sing-box + luci-app-homeproxy（来自 homeproxy feed）---\n' >> .config
+          # 关键：naive outbound 会去拉外部依赖，在 CI 里必失败（HG5382A 也是这么关的）
+          printf '# CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set\n' >> .config
+          printf '# --- 蓝牙用户态 ---\n' >> .config
+          for p in $BT_USER_PKGS; do printf 'CONFIG_PACKAGE_%s=y\n' "$p" >> .config; done
+          printf '# ============================================================\n' >> .config
+          printf '# USB 串口/网卡/蓝牙/无线网卡/CH340 驱动（镜像内置 =y）\n' >> .config
+          printf '# ============================================================\n' >> .config
+          for p in $DRIVER_PKGS; do printf 'CONFIG_PACKAGE_%s=y\n' "$p" >> .config; done
+          for p in $DRIVER_FW_PKGS; do printf 'CONFIG_PACKAGE_%s=y\n' "$p" >> .config; done
+          printf '# --- 音频：UVC 摄像头麦克风/喇叭需要 ALSA，链路依赖全为硬依赖 ---\n' >> .config
+          printf '# kmod-sound-core 的 DEPENDS 是 audio-support（无 +），不显式开 audio-support\n' >> .config
+          printf '# 时 kconfig 会把 kmod-sound-core / kmod-usb-audio 整个判为不可选。\n' >> .config
+          printf 'CONFIG_PACKAGE_audio-support=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-input-core=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-sound-core=y\n' >> .config
+          printf 'CONFIG_PACKAGE_kmod-usb-audio=y\n' >> .config
+
+          printf '# ============================================================\n' >> .config
+          printf '# go2rtc / camlive 及其用户态依赖：一律只编独立包，不进镜像\n' >> .config
+          printf '# 用到再装：apk add --allow-untrusted <包>.apk（产物见 artifact）\n' >> .config
+          printf '# ============================================================\n' >> .config
+          printf '# CONFIG_PACKAGE_camlive is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-app-camlive is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-compat is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_ffmpeg is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_libx264 is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_libopus is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_alsa-utils is not set\n' >> .config
+          printf '# go2rtc 与它自己的 LuCI 前端同理，只出 apk\n' >> .config
+          printf '# CONFIG_PACKAGE_go2rtc is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-app-go2rtc is not set\n' >> .config
+          printf '# 但全局 BUILD_PATENTED 必须留 y：libx264 的包依赖是 @BUILD_PATENTED，\n' >> .config
+          printf '# 没有它 kconfig 连符号都不给，独立 apk 也编不出来（静默丢弃）。\n' >> .config
+          printf 'CONFIG_BUILD_PATENTED=y\n' >> .config
+          printf '# ffmpeg 只编独立包，但组件集必须保持默认（完整）：手动裁剪模式下\n' >> .config
+          printf '# 组件清单里没有 mjpeg 解码器 / rtsp 复用器，开了反而编不出 go2rtc 要的件。\n' >> .config
+          printf '# CONFIG_FFMPEG_SELECT_COMPONENTS is not set\n' >> .config
+          printf '# --- 驱动依赖的内核符号（kmod 打包要求 .ko 必须真的被编出来）---\n' >> .config
+          for k in $DRIVER_KCONFIGS; do printf 'CONFIG_KERNEL_%s=m\n' "${k#CONFIG_}" >> .config; done
+          printf '# --- 独立包不参与固件镜像 ---\n' >> .config
+          printf '# CONFIG_PACKAGE_usbutils is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-app-airoha-soc is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-app-blueaudio is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-app-btsp is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_ser2net is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_gensio is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_luci-app-ser2net is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_qt5base is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_fwknopd is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_squeezelite-custom is not set\n' >> .config
+          printf '# CONFIG_PACKAGE_mihomo-alpha is not set\n' >> .config
+          printf '# --- 独立/可选包（不会拖累固件镜像）---\n' >> .config
+          printf '# ============================================================\n' >> .config
+          printf '# 显式开启内核 DEBUG_FS 及调试功能\n' >> .config
+          printf '# ============================================================\n' >> .config
+          printf 'CONFIG_KERNEL_DEBUG_FS=y\n' >> .config
+          printf 'CONFIG_KERNEL_DEVMEM=y\n' >> .config
+          printf 'CONFIG_BUSYBOX_CONFIG_DEVMEM=y\n' >> .config
+
+          make defconfig
+
+          # ⚠️ defconfig 会把 SING_BOX_BUILD_NAIVE_OUTBOUND 重新打开（它的默认值是 y），
+          # 所以这条"必须关闭"的覆盖一定要放在最后一次 defconfig 之后，
+          # 并且之后不再跑 defconfig（PonWrt1 也是这个顺序）。
+          if grep -q '^CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND=' .config; then
+            sed -i 's|^CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND=.*$|# CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set|' .config
+          elif ! grep -q '^# CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set$' .config; then
+            printf '# CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set\n' >> .config
+          fi
+          grep -n 'SING_BOX_BUILD_NAIVE_OUTBOUND' .config || echo "::warning::sing-box 配置里没有 naive outbound 符号（可能当前版本无此选项）"
+
+          mkdir -p logs
+          cp .config .config.firmware
+          echo ">>> 固件配置已生成，保存到 .config.firmware"
+
+      - name: 预检：逐个核对配置符号是否真实生效（缺失即立即失败，附可读清单）
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p logs
+          missing=0
+          {
+            echo "符号 | 期望 | 实际"
+            echo "-----|------|-----"
+          } > logs/config-check.txt
+
+          check_y() {
+            local sym="$1"
+            local actual
+            actual=$(grep -m1 "^${sym}=" .config || echo "（不存在/未激活）")
+            echo "${sym#CONFIG_} | =y | $actual" >> logs/config-check.txt
+            case "$actual" in
+              "${sym}=y") ;;
+              *) echo "::error::必需符号未生效：$sym （实际：$actual）"; missing=$((missing+1)) ;;
+            esac
+          }
+
+          # 机型锁定
+          devcount=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
+          if [ "$devcount" -ne 1 ]; then
+            echo "::error::机型数量应为 1（本次目标 fiberhome_hg5382a），实际 $devcount"; missing=$((missing+1))
+          fi
+          check_y "CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5382a"
+
+          # USB / 存储核心（固件内置）
+          for p in $USB_CORE_PKGS; do check_y "CONFIG_PACKAGE_${p}"; done
+          # 主机控制器：kmod-usb3 的依赖包必须一并被 kconfig 拉入
+          check_y CONFIG_PACKAGE_kmod-usb-xhci-hcd
+          check_y CONFIG_PACKAGE_kmod-usb-xhci-mtk
+
+          # 其余固件必需包：只剩底层（PON 工具、内核钩子、挂载）
+          for p in kmod-iptv kmod-airoha-xpon airoha-ponctl airoha-pond \
+                   block-mount kmod-nft-tproxy kmod-tun kmod-inet-diag kmod-dummy \
+                   kmod-nft-socket; do
+            check_y "CONFIG_PACKAGE_${p}"
+          done
+          
+          # 应用层一律不进镜像（单编 apk，见 build-package.yml）：出现任何一个 =y 都算回归
+          # 例外：luci-theme-argon 是 PonWrt 目标默认主题（target 默认配置带入），
+          # 不属于我们主动加的应用层，因此不列入下面的反向校验。
+          APP_LAYER="sing-box luci-app-homeproxy libcronet mihomo-meta nikki luci-app-nikki \
+          omcproxy luci-app-omcproxy luci-app-iptv luci-app-airoha-npu luci-app-ddns \
+          luci-app-ttyd camlive go2rtc luci-app-camlive luci-app-go2rtc \
+          ffmpeg libx264 libopus alsa-utils luci-compat"
+          for p in $APP_LAYER; do
+            if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
+              echo "::error::${p} 属于应用层，应只编独立包，却在固件镜像里"
+              missing=$((missing+1))
+            fi
+          done
+          # sing-box 的关键开关不允许为打开状态（naive outbound 在 CI 中必然编译失败）
+          if grep -q '^CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND=' .config; then
+            echo "::error::CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND 仍处于打开状态（naive outbound 在 CI 中必然编译失败）"
+            missing=$((missing+1))
+          else
+            echo "OK: naive outbound 未开启"
+          fi
+
+          echo "==== 配置预检结果 ===="
+          cat logs/config-check.txt
+          {
+            echo "### 配置预检"
+            echo '```'
+            cat logs/config-check.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::配置预检失败，共 $missing 项不符合预期。请查看上表（缺失通常表示该包名在该目标/该 feed 中根本不存在）"
+            exit 1
+          fi
+          echo ">>> 配置预检通过"
+
+      - name: 下载源码软件包
+        working-directory: ./ponwrt
+        run: |
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+          export GO111MODULE=on
+          make download -j"$(nproc)" || true
+          find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
+          make download -j1 V=s 2>&1 | tee logs/download.log.txt || { echo "::warning::仍有下载失败"; }
+          find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
+
+      - name: 清理配置漂移导致的脏 stamp（只在 .config 变化时清 stamp）
+        working-directory: ./ponwrt
+        run: |
+          set +e
+          CFG_HASH=$(sha256sum .config.firmware | awk '{print $1}')
+          CACHED=""
+          [ -f staging_dir/.cfg_hash ] && CACHED=$(cat staging_dir/.cfg_hash)
+          if [ "$CFG_HASH" != "$CACHED" ]; then
+            echo ">>> 配置指纹变化（缓存：${CACHED:-none} → 本次：$CFG_HASH），清理 package stamp 避免沿用旧内核状态"
+            rm -rf staging_dir/target-aarch64_cortex-a53_musl/stamp
+            rm -rf staging_dir/.build_success
+          else
+            echo ">>> 配置指纹一致，保留 stamp 复用"
+          fi
+          rm -rf tmp
+          mkdir -p staging_dir
+          echo "$CFG_HASH" > staging_dir/.cfg_hash
+
+      - name: 执行固件编译
+        working-directory: ./ponwrt
+        run: |
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+          export GOSUMDB=sum.golang.org
+          export GO111MODULE=on
+          export GOENV=off
+          export GOTOOLCHAIN=local
+          mkdir -p logs
+          make package/libs/libffi/compile -j"$(nproc)" V=s || true
+          set -o pipefail
+
+          if make -j"$(nproc)" 2>&1 | tee logs/build.log.txt; then
+            echo ">>> 并行编译成功"
+          else
+            echo ">>> 并行编译失败，回退单线程重试（错误明细见 logs/firmware-errors.txt）"
+            make -j1 V=s 2>&1 | tee -a logs/build.log.txt || true
+          fi
+
+          # 无论成功失败，都把错误行单独抽出来，便于一眼定位
+          grep -nE '^(make(\[[0-9]+\])?: \*\*\*|ERROR: |.*: error: |.*Error [0-9]+$|.*undefined reference to)' \
+            logs/build.log.txt > logs/firmware-errors.txt 2>/dev/null || true
+          echo "==== 固件编译错误摘要（前 40 行） ===="
+          head -n 40 logs/firmware-errors.txt || true
+
+          test -n "$(find bin/targets/airoha/an7581 -maxdepth 1 -name "*hg5382a*sysupgrade*.itb" 2>/dev/null)" || {
+            echo "::error::未生成 hg5382a 固件映像，编译失败"
+            exit 1
+          }
+
+      - name: 校验内核 Kconfig 是否真的打开了驱动（.ko 缺失的根因排查）
+        if: always()
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p logs
+          # 【这个反查以前会给出错误结论，必须先自证“文件选对了”】
+          # 曾经出现过：target/linux/airoha/an7581/config-6.18 里明明写着
+          #   CONFIG_NET_AIROHA=y、CONFIG_NET_AIROHA_NPU=y
+          # 但反查结果全是“（未出现）”，据此差点误判“NPU 驱动没打开”。
+          # 所以这里先锁定唯一正确路径，并用基线符号自证文件确实是这颗 SoC 的内核配置：
+          #   build_dir/target-*/linux-airoha_an7581/linux-6.18.55/.config
+          # 若基线符号（CONFIG_ARCH_AIROHA / CONFIG_PCS_AIROHA_AN7581）都不在，
+          # 说明读到的是别的/未 merge 的文件，本次结论不采信，只报警告。
+          KC=""
+          for c in $(find build_dir -maxdepth 5 -name '.config' -path '*linux-airoha_an7581*' 2>/dev/null); do
+            if grep -q '^CONFIG_ARCH_AIROHA=' "$c"; then KC="$c"; break; fi
+          done
+          if [ -z "$KC" ]; then
+            echo "::warning::没有找到 linux-airoha_an7581 的真实内核 .config，本次内核反查结论不采信"
+            echo "候选文件："
+            find build_dir -maxdepth 5 -name '.config' 2>/dev/null | head -n 20
+            KC=""
+          fi
+          echo ">>> 内核 .config: ${KC:-未找到}"
+          {
+            echo "内核符号 | 实际值"
+            echo "---------|-------"
+          } > logs/kernel-config-check.txt
+          if [ -n "$KC" ]; then
+            for k in $DRIVER_KCONFIG_CHECK; do
+              v=$(grep -m1 "^${k}=" "$KC" || echo "（未出现）")
+              echo "${k} | ${v}" >> logs/kernel-config-check.txt
+            done
+            {
+              echo "### 内核 Kconfig 反查"
+              echo '```'
+              cat logs/kernel-config-check.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            cat logs/kernel-config-check.txt
+          else
+            echo "::warning::没有找到内核 .config，无法反查驱动符号（可能编译未真正开始）"
+          fi
+          # 顺带把已经打好的 .ko 列出来，确认驱动真的生成了
+          {
+            echo "### 驱动 .ko 产物"
+            echo '```'
+          find build_dir \( -name 'rtw88_*.ko' -o -name 'rtl8xxxu.ko' -o -name 'rtl8192cu.ko' \
+               -o -name 'btusb.ko' -o -name 'ch341.ko' -o -name 'usbserial.ko' \
+               -o -name 'usbnet.ko' -o -name 'cdc_ether.ko' -o -name 'r8152.ko' \
+               -o -name 'ax88179_178a.ko' -o -name 'snd-usb-audio.ko' \
+               -o -name 'uvcvideo.ko' -o -name 'videobuf2-common.ko' \) 2>/dev/null | head -n 60
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 标记固件编译成功
+        if: success()
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p staging_dir
+          touch staging_dir/.build_success
+
+      - name: 编译附加 USB 内核模块与工具（=m 单独出包，失败不影响固件）
+        if: always()
+        working-directory: ./ponwrt
+        run: |
+          set +e
+          set -o pipefail
+          mkdir -p logs
+          cp -f .config.firmware .config
+
+          set_m() {
+            local pkg="$1"
+            if grep -q "^CONFIG_PACKAGE_${pkg} is not set" .config; then
+              sed -i "s|^# CONFIG_PACKAGE_${pkg} is not set|CONFIG_PACKAGE_${pkg}=m|" .config
+            elif grep -q "^CONFIG_PACKAGE_${pkg}=y" .config; then
+              sed -i "s|^CONFIG_PACKAGE_${pkg}=y|CONFIG_PACKAGE_${pkg}=m|" .config
+            elif ! grep -q "^CONFIG_PACKAGE_${pkg}=" .config; then
+              echo "CONFIG_PACKAGE_${pkg}=m" >> .config
+            fi
+          }
+
+          for p in $EXTRA_KMODS; do set_m "$p"; done
+          make oldconfig < /dev/null >/dev/null 2>&1
+
+          # 关键证据：哪些附加包在被 kconfig 处理后真实存活（不存在的包会在这里消失）
+          {
+            echo "附加内核模块符号状态（oldconfig 之后的真实结果）："
+            for p in $EXTRA_KMODS; do
+              st=$(grep -m1 "^CONFIG_PACKAGE_${p}=" .config)
+              if [ -z "$st" ]; then
+                if grep -q "^# CONFIG_PACKAGE_${p} is not set" .config; then
+                  st="[=n 依赖不满足，被 kconfig 关闭]"
+                else
+                  st="[符号不存在：包名在当前源树/feed 中不存在]"
+                fi
+              fi
+              printf '  %-32s %s\n' "$p" "$st"
+            done
+          } | tee logs/extra-symbols.txt
+
+          echo ""
+          echo ">>> 一次性编译全部附加内核模块（-k 保留所有错误）"
+          make -k package/kernel/linux/compile -j"$(nproc)" V=s 2>&1 | tee logs/extra-kmods.log.txt >/dev/null
+          echo ">>> 内核模块阶段退出码：$?"
+
+          grep -nE '^(make(\[[0-9]+\])?: \*\*\*|ERROR: |.*: error: |.*Error [0-9]+$)' \
+            logs/extra-kmods.log.txt > logs/extra-kmods-errors.txt 2>/dev/null || true
+          echo "==== 附加内核模块错误摘要（前 40 行） ===="
+          head -n 40 logs/extra-kmods-errors.txt || true
+
+          echo ""
+          echo ">>> 独立工具链包（按依赖顺序编译，usbutils 依赖 libusb-1.0 / libudev / usbids）"
+          for p in usbids libudev-zero libusb-1.0 usbutils; do
+            d=$(ls -d package/feeds/*/$p package/*/$p package/*/*/$p 2>/dev/null | head -1)
+            if [ -z "$d" ]; then
+              echo "MISS $p 在当前源树/feeds 中找不到目录" | tee -a logs/usbutils.log.txt
+              continue
+            fi
+            echo "== $p -> $d ==" | tee -a logs/usbutils.log.txt
+            set_m "$p"
+            make oldconfig < /dev/null >/dev/null 2>&1
+            make "$d/compile" V=s -j1 2>&1 | tee "logs/${p}-pkg.log.txt" | tail -n 5
+            echo ">>> $p 退出码：$?" | tee -a logs/usbutils.log.txt
+            grep -nE 'error:|Error [0-9]|No rule|not found' "logs/${p}-pkg.log.txt" | head -n 12 || true
+          done
+
+          echo ""
+          echo ">>> 逐包核对产出（.apk/.ipk 是否存在）"
+          : > logs/extra-packages-list.txt
+          for p in $EXTRA_KMODS usbutils; do
+            hit=$(find bin -type f \( -name "${p}*.apk" -o -name "${p}*.ipk" \) 2>/dev/null | head -1)
+            if [ -n "$hit" ]; then
+              echo "OK   $p -> $hit" | tee -a logs/extra-packages-list.txt
+            else
+              echo "MISS $p 未生成" | tee -a logs/extra-packages-list.txt
+            fi
+          done
+          exit 0
+
+      - name: 补编 EXTRA_APK_PKGS（默认空；应用层请走 build-package.yml）
+        if: always()
+        working-directory: ./ponwrt
+        run: |
+          set +e
+          set -o pipefail
+          cp -f .config.firmware .config
+          
+          # 应用层（sing-box/homeproxy/mihomo/nikki/omcproxy/camlive/go2rtc/ffmpeg 等）
+          # 已全部移到 .github/workflows/build-package.yml 单独编译，本工作流只产出固件。
+          # 若临时想在这里补编一两个包，把名字加到作业级 env 的 EXTRA_APK_PKGS 即可。
+          set_m() {
+            local pkg="$1"
+            if grep -q "^# CONFIG_PACKAGE_${pkg} is not set" .config; then
+              sed -i "s|^# CONFIG_PACKAGE_${pkg} is not set|CONFIG_PACKAGE_${pkg}=m|" .config
+            elif grep -q "^CONFIG_PACKAGE_${pkg}=y" .config; then
+              sed -i "s|^CONFIG_PACKAGE_${pkg}=y|CONFIG_PACKAGE_${pkg}=m|" .config
+            elif ! grep -q "^CONFIG_PACKAGE_${pkg}=" .config; then
+              echo "CONFIG_PACKAGE_${pkg}=m" >> .config
+            fi
+          }
+          
+          for p in $EXTRA_APK_PKGS; do
+            d=$(ls -d "package/$p" "package/pon-local/$p" package/feeds/*/"$p" 2>/dev/null | head -1)
+            if [ -z "$d" ]; then echo "::warning::$p 在树里找不到目录，跳过"; continue; fi
+            echo "==== 补编 $p ($d) ===="
+            set_m "$p"
+            make oldconfig < /dev/null >/dev/null 2>&1
+            if make "$d/compile" V=s 2>&1 | tee "logs/${p}-pkg.log.txt" | tail -n 8; then
+              echo ">>> $p 编译成功"
+            else
+              echo "::warning::$p 编译失败（日志 logs/${p}-pkg.log.txt）"
+              grep -nE 'error:|Error [0-9]|No rule|nothing provides' "logs/${p}-pkg.log.txt" | head -n 15 || true
+            fi
+          done
+          cp -f .config.firmware .config
+          
+          echo ""
+          echo ">>> bin 目录结构"
+          ls -la bin/targets/airoha/an7581/packages/ 2>/dev/null | head -n 40 || true
+          exit 0
+
+      - name: 整理固件产物
+        if: always()
+        run: |
+          set +e
+          mkdir -p ./firmware_out
+          find ponwrt/bin/targets/airoha/an7581/ -type f \( \
+            -iname '*hg5382a*.itb' -o -iname '*hg5382a*.bin' -o -iname '*hg5382a*.ubi' -o \
+            -name '*.buildinfo' -o -name 'profiles.json' \
+          \) -exec cp -f {} ./firmware_out/ \;
+          cd ./firmware_out
+          shopt -s nullglob nocaseglob
+          files=( *hg5382a*.itb )
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::firmware_out 中没有任何 hg5382a 映像"
+          else
+            sha256sum "${files[@]}" > sha256sums
+            echo ">>> 产出映像："
+            ls -lh "${files[@]}"
+          fi
+          ls -lh
+          exit 0
+
+      - name: 打包全部软件包
+        if: always()
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p ../ipk_out
+          for d in bin/packages bin/targets/airoha/an7581/packages; do
+            if [ -d "$d" ] && [ -n "$(find "$d" \( -name '*.apk' -o -name '*.ipk' \) -print -quit)" ]; then
+              tar --zstd -cf "../ipk_out/$(basename "$d").tar.zst" "$d" || true
+            fi
+          done
+          ls -la ../ipk_out || true
+
+      - name: 收集独立软件包
+        if: always()
+        working-directory: ./ponwrt
+        run: |
+          set +e
+          mkdir -p ../ipk_out
+          pkg_list="camlive go2rtc luci-app-go2rtc ffmpeg libx264 libopus alsa-utils luci-compat luci-lua-runtime usbutils luci-app-iptv luci-app-airoha-npu luci-app-blueaudio luci-app-btsp luci-app-camlive gensio ser2net luci-app-ser2net mihomo-meta mihomo-alpha $EXTRA_KMODS $DRIVER_PKGS $DRIVER_FW_PKGS $BT_USER_PKGS"
+          : > ../ipk_out/collected.txt
+          for pkg in $pkg_list; do
+            found=0
+            while IFS= read -r -d '' f; do
+              cp -f "$f" ../ipk_out/ && found=1 && echo "$pkg -> $(basename "$f")" >> ../ipk_out/collected.txt
+            done < <(find bin -type f \( -name "${pkg}*.apk" -o -name "${pkg}*.ipk" \) -print0 2>/dev/null)
+            [ "$found" -eq 1 ] || echo "::notice::$pkg 未生成，跳过"
+          done
+          cat ../ipk_out/collected.txt || true
+          exit 0
+
+      - name: 生成构建报告（写入 Job Summary）
+        if: always()
+        run: |
+          {
+            echo "## HG5382A 构建报告"
+            echo ""
+            echo "### 固件映像"
+            ls -lh firmware_out/ 2>/dev/null || echo "（无）"
+            echo ""
+            echo "### 配置预检"
+            sed -n '1,60p' ponwrt/logs/config-check.txt 2>/dev/null || echo "（无）"
+            echo ""
+            echo "### 附加内核模块符号状态"
+            sed -n '1,40p' ponwrt/logs/extra-symbols.txt 2>/dev/null || echo "（无）"
+            echo ""
+            echo "### 附加包产出清单"
+            sed -n '1,60p' ponwrt/logs/extra-packages-list.txt 2>/dev/null || echo "（无）"
+            echo ""
+            echo "### 固件编译错误摘要"
+            sed -n '1,30p' ponwrt/logs/firmware-errors.txt 2>/dev/null || echo "（无错误行）"
+            echo ""
+            echo "### 附加内核模块错误摘要"
+            sed -n '1,30p' ponwrt/logs/extra-kmods-errors.txt 2>/dev/null || echo "（无错误行）"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo ">>> 报告已写入 Job Summary"
+
+      - name: 上传固件 Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PonWrt-HG5382A-pure
+          path: ./firmware_out/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: 上传全部软件包 Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ponwrt-hg5382a-ipk-packages
+          path: |
+            ./ipk_out/*.tar.zst
+            ./ipk_out/*.apk
+            ./ipk_out/*.ipk
+            ./ipk_out/collected.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: 准备预发布文件
+        if: success()
+        run: |
+          rm -rf release_out
+          mkdir -p release_out
+          cp -f firmware_out/* release_out/ 2>/dev/null || true
+          cp -f ipk_out/*.tar.zst release_out/ 2>/dev/null || true
+          cp -f ipk_out/*.apk release_out/ 2>/dev/null || true
+          cp -f ipk_out/*.ipk release_out/ 2>/dev/null || true
+          cd release_out
+          shopt -s nullglob
+          files=( *)
+          [ "${#files[@]}" -eq 0 ] && { echo "::error::无可发布文件"; exit 1; }
+          sha256sum "${files[@]}" > SHA256SUMS
+          ls -lh
+
+      - name: 创建 GitHub 预发布
+        if: success()
+        uses: softprops/action-gh-release@v2.0.8
+        with:
+          tag_name: hg5382a-pure-${{ github.run_number }}-${{ github.run_attempt }}
+          name: PonWrt HG5382A 纯净版预发布 #${{ github.run_number }}
+          prerelease: true
+          make_latest: false
+          generate_release_notes: true
+          body: |
+            PonWrt HG5382A 集成版自动预发布，本次机型：`fiberhome_hg5382a`。
+
+            机型变体说明（一次构建只能选一个）：
+            - `ct`：原厂形态，lan5（2.5G）可用，但对应用户态的 USB 口不启用（DTS 未开启 `usb0`）。
+            - `ct-usb-sfp`：启用 `usb0`（USB2 PHY），USB 口可用；该变体把 USB PHY 的 PCS 让给 lan5 使用。
+              需要 USB 硬件真正可用时，请用 `device=ct-usb-sfp` 重新触发一次。
+
+            **镜像内置**：PON 修复、透明代理内核模块、mihomo-meta、IPTV 驱动、omcproxy、
+            USB 主机控制器（kmod-usb3 → xhci-hcd + xhci-mtk）、USB 存储（storage/uas/extras）、
+            exfat/ntfs3/ext4/vfat 文件系统、block-mount。
+
+            **独立软件包**：USB 串口（ch341/cp210x/ftdi/pl2303）、USB 网卡（cdc-ether/cdc-ncm/rtl8152/asix-ax88179）、
+            USB 摄像头 UVC、usbutils(lsusb)、camlive/blueaudio/btsp/ser2net 等 luci 应用。
+            详见 `collected.txt` 与构建报告。
+
+      - name: 保存 staging 缓存
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ponwrt/staging_dir/target-aarch64_cortex-a53_musl
+          key: hg5382a-stage-${{ github.run_id }}
+
+      - name: 上传编译配置与日志（含隐藏文件）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: HG5382A-pure-diagnostics
+          path: |
+            ponwrt/.config
+            ponwrt/.config.firmware
+            ponwrt/feeds.conf.default
+            ponwrt/logs/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
