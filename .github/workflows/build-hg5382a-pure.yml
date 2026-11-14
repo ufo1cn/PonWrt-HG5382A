@@ -909,27 +909,42 @@ jobs:
                   printf '# CONFIG_SPI_MTK_SNFI is not set\n' >> "$CFG"
                   grep -qE '^(# )?CONFIG_SPI_MTK_SNFI[= ]' "$KD/.config" || printf '# CONFIG_SPI_MTK_SNFI is not set\n' >> "$KD/.config"
                 fi
+                # 【用真实目标做校验】target/linux/compile 会走 Kernel/Configure（真正的 .config.target
+                # + .config.override 合并）再跑 kbuild 的 syncconfig；这里手工拿 $KD/.config 跑 syncconfig
+                # 会"假通过"——实测 run 43642078063（5382A）/43642089234（全部包）：预置 通过，
+                # 真实构建仍撞 SPI_MTK_SNFI / DEVMEM (NEW)，然后在无 TTY 下直接 Error 2。
+                # 拿到 (NEW) 无默认值符号后，按 Kconfig 提示的首选项（Y→=y / M→=m / N→not set）写进
+                # target 内核配置 config-6.18，让真实构建的 .config 里始终有确定值。这不是放宽校验：
+                # 每轮仍然是真实编译，编不过就继续补符号，6 轮还不过就硬失败并打原始日志。
+                rc=1
                 for pass in 1 2 3 4 5 6; do
-                  if [ -f "$KD/.config.override" ]; then
-                    grep -v '^#' "$KD/.config.override" >> "$KD/.config" || true
-                  fi
-                  ( cd "$KD" && make ARCH=arm64 CROSS_COMPILE="$CROSS" syncconfig </dev/null > "$LOGDIR/kernel-syncconfig-$pass.log" 2>&1 )
-                  if [ $? -eq 0 ]; then
-                    echo ">>> 内核 syncconfig 通过（第 $pass 轮，已含 .config.override）"
+                  if make -j"$(nproc)" V=s target/linux/compile > "$LOGDIR/kernel-compile-$pass.log" 2>&1; then
+                    echo ">>> target/linux/compile 通过（第 $pass 轮，Kernel/Configure + syncconfig 均真实执行）"
+                    rc=0
                     break
                   fi
-                  syms=$(sed -n 's/.*(\([A-Za-z0-9_]*\)) \[[^]]*\] (NEW).*/\1/p' "$LOGDIR/kernel-syncconfig-$pass.log" | sort -u)
+                  syms=$(sed -n 's/.*\((\w*)\)) \[\([^]]*\)\] (NEW).*/\1 \2/p' "$LOGDIR/kernel-compile-$pass.log" | sort -u)
                   if [ -z "$syms" ]; then
-                    echo "::warning::syncconfig 第 $pass 轮失败且未解析到 (NEW) 符号，尾部："
-                    tail -n 30 "$LOGDIR/kernel-syncconfig-$pass.log"
+                    echo "::error::target/linux/compile 第 $pass 轮失败但日志里没有 (NEW) 符号，属于真实编译错误，末尾 80 行："
+                    tail -n 80 "$LOGDIR/kernel-compile-$pass.log"
                     break
                   fi
-                  for s in $syms; do
-                    printf '# CONFIG_%s is not set\n' "$s" >> "$CFG"
-                    grep -qE "^(# )?CONFIG_${s}[= ]" "$KD/.config" || printf '# CONFIG_%s is not set\n' "$s" >> "$KD/.config"
-                    echo ">>> syncconfig 补符号：CONFIG_$s → not set"
+                  echo "$syms" | while read -r s choices; do
+                    case "${choices%%/*}" in
+                      Y) val="CONFIG_${s}=y" ;;
+                      M) val="CONFIG_${s}=m" ;;
+                      *) val="# CONFIG_${s} is not set" ;;
+                    esac
+                    sed -i -E "/^(# )?CONFIG_${s}[= ]/d" "$CFG" || true
+                    printf '%s\n' "$val" >> "$CFG"
+                    echo ">>> (NEW) 无默认值符号 → 显式定值：$val"
                   done
                 done
+                if [ $rc -ne 0 ]; then
+                  echo "::error::内核 6 轮内仍未通过真实构建校验（已补入 (NEW) 符号定值），最后一份日志：$LOGDIR/kernel-compile-$pass.log"
+                  exit 1
+                fi
+                echo ">>> 内核已编出：Module.symvers 行数 $(wc -l < "$KD/Module.symvers" 2>/dev/null || echo 0)"
               else
                 echo "::warning::未找到 $CFG，跳过内核配置固化"
               fi
