@@ -580,9 +580,11 @@ jobs:
           done
           
           # 应用层一律不进镜像（单编 apk，见 build-package.yml）：出现任何一个 =y 都算回归
+          # 例外：luci-theme-argon 是 PonWrt 目标默认主题（target 默认配置带入），
+          # 不属于我们主动加的应用层，因此不列入下面的反向校验。
           APP_LAYER="sing-box luci-app-homeproxy libcronet mihomo-meta nikki luci-app-nikki \
           omcproxy luci-app-omcproxy luci-app-iptv luci-app-airoha-npu luci-app-ddns \
-          luci-app-ttyd luci-theme-argon camlive go2rtc luci-app-camlive luci-app-go2rtc \
+          luci-app-ttyd camlive go2rtc luci-app-camlive luci-app-go2rtc \
           ffmpeg libx264 libopus alsa-utils luci-compat"
           for p in $APP_LAYER; do
             if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
