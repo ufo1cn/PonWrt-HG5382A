@@ -125,7 +125,7 @@ jobs:
           sed -i '/nikki/d;/homeproxy/d;/openwrt-iptv/d;/emortal/d' feeds.conf.default
           [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
           echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
-          echo 'src-git iptv https://github.com/yveming/openwrt-iptv.git' >> feeds.conf.default
+          echo 'src-git iptv https://github.com/yeming/openwrt-iptv.git' >> feeds.conf.default
           # homeproxy 的 LuCI 应用 + sing-box 相关包（缺了它 sing-box 系全没有）
           echo 'src-git homeproxy https://github.com/immortalwrt/homeproxy.git;master' >> feeds.conf.default
           echo 'src-git emortal https://github.com/emortal/OpenWrt-packages.git;main' >> feeds.conf.default
