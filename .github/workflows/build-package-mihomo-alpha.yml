@@ -51,7 +51,7 @@ jobs:
   build_ipk:
     name: 编译HG5585F-CT全部独立插件包（mihomo-alpha 变体）
     runs-on: ubuntu-24.04
-    timeout-minutes: 240
+    timeout-minutes: 320
     env:
       SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
       TAR_NAME: HG5585F-CT-all-ipk-mihomo-alpha.tar.zst
@@ -492,6 +492,23 @@ jobs:
                 # 真实构建的 .config = merge(generic, target) 再叠加 package-metadata 生成的 .config.override；
                 # override 会把包依赖的内核符号抬成 =y/=m，从而让一批原本不可见的符号变可见（如 SPI_MTK_NOR=m → SPI_MTK_SNFI 变可见）。
                 # 这里按同样顺序先合入 override 的 =y/=m 项，再用真实 syncconfig 反复校验，仍报 (NEW) 的显式关掉后重来。
+                # 预生成 .config.override：真实构建时它由 package-metadata.pl 依包依赖生成。
+                # 预置阶段若不存在，下面的循环就是拿"没有 override"的配置自检——首轮必然"通过"，
+                # 真实构建却仍撞 (NEW)（实测 run 43636459314 / 43630997001 都是这种假通过）。
+                if [ ! -s "$KD/.config.override" ]; then
+                  if [ ! -f tmp/.packageinfo ]; then
+                    make -j1 V=s prepare-tmpinfo > "$LOGDIR/packageinfo.log" 2>&1 || true
+                  fi
+                  if [ -f tmp/.packageinfo ]; then
+                    perl scripts/package-metadata.pl kconfig tmp/.packageinfo .config 6.18 > "$KD/.config.override" 2> "$LOGDIR/package-metadata.log" || true
+                  fi
+                fi
+                echo ">>> .config.override：$(wc -l < "$KD/.config.override" 2>/dev/null || echo 0) 行"
+                if [ ! -s "$KD/.config.override" ]; then
+                  echo "::warning::.config.override 生成失败，显式关掉已知无默认值且会 (NEW) 的符号（SPI_MTK_SNFI）兜底"
+                  printf '# CONFIG_SPI_MTK_SNFI is not set\n' >> "$CFG"
+                  grep -qE '^(# )?CONFIG_SPI_MTK_SNFI[= ]' "$KD/.config" || printf '# CONFIG_SPI_MTK_SNFI is not set\n' >> "$KD/.config"
+                fi
                 for pass in 1 2 3 4 5 6; do
                   if [ -f "$KD/.config.override" ]; then
                     grep -v '^#' "$KD/.config.override" >> "$KD/.config" || true
@@ -523,6 +540,18 @@ jobs:
             echo "::warning::target/linux/prepare 失败，尾部："
             tail -n 30 "$LOGDIR/kernel-prepare.log"
           fi
+          # 【内核必须真编一次】kmod 与"内核模块源码包"（airoha-pon-frontends、gpio-button-hotplug 等）
+          # 在 modpost 阶段要读 $KD/Module.symvers 解析 mutex_lock / skb_put 这类内核符号；
+          # 只跑 modules_prepare 不会生成该文件，实测就是 "Module.symvers is missing" + 一片 undefined!
+          # （run 43630997001 / 43630999285 / 43631001506 同一个根因）。
+          # 所以这里先真正编一次内核（vmlinux + Module.symvers 一起产出）；失败就明确报错停手，
+          # 绝不用 KBUILD_MODPOST_WARN 把 undefined! 降级成警告来"骗绿"。
+          if ! make -j"$(nproc)" V=s target/linux/compile > "$LOGDIR/kernel-compile.log" 2>&1; then
+            echo "::error::target/linux/compile 失败，kmod 无法在缺 Module.symvers 的内核树上编译，尾部："
+            tail -n 60 "$LOGDIR/kernel-compile.log"
+            exit 1
+          fi
+          echo ">>> 内核编译完成，Module.symvers 行数：$(wc -l < "$KD/Module.symvers" 2>/dev/null || echo 0)"
           make WARN_RECURSIVE_DEP=1 package/compile -j"$(nproc)" V=s 2>&1 | tee ../build_log/full-build.log
           echo ">>> package/compile 执行结束"
 
