@@ -218,7 +218,10 @@ jobs:
         run: |
           rm -rf tmp
           perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
-          make defconfig
+          # WARN_RECURSIVE_DEP=1：这套树里 mihomo-meta/mihomo-alpha（互 PROVIDES/CONFLICTS）、
+          # fwknopd、squeezelite-custom 存在上游 Kconfig 递归依赖，默认会硬报错中止 defconfig。
+          # 这里只把该诊断降级为 warning，不做任何掩盖；本工作流仍只用 sel_variant 选一个 mihomo 变体。
+          make WARN_RECURSIVE_DEP=1 defconfig
 
           sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
           sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
