@@ -147,53 +147,58 @@ jobs:
           mkdir -p logs
           : > logs/nas-build-summary.txt
 
+          # 目标写法说明：feeds install 后包被放到 package/feeds/<feed>/<包名>
+          #（分类子目录 net/utils/multimedia 会被去掉），所以编译目标必须是
+          # package/feeds/packages/samba4 这种形式；写成 feeds/packages/net/samba4
+          # 会得到 "No rule to make target"。
           PKG_DIRS=(
-            feeds/packages/net/samba4
-            feeds/packages/net/ksmbd-tools
-            feeds/packages/net/nfs-kernel-server
-            feeds/packages/net/wsdd2
-            feeds/packages/net/cifs-utils
-            feeds/packages/multimedia/minidlna
-            feeds/packages/net/transmission
-            feeds/packages/net/aria2
-            feeds/packages/net/qbittorrent
-            feeds/packages/net/tgt
-            feeds/packages/net/rsync
-            feeds/packages/utils/filebrowser
-            feeds/packages/utils/syncthing
-            feeds/packages/utils/dufs
-            feeds/packages/utils/smartmontools
-            feeds/packages/utils/hdparm
-            feeds/packages/utils/hd-idle
-            feeds/packages/utils/parted
-            feeds/packages/utils/cryptsetup
-            feeds/packages/utils/btrfs-progs
-            feeds/packages/utils/xfsprogs
-            feeds/packages/utils/exfatprogs
-            feeds/packages/utils/dosfstools
-            feeds/packages/utils/lm-sensors
-            feeds/luci/applications/luci-app-samba4
-            feeds/luci/applications/luci-app-ksmbd
-            feeds/luci/applications/luci-app-nfs
-            feeds/luci/applications/luci-app-minidlna
-            feeds/luci/applications/luci-app-transmission
-            feeds/luci/applications/luci-app-aria2
-            feeds/luci/applications/luci-app-filebrowser
-            feeds/luci/applications/luci-app-filebrowser-go
-            feeds/luci/applications/luci-app-hd-idle
-            feeds/luci/applications/luci-app-diskman
-            feeds/luci/applications/luci-app-qbittorrent
-            feeds/luci/applications/luci-app-syncthing
+            packages/samba4
+            packages/ksmbd-tools
+            packages/nfs-kernel-server
+            packages/wsdd2
+            packages/cifs-utils
+            packages/minidlna
+            packages/transmission
+            packages/aria2
+            packages/qbittorrent
+            packages/tgt
+            packages/rsync
+            packages/filebrowser
+            packages/syncthing
+            packages/dufs
+            packages/smartmontools
+            packages/hdparm
+            packages/hd-idle
+            packages/parted
+            packages/cryptsetup
+            packages/btrfs-progs
+            packages/xfsprogs
+            packages/exfatprogs
+            packages/dosfstools
+            packages/lm-sensors
+            luci/luci-app-samba4
+            luci/luci-app-ksmbd
+            luci/luci-app-nfs
+            luci/luci-app-minidlna
+            luci/luci-app-transmission
+            luci/luci-app-aria2
+            luci/luci-app-filebrowser
+            luci/luci-app-filebrowser-go
+            luci/luci-app-hd-idle
+            luci/luci-app-diskman
+            luci/luci-app-qbittorrent
+            luci/luci-app-syncthing
           )
 
           ok=0
           bad=0
-          for d in "${PKG_DIRS[@]}"; do
+          for e in "${PKG_DIRS[@]}"; do
+            d="package/feeds/$e"
             if [ ! -d "$d" ]; then
-              echo "SKIP $d （目录不存在，已跳过）" | tee -a logs/nas-build-summary.txt
+              echo "SKIP $d （未安装到 package/feeds，可能该包不在任何 feed）" | tee -a logs/nas-build-summary.txt
               continue
             fi
-            name=$(basename "$d")
+            name=$(basename "$e")
             set +e
             make -j1 V=s "$d/compile" > "logs/pkg-$name.log" 2>&1
             rc=$?
