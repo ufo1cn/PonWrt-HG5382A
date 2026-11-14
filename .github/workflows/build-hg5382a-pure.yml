@@ -504,7 +504,7 @@ jobs:
                    usbutils usbids libudev-zero; do
             grep -q "^CONFIG_PACKAGE_${p}=" .config || echo "CONFIG_PACKAGE_${p}=y" >> .config
           done
-          make WARN_RECURSIVE_DEP=1 olddefconfig > /dev/null 2>&1 || true
+          make WARN_RECURSIVE_DEP=1 defconfig > /dev/null 2>&1 || true
           echo ">>> 用户态包/blo 处理完成，实际命中（=y）："
           for p in kmod-usb-serial-ch341 kmod-fs-exfat kmod-fs-ntfs3 kmod-wireguard linux-firmware-rtw88 usbutils; do
             printf '  %-32s %s\n' "$p" "$(grep -m1 "^CONFIG_PACKAGE_${p}=" .config || echo '（该树无此包，已忽略）')"
