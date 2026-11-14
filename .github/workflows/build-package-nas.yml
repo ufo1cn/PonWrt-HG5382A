@@ -383,13 +383,32 @@ jobs:
               continue
             fi
             name=$(basename "$e")
+            # 【先把包真正选中】.config 里没有 CONFIG_PACKAGE_<name>=m 时，make <dir>/compile 会
+            # 0.0x 秒空返回 rc=0、一个 apk 都不出。旧跑 43631004023 就是这样：日志里
+            # "time: package/feeds/packages/samba4/compile#0.20"，18 个 OK 包的 apk 全部缺失。
+            # 这里从 Makefile 的 BuildPackage 声明解析包名，逐个写进 .config（=m）。
+            names=$(grep -hoE 'BuildPackage[,(][ ]*[A-Za-z0-9_.+-]+' "$d/Makefile" 2>/dev/null | sed -E 's/BuildPackage[,(][ ]*//' | sort -u || true)
+            for n in $names; do
+              grep -qE "^CONFIG_PACKAGE_${n}=" .config || printf 'CONFIG_PACKAGE_%s=m\n' "$n" >> .config
+            done
+            echo ">>> $name 选中包：$(echo $names)"
             set +e
             make -j1 V=s "$d/compile" > "logs/pkg-$name.log" 2>&1
             rc=$?
             set -e
-            if [ $rc -eq 0 ]; then
+            # 【产物硬校验】rc=0 不等于有 apk：必须在该目录声明的包里找到至少一个 .apk，
+            # 找不到就是静默丢弃（编译被 .config 跳过 / 产物路径不对），按失败计入并落进 summary。
+            found=0
+            for n in $names; do
+              if ls bin/packages/*/*/"$n"-*.apk >/dev/null 2>&1 || ls bin/packages/*/*/"$n"*.apk >/dev/null 2>&1; then found=1; fi
+            done
+            if [ $rc -eq 0 ] && [ $found -eq 1 ]; then
               echo "OK   $name" | tee -a logs/nas-build-summary.txt
               ok=$((ok+1))
+            elif [ $rc -eq 0 ]; then
+              echo "NOAPK $name（make rc=0 但没有任何 apk 产出＝静默丢弃，按失败计）" | tee -a logs/nas-build-summary.txt
+              tail -n 20 "logs/pkg-$name.log" | sed 's/^/     /' || true
+              bad=$((bad+1))
             else
               echo "FAIL $name（日志 logs/pkg-$name.log 末尾 20 行见下）" | tee -a logs/nas-build-summary.txt
               tail -n 20 "logs/pkg-$name.log" | sed 's/^/     /' || true
@@ -402,7 +421,7 @@ jobs:
             echo "::error::没有任何 NAS 包编译成功"; exit 1
           fi
           echo ">>> 失败清单（若不为空，属于相应包上游问题，已记录日志）"
-          grep '^FAIL' logs/nas-build-summary.txt || true
+          grep -E '^(FAIL|NOAPK)' logs/nas-build-summary.txt || true
 
       - name: 收集产物
         working-directory: ./ponwrt
@@ -410,9 +429,9 @@ jobs:
           rm -rf ../ipk_out
           mkdir -p ../ipk_out
           shopt -s nullglob
-          for f in bin/packages/*/*/*.apk bin/packages/*/*/*.ipk; do
-            cp -f "$f" ../ipk_out/ 2>/dev/null || true
-          done
+          # 旧写法只认 bin/packages/<arch>/<feed>/<file> 三层，apk 布局一变就整批漏收；
+          # 改成递归收集（run 43631004023 里 18 个 OK 包的 apk 一个都没进产物）。
+          find bin/packages -type f \( -name '*.apk' -o -name '*.ipk' \) -exec cp -f {} ../ipk_out/ \; 2>/dev/null || true
           echo ">>> 收集到 $(ls -1 ../ipk_out 2>/dev/null | wc -l) 个包"
           ls -lh ../ipk_out | head -80
           [ -n "$(ls -A ../ipk_out)" ] || { echo "::error::没有任何产物"; exit 1; }
