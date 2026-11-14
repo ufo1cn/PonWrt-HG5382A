@@ -396,6 +396,124 @@ jobs:
           grep -q "o.value('gpon'" feeds/pon_userspace/luci-app-pon/htdocs/luci-static/resources/view/pon/config.js
           echo "OK: GPON patches are present."
 
+      - name: 强制打开底层驱动内核符号（直接写进 target 内核配置，绕开 CONFIG_KERNEL_* 不生成的问题）
+        working-directory: ./ponwrt
+        run: |
+          # 【为什么必须这么干】
+          # 先前用的是往 .config 里加 CONFIG_KERNEL_RTW88=m 这类写法，但实测产物 diagnostics 里
+          # logs/kernel-config-check.txt 显示 CONFIG_RTW88 / RTL8XXXU / USB_SERIAL_CH341 /
+          # SND_USB_AUDIO / USB_UAS / EXFAT_FS / NTFS3_FS / WIREGUARD / CIFS / NFSD /
+          # NETLINK_DIAG / BRIDGE_NF_EBTABLES / NFT_NAT / BT_LE / NET_AIROHA 全部“（未出现）”。
+          # 原因是 CONFIG_KERNEL_xxx 这类符号只有在某个“被选中的 kmod 包”引用它时才会在 .config 里
+          # 出现；没人引用的符号会被 kconfig 直接丢弃，于是内核根本没打开这些驱动（.ko 自然不存在）。
+          # 唯一确定生效的入口是 target 的内核配置文件：build 时它会被 merge 进内核 .config。
+          # 这里同时统一改成 =y（编进内核镜像里，而不是 =m 生成 .ko 却没人打包），
+          # 这样后期单独编出来的应用包只要用驱动就能直接工作，不必再回来重编固件。
+          KCFG=target/linux/airoha/an7581/config-6.18
+          if [ ! -f "$KCFG" ]; then
+            echo "::error::找不到 $KCFG，无法注入底层驱动符号"
+            exit 1
+          fi
+          cp -f "$KCFG" /tmp/config-6.18.orig
+          cat > /tmp/pon_extra_kconfig.txt << 'KEOF'
+          # ---------- 无线网卡（rtw88 全系 USB + rtl8xxxu + rtl8192cu）----------
+          CONFIG_CFG80211=y
+          CONFIG_MAC80211=y
+          CONFIG_RTW88=y
+          CONFIG_RTW88_USB=y
+          CONFIG_RTW88_8822CU=y
+          CONFIG_RTW88_8821CU=y
+          CONFIG_RTW88_8723DU=y
+          CONFIG_RTW88_8822CE=y
+          CONFIG_RTW88_8821CE=y
+          CONFIG_RTL8XXXU=y
+          CONFIG_RTL8192CU=y
+          CONFIG_BT=y
+          CONFIG_BT_LE=y
+          CONFIG_BT_HCIBTUSB=y
+          CONFIG_BT_HCIUART=y
+          # ---------- USB 串口 / 网卡 / 存储 / 摄像头 / 声卡 ----------
+          CONFIG_USB_SERIAL=y
+          CONFIG_USB_SERIAL_CH341=y
+          CONFIG_USB_SERIAL_CP210X=y
+          CONFIG_USB_SERIAL_FTDI_SIO=y
+          CONFIG_USB_SERIAL_PL2303=y
+          CONFIG_USB_ACM=y
+          CONFIG_USB_UAS=y
+          CONFIG_USB_STORAGE=y
+          CONFIG_USB_NET_RTL8152=y
+          CONFIG_USB_NET_AX88179_178A=y
+          CONFIG_USB_NET_CDCETHER=y
+          CONFIG_USB_NET_CDC_NCM=y
+          CONFIG_MEDIA_SUPPORT=y
+          CONFIG_MEDIA_USB_SUPPORT=y
+          CONFIG_VIDEO_DEV=y
+          CONFIG_VIDEO_V4L2=y
+          CONFIG_USB_VIDEO_CLASS=y
+          CONFIG_SND=y
+          CONFIG_SND_USB=y
+          CONFIG_SND_USB_AUDIO=y
+          # ---------- 文件系统（U 盘 / 移动硬盘直接挂载）----------
+          CONFIG_EXT4_FS=y
+          CONFIG_VFAT_FS=y
+          CONFIG_EXFAT_FS=y
+          CONFIG_NTFS3_FS=y
+          CONFIG_CIFS=y
+          CONFIG_NFS_FS=y
+          CONFIG_NFSD=y
+          # ---------- 网络（代理 / 隧道 / 桥接相关底层）----------
+          CONFIG_INET_DIAG=y
+          CONFIG_NETLINK_DIAG=y
+          CONFIG_TUN=y
+          CONFIG_WIREGUARD=y
+          CONFIG_MACVLAN=y
+          CONFIG_VETH=y
+          CONFIG_BRIDGE_NF_EBTABLES=y
+          CONFIG_NFT_NAT=y
+          CONFIG_NF_CONNTRACK=y
+          # ---------- Airoha NPU（luci-app-airoha-npu 状态页需要）----------
+          CONFIG_NET_AIROHA=y
+          CONFIG_NET_AIROHA_NPU=y
+          CONFIG_DEBUG_FS=y
+          CONFIG_DEBUG_FS_ALLOW_ALL=y
+          CONFIG_COMMON_CLK=y
+          CONFIG_DEVMEM=y
+          KEOF
+          # 先删掉同名旧行（含 "# CONFIG_X is not set"），再整体追加，保证后写的生效
+          while read -r line; do
+            case "$line" in
+              CONFIG_*)
+                sym="${line%%=*}"
+                sed -i "/^${sym}=/d; /^# ${sym} is not set/d" "$KCFG"
+                ;;
+            esac
+          done < /tmp/pon_extra_kconfig.txt
+          cat /tmp/pon_extra_kconfig.txt >> "$KCFG"
+          echo ">>> 已向 $KCFG 注入 $(( $(grep -c '^CONFIG_' /tmp/pon_extra_kconfig.txt) )) 个底层驱动符号（=y 编进内核）"
+          grep -c '^CONFIG_' "$KCFG" | sed 's/^/>>> 该文件当前 CONFIG_ 行数: /'
+
+      - name: 把驱动对应用户态包/固件 blob 一并装进镜像
+        working-directory: ./ponwrt
+        run: |
+          # 内核里编了驱动不等于能用：无线网卡还要固件 blob，USB 摄像头还要 kmod 的配套工具。
+          # 这里用 =y 直接进镜像（不是 =m 单独出包），保证装上就能工作。
+          # 注：若某个包名在这套树里不存在，kconfig 会静默忽略该行，不会让构建失败。
+          for p in kmod-usb-serial-ch341 kmod-usb-serial-cp210x kmod-usb-serial-ftdi \
+                   kmod-usb-serial-pl2303 kmod-usb-acm kmod-usb-storage-uas kmod-usb-storage-extras \
+                   kmod-usb-net-rtl8152 kmod-usb-net-asix-ax88179 kmod-usb-net-cdc-ether \
+                   kmod-usb-net-cdc-ncm kmod-usb-hid kmod-fs-exfat kmod-fs-ntfs3 kmod-fs-cifs \
+                   kmod-nfs-kernel-server kmod-wireguard kmod-netlink-diag kmod-bridge \
+                   kmod-video-core kmod-video-uvc kmod-usb-audio kmod-usb-core kmod-usb2 kmod-usb3 \
+                   linux-firmware-rtw88 linux-firmware-rtl8192cu linux-firmware-rtl8188eu \
+                   usbutils usbids libudev-zero; do
+            grep -q "^CONFIG_PACKAGE_${p}=" .config || echo "CONFIG_PACKAGE_${p}=y" >> .config
+          done
+          make olddefconfig > /dev/null 2>&1 || true
+          echo ">>> 用户态包/blo 处理完成，实际命中（=y）："
+          for p in kmod-usb-serial-ch341 kmod-fs-exfat kmod-fs-ntfs3 kmod-wireguard linux-firmware-rtw88 usbutils; do
+            printf '  %-32s %s\n' "$p" "$(grep -m1 "^CONFIG_PACKAGE_${p}=" .config || echo '（该树无此包，已忽略）')"
+          done
+
       - name: 生成并锁定 HG5585F 固件配置 ✅【printf 逐行写 config，不依赖 heredoc】
         working-directory: ./ponwrt
         run: |
