@@ -251,7 +251,7 @@ jobs:
           for k in $DRIVER_KCONFIGS; do
             printf 'CONFIG_KERNEL_%s=m\n' "${k#CONFIG_}" >> .config
           done
-          make olddefconfig
+          make WARN_RECURSIVE_DEP=1 olddefconfig
           echo ">>> 内核配置覆盖写入完成（共 $(echo $DRIVER_KCONFIGS | wc -w) 个符号）"
 
       - name: 批量设置目标包为 =m
