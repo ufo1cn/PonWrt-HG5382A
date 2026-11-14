@@ -222,14 +222,14 @@ jobs:
           # 这里只把该诊断降级为 warning，不做任何掩盖；本工作流仍只用 sel_variant 选一个 mihomo 变体。
           make WARN_RECURSIVE_DEP=1 defconfig
 
-          sed -i '/CONFIG_TARGET_ALL_PROFILES/d' .config
-          sed -i '/CONFIG_TARGET_MULTI_PROFILE/d' .config
-          sed -i '/CONFIG_TARGET_airoha_an7581_DEVICE_/d' .config
-          sed -i '/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_/d' .config
+          # 锁机型：只允许存在一个 device，且必须是 HG5585F-CT。
+          # 用 grep -xF（整行、固定字符串）计数并**始终**打印命中位置，
+          # 不再用正则 + ^ 锚点去赌长文件里的行形态。
+          sed -i '/^CONFIG_TARGET_ALL_PROFILES/d;/^# CONFIG_TARGET_ALL_PROFILES is not set$/d' .config
+          sed -i '/^CONFIG_TARGET_MULTI_PROFILE/d;/^# CONFIG_TARGET_MULTI_PROFILE is not set$/d' .config
+          sed -i '/^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$/d' .config
+          sed -i '/^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_.*=y$/d' .config
 
-          # 用 printf 逐行写，不用 heredoc：heredoc 的内容在 YAML 块里带缩进，
-          # 一旦缩进没被正确剥离，写进 .config 的行就会带前导空格，
-          # `grep '^CONFIG_...'` 直接失配（固件工作流早前就因为这个踩过坑）。
           printf '%s\n' \
             '# CONFIG_TARGET_ALL_PROFILES is not set' \
             '# CONFIG_TARGET_MULTI_PROFILE is not set' \
@@ -238,16 +238,16 @@ jobs:
             'CONFIG_BUILD_PATENTED=y' \
             'CONFIG_PACKAGE_ca-bundle=y' >> .config
 
-          sp=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$' .config || true)
-          if [ "$sp" -ne 1 ] || ! grep -q '^CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y$'; then
-            echo "::error::HG5585F-CT 机型锁定校验失败（sp=$sp）"
-            echo "----- .config 中所有 DEVICE 相关行（cat -A 可见行尾/行首问题）-----"
-            grep -nE 'DEVICE' .config | cat -A | head -n 20 || true
-            echo "----- .config 末尾 12 行 -----"
-            tail -n 12 .config | cat -A
+          devcnt=$(grep -cxF 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' .config || true)
+          anydev=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_[A-Za-z0-9_.-]+=y$' .config || true)
+          echo ">>> 机型行命中次数 devcnt=$devcnt，任何设备行总数 anydev=$anydev"
+          grep -nxF 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' .config || echo "(未找到该行)"
+          if [ "$devcnt" != "1" ] || [ "$anydev" != "1" ]; then
+            echo "::error::HG5585F-CT 机型锁定校验失败（devcnt=$devcnt anydev=$anydev）"
+            grep -nE '^CONFIG_TARGET_.*DEVICE' .config | head -n 20 || true
             exit 1
           fi
-          echo ">>> 机型配置校验OK"
+          echo ">>> 机型配置校验OK" 
 
       - name: 写入与固件一致的内核配置覆盖
         working-directory: ./ponwrt
