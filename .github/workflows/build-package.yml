@@ -261,7 +261,7 @@ jobs:
           # 另外 target 包还需要工具链，否则 staging_dir/toolchain-* 不存在。
           # 这里先按 tools/Makefile 的清单逐个编 host 工具，再编工具链。
           mkdir -p logs
-          TOOL_LIST="libdeflate libressl patch tar zstd xz zlib expat m4 pkgconf \
+          TOOL_LIST="libdeflate libressl autoconf-archive sed coreutils patch tar zstd xz zlib expat m4 pkgconf \
                      autoconf automake libtool flex bison gnulib missing-macros \
                      util-linux findutils dosfstools mtools e2fsprogs squashfs4 \
                      mkimage sstrip patchelf cpio lzma ninja meson gengetopt \
@@ -292,20 +292,27 @@ jobs:
           done
           echo ">>> host 工具就绪：$(staging_dir/host/bin/openssl version 2>/dev/null)"
 
-          # 工具链：target 包编译的必要前提
+          # 工具链：target 包编译的必要前提。
+          # 光有 staging_dir/toolchain-* 目录还不够——package/libs/toolchain 打包 libgcc1 时
+          # 要 cp staging_dir/toolchain-*/lib/libgcc_s.so.*，缺了就直接
+          # 'cp: cannot stat .../libgcc_s.so.*' 并让**所有**包都失败（实测 36/36 全 FAIL）。
+          # 所以这里既要编，也要验 libgcc_s 真的落地，缺则补跑 gcc final。
           if ! ls -d staging_dir/toolchain-* >/dev/null 2>&1; then
             echo "=== 工具链编译 ==="
-            set +e
-            make -j$(nproc) V=s toolchain/compile > logs/toolchain.log 2>&1
-            rc=$?
-            set -e
-            if [ $rc -ne 0 ] || ! ls -d staging_dir/toolchain-* >/dev/null 2>&1; then
-              echo "::error::工具链编译失败(rc=$rc)，末尾 30 行："
-              tail -n 30 logs/toolchain.log
-              exit 1
-            fi
+            make -j$(nproc) V=s toolchain/compile > logs/toolchain.log 2>&1 || true
           fi
-          echo ">>> 工具链就绪：$(ls -d staging_dir/toolchain-* | head -n 1)"
+          if ! ls staging_dir/toolchain-*/lib/libgcc_s.so* >/dev/null 2>&1; then
+            echo "=== libgcc_s 未落地，补跑 toolchain/gcc/final ==="
+            make -j$(nproc) V=s toolchain/gcc/final/compile >> logs/toolchain.log 2>&1 || true
+          fi
+          if ! ls staging_dir/toolchain-*/lib/libgcc_s.so* >/dev/null 2>&1; then
+            echo "::error::工具链不完整：libgcc_s.so 未生成（日志末尾 30 行 + find 结果如下）"
+            tail -n 30 logs/toolchain.log || true
+            find staging_dir/toolchain-* -name 'libgcc_s*' 2>/dev/null | head -n 20 || true
+            ls -l staging_dir/toolchain-*/lib 2>/dev/null | head -n 20 || true
+            exit 1
+          fi
+          echo ">>> 工具链就绪：$(ls -d staging_dir/toolchain-* | head -n 1)，libgcc_s=$(ls staging_dir/toolchain-*/lib/libgcc_s.so* | head -n 1)"
 
       - name: 写入与固件一致的内核配置覆盖
         working-directory: ./ponwrt
