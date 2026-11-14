@@ -884,7 +884,6 @@ jobs:
                     echo ">>> syncconfig 补符号：CONFIG_$s → not set"
                   done
                 done
-                done
               else
                 echo "::warning::未找到 $CFG，跳过内核配置固化"
               fi
