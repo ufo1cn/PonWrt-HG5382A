@@ -481,11 +481,16 @@ jobs:
                   esac
                 done < "$KD/.config"
                 echo ">>> 内核配置固化：向 $CFG 追加 $added 个符号（原文件备份 $LOGDIR/config-6.18.orig）"
-                # 用真实构建步骤 syncconfig 反复校验：仍报 (NEW) 的符号显式关掉后再来一轮，直到通过
+                # 真实构建的 .config = merge(generic, target) 再叠加 package-metadata 生成的 .config.override；
+                # override 会把包依赖的内核符号抬成 =y/=m，从而让一批原本不可见的符号变可见（如 SPI_MTK_NOR=m → SPI_MTK_SNFI 变可见）。
+                # 这里按同样顺序先合入 override 的 =y/=m 项，再用真实 syncconfig 反复校验，仍报 (NEW) 的显式关掉后重来。
                 for pass in 1 2 3 4 5 6; do
+                  if [ -f "$KD/.config.override" ]; then
+                    grep -v '^#' "$KD/.config.override" >> "$KD/.config" || true
+                  fi
                   ( cd "$KD" && make ARCH=arm64 CROSS_COMPILE="$CROSS" syncconfig </dev/null > "$LOGDIR/kernel-syncconfig-$pass.log" 2>&1 )
                   if [ $? -eq 0 ]; then
-                    echo ">>> 内核 syncconfig 通过（第 $pass 轮）"
+                    echo ">>> 内核 syncconfig 通过（第 $pass 轮，已含 .config.override）"
                     break
                   fi
                   syms=$(sed -n 's/.*(\([A-Za-z0-9_]*\)) \[[^]]*\] (NEW).*/\1/p' "$LOGDIR/kernel-syncconfig-$pass.log" | sort -u)
@@ -499,6 +504,7 @@ jobs:
                     grep -qE "^(# )?CONFIG_${s}[= ]" "$KD/.config" || printf '# CONFIG_%s is not set\n' "$s" >> "$KD/.config"
                     echo ">>> syncconfig 补符号：CONFIG_$s → not set"
                   done
+                done
                 done
               else
                 echo "::warning::未找到 $CFG，跳过内核配置固化"
