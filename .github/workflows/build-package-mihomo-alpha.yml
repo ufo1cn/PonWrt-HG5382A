@@ -133,6 +133,18 @@ jobs:
           cat feeds.conf.default
           ./scripts/feeds update -a
 
+      - name: 注入 libffi（必须在 feeds install 之前）
+        working-directory: ./ponwrt
+        run: |
+          # libffi 在 PonWrt 树里缺失，而 ruby / tvheadend / wayland 等包都依赖它。
+          # 关键：必须在 feeds install 之前放进来，否则 feeds 扫描时找不到该包，
+          # 这些依赖会退化成 "has a dependency on 'libffi', which does not exist" 的警告，
+          # 后续真正编译时就会因为缺依赖失败。
+          mkdir -p package/libs/libffi
+          curl -fsSL -o package/libs/libffi/Makefile \
+            https://raw.githubusercontent.com/openwrt/openwrt/master/package/libs/libffi/Makefile
+          grep -q 'PKG_NAME:=libffi' package/libs/libffi/Makefile && echo ">>> libffi 注入成功" || exit 1
+
       - name: 前置依赖检查 & 分步 feeds install（防循环依赖）
         working-directory: ./ponwrt
         run: |
@@ -142,15 +154,10 @@ jobs:
           # 包清单只在实际写 .config 的阶段使用（见后面的 pkg_list）。
           ./scripts/feeds install -a
           echo ">>> feeds 全量安装完成"
-          make prereq
-
-      - name: 注入 libffi
-        working-directory: ./ponwrt
-        run: |
-          mkdir -p package/libs/libffi
-          curl -fsSL -o package/libs/libffi/Makefile \
-            https://raw.githubusercontent.com/openwrt/openwrt/master/package/libs/libffi/Makefile
-          grep -q 'PKG_NAME:=libffi' package/libs/libffi/Makefile && echo ">>> libffi 注入成功" || exit 1
+          # 注意：这里不要跑 make prereq。此时 .config 还没生成，make prereq 会进入
+          # menuconfig（CI 无 TTY → "Error opening terminal: unknown"，直接把任务打断）。
+          # 主机工具依赖会在后面 make defconfig 之后的正常构建流程里自检。
+          echo ">>> 跳过 make prereq（原因见上），继续"
 
       - name: 克隆 luci-app-airoha-npu
         working-directory: ./ponwrt
