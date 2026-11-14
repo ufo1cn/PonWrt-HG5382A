@@ -440,23 +440,50 @@ jobs:
           export GO111MODULE=on
           set -o pipefail
           mkdir -p ../build_log
-          # 【内核树预置】两类硬伤都在这里根治：
+          # 【内核树预置】三类硬伤都在这里根治：
           #  1) 固件：CI 无 TTY，kbuild 遇到 Kconfig 新增符号会停在 "(NEW) [N/y/?]"，syncconfig 直接失败；
-          #  2) 独立包：kmod 型包依赖 build_dir 里的内核 .config，没有就先报 "No rule to make target '.../.config'"。
-          # 做法：先编工具链 → 跑 target/linux/prepare 落地内核源码与 .config → 用 olddefconfig 非交互
-          # 把 NEW 符号按 Kconfig 默认值补齐 → modules_prepare 生成 include/config 与模块构建前置。
+          #     而且 OpenWrt 每次构建都用 target 的 config-6.18 重新合成 .config，olddefconfig 的结果会被覆盖，
+          #     所以补齐的符号必须回写进 config-6.18 才能持久生效；
+          #  2) 独立包：kmod 型包依赖 build_dir 里的内核 .config，没有就先报 "No rule to make target '.../.config'"；
+          #  3) kmod 编译还要内核 generated/ 头文件（如 generated/rq-offsets.h），必须用交叉工具链跑 modules_prepare。
           LOGDIR="$PWD/../build_log"
           mkdir -p "$LOGDIR"
+          TC_BIN=$(ls -d "$PWD"/staging_dir/toolchain-*/bin 2>/dev/null | head -1)
+          CROSS="aarch64-openwrt-linux-musl-"
+          [ -n "$TC_BIN" ] && export PATH="$TC_BIN:$PWD/staging_dir/host/bin:$PATH"
+          echo ">>> 交叉工具链：${TC_BIN:-未找到}"
           make -j"$(nproc)" V=s toolchain/compile > "$LOGDIR/toolchain-prep.log" 2>&1 \
             || { echo "::warning::toolchain/compile 有告警，尾部："; tail -n 20 "$LOGDIR/toolchain-prep.log"; }
           if make -j1 V=s target/linux/prepare > "$LOGDIR/kernel-prepare.log" 2>&1; then
             KD=$(ls -d build_dir/target-*/linux-*/linux-* 2>/dev/null | head -1)
             if [ -n "$KD" ]; then
-              ( cd "$KD" && make ARCH=arm64 olddefconfig </dev/null > "$LOGDIR/kernel-olddefconfig.log" 2>&1 ) \
+              ( cd "$KD" && make ARCH=arm64 CROSS_COMPILE="$CROSS" olddefconfig </dev/null > "$LOGDIR/kernel-olddefconfig.log" 2>&1 ) \
                 && echo ">>> 内核 olddefconfig 完成：$KD/.config（$(grep -c '^CONFIG_' "$KD/.config") 个显式符号）" \
                 || { echo "::warning::olddefconfig 失败，尾部："; tail -n 30 "$LOGDIR/kernel-olddefconfig.log"; }
-              ( cd "$KD" && make ARCH=arm64 modules_prepare </dev/null > "$LOGDIR/kernel-modules-prepare.log" 2>&1 ) \
-                || { echo "::warning::modules_prepare 失败，kmod 型包可能编不了"; tail -n 20 "$LOGDIR/kernel-modules-prepare.log"; }
+              ( cd "$KD" && make ARCH=arm64 CROSS_COMPILE="$CROSS" modules_prepare </dev/null > "$LOGDIR/kernel-modules-prepare.log" 2>&1 ) \
+                && echo ">>> 内核 modules_prepare 完成（generated 头文件已就绪）" \
+                || { echo "::warning::modules_prepare 失败，kmod 会缺 generated 头文件，尾部："; tail -n 20 "$LOGDIR/kernel-modules-prepare.log"; }
+              CFG=target/linux/airoha/an7581/config-6.18
+              if [ -f "$CFG" ]; then
+                cp -f "$CFG" "$LOGDIR/config-6.18.orig"
+                grep -E '^(# )?CONFIG_[A-Za-z0-9_]+' "$CFG" | sed -E 's/^(# )?(CONFIG_[A-Za-z0-9_]+).*/\2/' | sort -u > "$LOGDIR/cfg-syms.txt"
+                added=0
+                while IFS= read -r line; do
+                  case "$line" in
+                    CONFIG_*=*|"# CONFIG_"*" is not set")
+                      sym=${line%%=*}; sym=${sym#\# }; sym=${sym%% *}
+                      if ! grep -qxF "$sym" "$LOGDIR/cfg-syms.txt"; then
+                        printf '%s\n' "$line" >> "$CFG"
+                        echo "$sym" >> "$LOGDIR/cfg-syms.txt"
+                        added=$((added+1))
+                      fi
+                      ;;
+                  esac
+                done < "$KD/.config"
+                echo ">>> 内核配置固化：向 $CFG 追加 $added 个符号（原文件备份 $LOGDIR/config-6.18.orig）"
+              else
+                echo "::warning::未找到 $CFG，跳过内核配置固化"
+              fi
             else
               echo "::warning::未找到内核源码目录，跳过 olddefconfig"
             fi
