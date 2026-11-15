@@ -310,10 +310,17 @@ jobs:
                 # ovpn-backports 7.3.0 的 drivers/net/ovpn/main.c:371 用 MODULE_VERSION(OVPN_MODULE_VERSION)，
                 # 该宏由上游顶层构建注入；OpenWrt 只编 M=drivers/net/ovpn 子目录，宏是空的 →
                 # 报 "expected ',' or ';' before 'OVPN_MODULE_VERSION'"（run 43676216521 第 24 步）。这里补上定义。
+                # ovpn-backports 7.3.0 的 drivers/net/ovpn/main.c:371 用 MODULE_VERSION(OVPN_MODULE_VERSION)，
+                # 该宏由上游顶层构建注入；OpenWrt 只编 M=drivers/net/ovpn 子目录，宏是空的。
+                # 关键：feeds 的 Makefile 里 MAKE_OPTS:= ... NOSTDINC_FLAGS="$(NOSTDINC_FLAGS)" 用的是 := 立即展开，
+                # 往文件末尾追加等于追加在展开之后，进不了实际编译命令（run 43685528299 第 24 步实证）。
+                # 所以必须把定义插在 MAKE_OPTS:= 那一行之前。
                 OVN=feeds/packages/kernel/ovpn-dco/Makefile
                 if [ -f "$OVN" ] && ! grep -q 'OVPN_MODULE_VERSION' "$OVN"; then
-                  printf '%s\n' 'NOSTDINC_FLAGS += -DOVPN_MODULE_VERSION=\"7.3.0\"' >> "$OVN"
-                  echo ">>> ovpn-backports：已补 OVPN_MODULE_VERSION 宏定义"
+                  awk 'BEGIN{d=0} { if (!d && $0 ~ /^MAKE_OPTS:=/) { print "NOSTDINC_FLAGS += -DOVPN_MODULE_VERSION=\\\"7.3.0\\\""; d=1 } print }' "$OVN" > "$OVN.tmp"
+                  mv "$OVN.tmp" "$OVN"
+                  grep -n 'OVPN_MODULE_VERSION' "$OVN"
+                  echo ">>> ovpn-backports：已在 MAKE_OPTS 之前补入 OVPN_MODULE_VERSION 宏定义"
                 fi
 
                 # libarc4.ko 只有 kmod-crypto-arc4 提供，而 kmod-mppe 没声明 DEPENDS：
