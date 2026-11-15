@@ -540,7 +540,18 @@ jobs:
                     esac
                     sed -i -E "/^(# )?CONFIG_${s}[= ]/d" "$CFG" || true
                     printf '%s\n' "$val" >> "$CFG"
+                    # 同时写进 build_dir 的 .config：kbuild 的 syncconfig 直接读这份文件，
+                    # 只改 target 配置而 Configure 不重跑时，符号等于没补（run 43653774580 连撞 6 轮 DEVMEM）。
+                    if [ -f "$KD/.config" ]; then
+                      sed -i -E "/^(# )?CONFIG_${s}[= ]/d" "$KD/.config" || true
+                      printf '%s\n' "$val" >> "$KD/.config"
+                    fi
+                    # 目标配置已变更，删掉 configure 戳，保证下一轮 Kernel/Configure 真的重跑并重建 .config。
+                    # 这不是放宽校验：下一轮仍然是真实编译，符号没生效就还会再报 (NEW)。
+                    rm -f "$KD/.configured" "$KD/.configured-check"
                     echo ">>> (NEW) 无默认值符号 → 显式定值：$val"
+                    echo ">>> diag: $CFG=$(grep -c "^CONFIG_${s}=" 2>/dev/null "$CFG" || true) .config="\
+                      "$(grep -c "^CONFIG_${s}=" 2>/dev/null "$KD/.config" || true)"
                   done
                 done
                 if [ $rc -ne 0 ]; then
