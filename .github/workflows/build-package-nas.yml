@@ -424,6 +424,9 @@ jobs:
             # "time: package/feeds/packages/samba4/compile#0.20"，18 个 OK 包的 apk 全部缺失。
             # 这里从 Makefile 的 BuildPackage 声明解析包名，逐个写进 .config（=m）。
             names=$(grep -hoE 'BuildPackage[,(][ ]*[A-Za-z0-9_.+-]+' "$d/Makefile" 2>/dev/null | sed -E 's/BuildPackage[,(][ ]*//' | sort -u || true)
+            # luci 包的 Makefile 常写成 BuildPackage,$(PKG_NAME)，上面的正则抓不到 → names 为空 →
+            # 没写 CONFIG_PACKAGE_xxx，make 0.0x 秒空返回（run 43653777261 的 4 个 NOAPK 正是此因）。目录名即包名，回退用它。
+            if [ -z "$names" ]; then names="$name"; fi
             for n in $names; do
               grep -qE "^CONFIG_PACKAGE_${n}=" .config || printf 'CONFIG_PACKAGE_%s=m\n' "$n" >> .config
             done
