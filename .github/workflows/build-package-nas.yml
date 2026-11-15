@@ -315,16 +315,31 @@ jobs:
                 # 关键：feeds 的 Makefile 里 MAKE_OPTS:= ... NOSTDINC_FLAGS="$(NOSTDINC_FLAGS)" 用的是 := 立即展开，
                 # 往文件末尾追加等于追加在展开之后，进不了实际编译命令（run 43685528299 第 24 步实证）。
                 # 所以必须把定义插在 MAKE_OPTS:= 那一行之前。
-                # 引号穿层：值要经过两层 shell（Build/Compile 的 NOSTDINC_FLAGS="..." → 子 make → gcc 命令行）。
-                # 之前写成 -DOVPN_MODULE_VERSION=\"7.3.0\"，两层剥完引号后 gcc 收到 -DOVPN_MODULE_VERSION=7.3.0，
-                # 报 <command-line>: error: too many decimal points in number（run 43700756531 第 24 步）。
-                # 现在用单引号夹住双引号：'"7.3.0"'，第一层保留字面量，第二层单引号内双引号不被剥，gcc 才拿到字符串字面量。
+                # 引号穿层：值要穿过多层 shell（Build/Compile 的 NOSTDINC_FLAGS="..." → 子 make → 编译命令 → …），
+                # 写成 -DOVPN_MODULE_VERSION=\"7.3.0\" 被剥成 7.3.0（run 43700756531）；改成 '"7.3.0"' 仍被剥（run 43714642112 第 24 步）。
+                # 结论：-D 这条路走不通。改为在 Build/Prepare 里直接改源码 main.c:371，把
+                # MODULE_VERSION(OVPN_MODULE_VERSION) 换成 MODULE_VERSION("7.3.0")，源码里的字面量不经过任何 shell。
                 OVN=feeds/packages/kernel/ovpn-dco/Makefile
                 if [ -f "$OVN" ] && ! grep -q 'OVPN_MODULE_VERSION' "$OVN"; then
-                  awk 'BEGIN{d=0} { if (!d && $0 ~ /^MAKE_OPTS:=/) { print "NOSTDINC_FLAGS += -DOVPN_MODULE_VERSION=\047\"7.3.0\"\047"; d=1 } print }' "$OVN" > "$OVN.tmp"
+                  awk 'BEGIN{d=0} { if (!d && $0 ~ /^MAKE_OPTS:=/) { print "define Build/Prepare"; print "\t$(call Build/Prepare/Default)"; print "\tsed -i \047s,MODULE_VERSION(OVPN_MODULE_VERSION),MODULE_VERSION(\"7.3.0\"),\047 $(PKG_BUILD_DIR)/drivers/net/ovpn/main.c"; print "\tgrep -q \047MODULE_VERSION(\"7.3.0\")\047 $(PKG_BUILD_DIR)/drivers/net/ovpn/main.c || { echo \"::error::ovpn main.c 版本宏替换失败\"; exit 1; }"; print "endef"; d=1 } print }' "$OVN" > "$OVN.tmp"
                   mv "$OVN.tmp" "$OVN"
                   grep -n 'OVPN_MODULE_VERSION' "$OVN"
                   echo ">>> ovpn-backports：已在 MAKE_OPTS 之前补入 OVPN_MODULE_VERSION 宏定义"
+                fi
+                # 同时修 kmod-mppe 缺依赖（run 43714670926 第 12 步原始行）：
+                #   Package kmod-mppe is missing dependencies for the following libraries:
+                #   libarc4.ko
+                # 根因：ponwrt 的 modules/netsupport.mk 里 KernelPackage/mppe 只写了 DEPENDS:=kmod-ppp +kmod-crypto-sha1，
+                # 没声明 libarc4.ko 的提供者；内核 6.18 的 ppp_mppe 直接用 libarc4 符号，modinfo depends=libarc4。
+                # 而编包时 gen-dependencies 要求本包 provides 里含 libarc4.ko，provides 只从 DEPENDS 继承（include/package-pack.mk
+                # 里 $(PKG_INFO_DIR)/$(1).provides 会合并 $(IDEPEND_$(1)) 的 provides），所以缺 DPDENDS 就会失败。
+                # 修法是补上真正的提供者 kmod-crypto-arc4（它打包 lib/crypto/libarc4.ko），不是删校验。
+                NS=package/kernel/linux/modules/netsupport.mk
+                if [ -f "$NS" ] && ! grep -q 'kmod-crypto-arc4' "$NS"; then
+                  sed -i 's/^  DEPENDS:=kmod-ppp +kmod-crypto-sha1$/  DEPENDS:=kmod-ppp +kmod-crypto-sha1 +kmod-crypto-arc4/' "$NS"
+                  grep -q 'kmod-crypto-sha1 +kmod-crypto-arc4' "$NS" || { echo "::error::netsupport.mk 里 KernelPackage/mppe 的 DEPENDS 未补上 kmod-crypto-arc4"; exit 1; }
+                  grep -n 'kmod-crypto-arc4' "$NS"
+                  echo ">>> kmod-mppe：DEPENDS 已补 +kmod-crypto-arc4（libarc4.ko 由它提供）"
                 fi
 
                 # libarc4.ko 只有 kmod-crypto-arc4 提供（crypto.mk: FILES crypto/arc4.ko + lib/crypto/libarc4.ko），
