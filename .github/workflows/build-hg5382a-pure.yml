@@ -934,6 +934,44 @@ jobs:
                   grep -n 'kmod-crypto-arc4' "$NS"
                   echo ">>> kmod-mppe：DEPENDS 已补 +kmod-crypto-arc4（libarc4.ko 由它提供）"
                 fi
+                # airoha-eth.ko 由内核 drivers/net/ethernet/airoha 生成（真实内核 CONFIG_NET_AIROHA=m），
+                # 但 ponwrt 的 package/kernel/linux/modules 里没有任何包声明它，于是 kmod-airoha-xpon 的
+                # modinfo depends=airoha-eth 找不到提供者，报（run 43730208954 / 43730212909 / 43730237832 同一根因）：
+                #   Package kmod-airoha-xpon is missing dependencies for the following libraries: airoha-eth.ko
+                # 修法：补真正的提供者包 kmod-airoha-eth（KCONFIG:=CONFIG_NET_AIROHA 保证产出 .ko），
+                # 并把依赖声明补进 airoha-xpon 的 DEPENDS（不是删校验、不是放宽检查）。
+                AEM=package/kernel/airoha-eth
+                if [ ! -f "$AEM/Makefile" ]; then
+                  mkdir -p "$AEM"
+                printf '%s\n' \
+                  'include $(TOPDIR)/rules.mk' \
+                  'include $(INCLUDE_DIR)/kernel.mk' \
+                  'PKG_NAME:=airoha-eth' \
+                  'PKG_RELEASE:=1' \
+                  'include $(INCLUDE_DIR)/package.mk' \
+                  'define KernelPackage/airoha-eth' \
+                  '  SUBMENU:=Network Devices' \
+                  '  TITLE:=Airoha AN7581/AN7583 on-chip Ethernet' \
+                  '  DEPENDS:=@(TARGET_airoha_an7581||TARGET_airoha_an7583)' \
+                  '  KCONFIG:=CONFIG_NET_AIROHA' \
+                  '  FILES:= $(LINUX_DIR)/drivers/net/ethernet/airoha/airoha-eth.ko' \
+                  '  AUTOLOAD:=$(call AutoLoad,30,airoha-eth)' \
+                  'endef' \
+                  'define KernelPackage/airoha-eth/description' \
+                  '  AN7581/AN7583 片上以太网（QDMA/GDM），xPON 数据面依赖其导出符号' \
+                  'endef' \
+                  '$(eval $(call KernelPackage,airoha-eth))' \
+                  > "$AEM/Makefile"
+                fi
+                XP=feeds/pon_drivers/airoha-xpon/Makefile
+                if [ -f "$XP" ] && ! grep -q 'kmod-airoha-eth' "$XP"; then
+                  sed -i 's#+kmod-airoha-pon-frontend#+kmod-airoha-pon-frontend +kmod-airoha-eth#' "$XP"
+                  grep -n 'kmod-airoha-eth' "$XP" || { echo "::error::airoha-xpon 的 DEPENDS 未补上 kmod-airoha-eth"; exit 1; }
+                fi
+                if [ -f .config ] && ! grep -q '^CONFIG_PACKAGE_kmod-airoha-eth=' .config; then
+                  printf 'CONFIG_PACKAGE_kmod-airoha-eth=y\n' >> .config
+                fi
+                echo ">>> airoha-eth：已补 kmod-airoha-eth 提供者包，airoha-xpon 的 DEPENDS 已声明"
 
                 # libarc4.ko 只有 kmod-crypto-arc4 提供，而 kmod-mppe 没声明 DEPENDS：
                 # Package kmod-mppe is missing dependencies for the following libraries: libarc4.ko（run 43676220946 第 12 步）。
