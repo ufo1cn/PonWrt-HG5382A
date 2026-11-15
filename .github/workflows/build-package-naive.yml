@@ -354,6 +354,14 @@ jobs:
                 # bridge 系：ponwrt 的 package/kernel/linux/modules 里【没有】KernelPackage/bridge（也就没有 kmod-bridge 包），
                 # 所以桥接模块只能 built-in，不可能由某个包提供 bridge.ko；br_netfilter 等也必须 =y 才能落到「built-in → NOTICE 跳过」的合规分支。
                 # 蓝牙/声卡系：这些确有 kmod 包，必须 =m 才能产出 .ko。
+                # ovpn-backports 7.3.0 的 drivers/net/ovpn/main.c:371 用 MODULE_VERSION(OVPN_MODULE_VERSION)，
+                # 该宏由上游顶层构建注入；OpenWrt 只编 M=drivers/net/ovpn 子目录，宏是空的 →
+                # 报 "expected ',' or ';' before 'OVPN_MODULE_VERSION'"（run 43676216521 第 24 步）。这里补上定义。
+                OVN=feeds/packages/kernel/ovpn-dco/Makefile
+                if [ -f "$OVN" ] && ! grep -q 'OVPN_MODULE_VERSION' "$OVN"; then
+                  printf '%s\n' 'NOSTDINC_FLAGS += -DOVPN_MODULE_VERSION=\"7.3.0\"' >> "$OVN"
+                  echo ">>> ovpn-backports：已补 OVPN_MODULE_VERSION 宏定义"
+                fi
                 for kv in "CONFIG_BRIDGE=y" "CONFIG_BRIDGE_NETFILTER=y" "CONFIG_NF_CONNTRACK_BRIDGE=y" \
                           "CONFIG_NFT_BRIDGE_META=y" "CONFIG_NFT_BRIDGE_REJECT=y" \
                           "CONFIG_BT_HCIUART_QCA=m" "CONFIG_PWRSEQ_CORE=m" \
