@@ -908,9 +908,13 @@ jobs:
                 # 关键：feeds 的 Makefile 里 MAKE_OPTS:= ... NOSTDINC_FLAGS="$(NOSTDINC_FLAGS)" 用的是 := 立即展开，
                 # 往文件末尾追加等于追加在展开之后，进不了实际编译命令（run 43685528299 第 24 步实证）。
                 # 所以必须把定义插在 MAKE_OPTS:= 那一行之前。
+                # 引号穿层：值要经过两层 shell（Build/Compile 的 NOSTDINC_FLAGS="..." → 子 make → gcc 命令行）。
+                # 之前写成 -DOVPN_MODULE_VERSION=\"7.3.0\"，两层剥完引号后 gcc 收到 -DOVPN_MODULE_VERSION=7.3.0，
+                # 报 <command-line>: error: too many decimal points in number（run 43700756531 第 24 步）。
+                # 现在用单引号夹住双引号：'"7.3.0"'，第一层保留字面量，第二层单引号内双引号不被剥，gcc 才拿到字符串字面量。
                 OVN=feeds/packages/kernel/ovpn-dco/Makefile
                 if [ -f "$OVN" ] && ! grep -q 'OVPN_MODULE_VERSION' "$OVN"; then
-                  awk 'BEGIN{d=0} { if (!d && $0 ~ /^MAKE_OPTS:=/) { print "NOSTDINC_FLAGS += -DOVPN_MODULE_VERSION=\\\"7.3.0\\\""; d=1 } print }' "$OVN" > "$OVN.tmp"
+                  awk 'BEGIN{d=0} { if (!d && $0 ~ /^MAKE_OPTS:=/) { print "NOSTDINC_FLAGS += -DOVPN_MODULE_VERSION=\047\"7.3.0\"\047"; d=1 } print }' "$OVN" > "$OVN.tmp"
                   mv "$OVN.tmp" "$OVN"
                   grep -n 'OVPN_MODULE_VERSION' "$OVN"
                   echo ">>> ovpn-backports：已在 MAKE_OPTS 之前补入 OVPN_MODULE_VERSION 宏定义"
