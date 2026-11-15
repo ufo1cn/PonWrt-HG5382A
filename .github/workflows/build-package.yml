@@ -324,6 +324,16 @@ jobs:
           done
           echo ">>> 内核配置覆盖写入完成（共 $(echo $DRIVER_KCONFIGS | wc -w) 个符号）"
 
+          # airoha-eth.ko 是 PON 数据面的提供者，整个仓库没有任何 kmod 包声明它。
+          # 上面那个循环把 DRIVER_KCONFIGS（含 CONFIG_NET_AIROHA）统统写成 CONFIG_KERNEL_xxx=m，
+          # 于是 airoha-eth 被编成 .ko，kmod-airoha-xpon 的 modinfo 依赖 airoha-eth.ko 找不到提供者 →
+          # Package kmod-airoha-xpon is missing dependencies for the following libraries: airoha-eth.ko
+          # （run 43685533518 第 18 步）。固件侧写的是 CONFIG_NET_AIROHA=y，这里对齐成内置。
+          sed -i '/^CONFIG_KERNEL_NET_AIROHA=/d;/^CONFIG_KERNEL_NET_AIROHA_NPU=/d' .config
+          printf '%s\n' 'CONFIG_KERNEL_NET_AIROHA=y' 'CONFIG_KERNEL_NET_AIROHA_NPU=y' >> .config
+          grep -n '^CONFIG_KERNEL_NET_AIROHA' .config || { echo '::error::NET_AIROHA 内置定值未写入 .config'; exit 1; }
+          echo ">>> airoha-eth 已定为内置（CONFIG_KERNEL_NET_AIROHA=y），与固件一致"
+
       - name: 批量设置目标包为 =m
         working-directory: ./ponwrt
         run: |
