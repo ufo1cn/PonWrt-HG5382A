@@ -304,9 +304,11 @@ jobs:
                 # 真实构建却仍撞 (NEW)（实测 run 43636459314 / 43630997001 都是这种假通过）。
                 # 【kmod 打包要核对 .ko 文件是否存在】package/kernel/linux 会逐个检查被选中 kmod 声明的模块文件，
                 # 缺一个就 Error 1（实测 run 43653685076 第 24 步：bridge.ko / btqca.ko / pwrseq-core.ko / snd-mixer-oss.ko 缺失）。
-                # 这些符号必须给 =m：给 =y 会变成 built-in，.ko 文件反而不存在，依赖它的 kmod 仍然报缺。
-                for kv in "CONFIG_BRIDGE=m" "CONFIG_BRIDGE_NETFILTER=m" "CONFIG_NF_CONNTRACK_BRIDGE=m" \
-                          "CONFIG_NFT_BRIDGE_META=m" "CONFIG_NFT_BRIDGE_REJECT=m" \
+                # bridge 系：ponwrt 的 package/kernel/linux/modules 里【没有】KernelPackage/bridge（也就没有 kmod-bridge 包），
+                # 所以桥接模块只能 built-in，不可能由某个包提供 bridge.ko；br_netfilter 等也必须 =y 才能落到「built-in → NOTICE 跳过」的合规分支。
+                # 蓝牙/声卡系：这些确有 kmod 包，必须 =m 才能产出 .ko。
+                for kv in "CONFIG_BRIDGE=y" "CONFIG_BRIDGE_NETFILTER=y" "CONFIG_NF_CONNTRACK_BRIDGE=y" \
+                          "CONFIG_NFT_BRIDGE_META=y" "CONFIG_NFT_BRIDGE_REJECT=y" \
                           "CONFIG_BT_HCIUART_QCA=m" "CONFIG_PWRSEQ_CORE=m" \
                           "CONFIG_SND_OSSEMUL=y" "CONFIG_SND_MIXER_OSS=m"; do
                   k=${kv%%=*}; v=${kv#*=}
@@ -318,7 +320,7 @@ jobs:
                   fi
                 done
                 rm -f "$KD/.configured" "$KD/.configured-check"
-                echo ">>> kmod 依赖内核符号已补：$(grep -cE '^CONFIG_(BRIDGE|BT_HCIUART_QCA|SND_MIXER_OSS)=' "$CFG" || true) 个"
+                echo ">>> kmod 依赖内核符号已补：$(grep -cE '^CONFIG_(BRIDGE|BRIDGE_NETFILTER|BT_HCIUART_QCA|SND_MIXER_OSS)=' "$CFG" || true) 个"
                 # 运行库/打包依赖也要真选中，否则 CheckDependencies 报 libaio.so.1 / libstdc++.so.6 / liburcu.so.8
                 for p in libaio liburcu libstdcpp; do
                   grep -qE "^CONFIG_PACKAGE_${p}=" .config || printf 'CONFIG_PACKAGE_%s=m\n' "$p" >> .config
