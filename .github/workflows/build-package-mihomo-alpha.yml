@@ -546,19 +546,15 @@ jobs:
                 fi
                 # airoha-eth.ko 由内核 drivers/net/ethernet/airoha 生成（真实内核 CONFIG_NET_AIROHA=m），
                 # 但 ponwrt 的 package/kernel/linux/modules 里没有任何包声明它，于是 kmod-airoha-xpon 的
-                # modinfo depends=airoha-eth 找不到提供者，报（run 43730208954 / 43730212909 / 43730237832 同一根因）：
-                #   Package kmod-airoha-xpon is missing dependencies for the following libraries: airoha-eth.ko
-                # 修法：补真正的提供者包 kmod-airoha-eth（KCONFIG:=CONFIG_NET_AIROHA 保证产出 .ko），
-                # 并把依赖声明补进 airoha-xpon 的 DEPENDS（不是删校验、不是放宽检查）。
-                AEM=package/kernel/airoha-eth
-                if [ ! -f "$AEM/Makefile" ]; then
-                  mkdir -p "$AEM"
+                # modinfo depends=airoha-eth.ko 找不到提供者（run 43730208954 / 43730212909 / 43730237832）。
+                # 写法必须是 package/kernel/linux/modules/*.mk 片段：package/kernel/linux/Makefile 用
+                #   include $(sort $(wildcard ./modules/*.mk))
+                # 统一收录，Build/Compile 由它提供；单独建 package/kernel/<名字>/Makefile 会走通用模板并报
+                #   make[3]: *** No targets specified and no makefile found.  Stop.
+                # （run 43746505472 / 43746507610 已实证，别再那样写）。
+                AEM=package/kernel/linux/modules/netdev-airoha-eth.mk
+                if [ ! -f "$AEM" ]; then
                 printf '%s\n' \
-                  'include $(TOPDIR)/rules.mk' \
-                  'include $(INCLUDE_DIR)/kernel.mk' \
-                  'PKG_NAME:=airoha-eth' \
-                  'PKG_RELEASE:=1' \
-                  'include $(INCLUDE_DIR)/package.mk' \
                   'define KernelPackage/airoha-eth' \
                   '  SUBMENU:=Network Devices' \
                   '  TITLE:=Airoha AN7581/AN7583 on-chip Ethernet' \
@@ -571,8 +567,9 @@ jobs:
                   '  AN7581/AN7583 片上以太网（QDMA/GDM），xPON 数据面依赖其导出符号' \
                   'endef' \
                   '$(eval $(call KernelPackage,airoha-eth))' \
-                  > "$AEM/Makefile"
+                  > "$AEM"
                 fi
+                grep -q 'KernelPackage/airoha-eth' "$AEM" || { echo "::error::$AEM 生成失败"; exit 1; }
                 XP=feeds/pon_drivers/airoha-xpon/Makefile
                 if [ -f "$XP" ] && ! grep -q 'kmod-airoha-eth' "$XP"; then
                   sed -i 's#+kmod-airoha-pon-frontend#+kmod-airoha-pon-frontend +kmod-airoha-eth#' "$XP"
@@ -581,7 +578,7 @@ jobs:
                 if [ -f .config ] && ! grep -q '^CONFIG_PACKAGE_kmod-airoha-eth=' .config; then
                   printf 'CONFIG_PACKAGE_kmod-airoha-eth=y\n' >> .config
                 fi
-                echo ">>> airoha-eth：已补 kmod-airoha-eth 提供者包，airoha-xpon 的 DEPENDS 已声明"
+                echo ">>> airoha-eth：已用 modules/netdev-airoha-eth.mk 声明 kmod-airoha-eth，airoha-xpon 的 DEPENDS 已声明"
 
                 # libarc4.ko 只有 kmod-crypto-arc4 提供（crypto.mk: FILES crypto/arc4.ko + lib/crypto/libarc4.ko），
                 # 而 kmod-mppe 的 KernelPackage 没声明 DEPENDS。上一版把它编成内置是错方向：
