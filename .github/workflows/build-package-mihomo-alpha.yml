@@ -515,6 +515,13 @@ jobs:
                 rm -f "$KD/.configured" "$KD/.configured-check"
                 echo ">>> kmod 依赖内核符号已补：$(grep -cE '^CONFIG_(BRIDGE|BRIDGE_NETFILTER|BT_HCIUART_QCA|SND_MIXER_OSS)=' "$CFG" || true) 个"
                 # 运行库/打包依赖也要真选中，否则 CheckDependencies 报 libaio.so.1 / libstdc++.so.6 / liburcu.so.8
+                # gensio 2.8.4 上游 bug：init_mutex 只在 #ifdef USE_PTHREADS 内定义，却在不带 pthreads 时被无条件调用，
+                # GCC 14 把 implicit declaration 当错误（run 43667373613 第 18 步 gensio_unix.c:364）。
+                # 修法是按上游本意打开 pthreads 支持（musl 下恒可用），不改源码、不放松任何校验。
+                for kv in "CONFIG_PACKAGE_libgensio=m" "CONFIG_GENSIO_PTHREADS=y"; do
+                  k=${kv%%=*}; v=${kv#*=}
+                  grep -qE "^${k}=" .config || printf '%s=%s\n' "$k" "$v" >> .config
+                done
                 for p in libaio liburcu libstdcpp; do
                   grep -qE "^CONFIG_PACKAGE_${p}=" .config || printf 'CONFIG_PACKAGE_%s=m\n' "$p" >> .config
                 done
