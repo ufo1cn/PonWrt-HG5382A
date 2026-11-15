@@ -323,14 +323,16 @@ jobs:
                   echo ">>> ovpn-backports：已在 MAKE_OPTS 之前补入 OVPN_MODULE_VERSION 宏定义"
                 fi
 
-                # libarc4.ko 只有 kmod-crypto-arc4 提供，而 kmod-mppe 没声明 DEPENDS：
-                # Package kmod-mppe is missing dependencies for the following libraries: libarc4.ko（run 43676220946 第 12 步）。
-                # 与 bridge.ko 同理，直接内置，让 dep 解析到 vmlinux 而不是找 .ko 包。
-                if ! grep -q 'CONFIG_CRYPTO_ARC4=y' .config; then
-                  sed -i '/^CONFIG_CRYPTO_ARC4=/d' .config
-                  printf '%s\n' 'CONFIG_CRYPTO_ARC4=y' 'CONFIG_CRYPTO_USER_API_ENABLE_OBSOLETE=y' >> .config
-                  echo ">>> libarc4 已设为内置（CONFIG_CRYPTO_ARC4=y）"
-                fi
+                # libarc4.ko 只有 kmod-crypto-arc4 提供（crypto.mk: FILES crypto/arc4.ko + lib/crypto/libarc4.ko），
+                # 而 kmod-mppe 的 KernelPackage 没声明 DEPENDS。上一版把它编成内置是错方向：
+                # 内置后 lib/crypto/libarc4.ko 根本不会生成，ppp_mppe.ko 的 modinfo 依赖照样要求有包提供它，
+                # 于是 run 43688657277 第 12 步仍报 Package kmod-mppe is missing dependencies … libarc4.ko。
+                # 正解：选中提供者包 kmod-crypto-arc4=m，让 libarc4.ko 真被编出并随 kmod-crypto-arc4 打包；
+                # 同时删掉内置行，避免与包的 KCONFIG(CONFIG_CRYPTO_ARC4) 冲突。
+                sed -i '/^CONFIG_CRYPTO_ARC4=/d;/^CONFIG_KERNEL_CRYPTO_ARC4=/d;/^CONFIG_PACKAGE_kmod-crypto-arc4=/d' .config
+                printf '%s\n' 'CONFIG_PACKAGE_kmod-crypto-arc4=m' >> .config
+                grep -q '^CONFIG_PACKAGE_kmod-crypto-arc4=m' .config || { echo "::error::CONFIG_PACKAGE_kmod-crypto-arc4 未写入 .config"; exit 1; }
+                echo ">>> libarc4 提供者已选中（CONFIG_PACKAGE_kmod-crypto-arc4=m）"
                 for kv in "CONFIG_BRIDGE=y" "CONFIG_BRIDGE_NETFILTER=y" "CONFIG_NF_CONNTRACK_BRIDGE=y" \
                           "CONFIG_NFT_BRIDGE_META=y" "CONFIG_NFT_BRIDGE_REJECT=y" \
                           "CONFIG_BT_HCIUART_QCA=m" "CONFIG_PWRSEQ_CORE=m" \
