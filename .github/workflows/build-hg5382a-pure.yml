@@ -895,6 +895,28 @@ jobs:
                 # 预生成 .config.override：真实构建时它由 package-metadata.pl 依包依赖生成。
                 # 预置阶段若不存在，下面的循环就是拿"没有 override"的配置自检——首轮必然"通过"，
                 # 真实构建却仍撞 (NEW)（实测 run 43636459314 / 43630997001 都是这种假通过）。
+                # 【kmod 打包要核对 .ko 文件是否存在】package/kernel/linux 会逐个检查被选中 kmod 声明的模块文件，
+                # 缺一个就 Error 1（实测 run 43653685076 第 24 步：bridge.ko / btqca.ko / pwrseq-core.ko / snd-mixer-oss.ko 缺失）。
+                # 这些符号必须给 =m：给 =y 会变成 built-in，.ko 文件反而不存在，依赖它的 kmod 仍然报缺。
+                for kv in "CONFIG_BRIDGE=m" "CONFIG_BRIDGE_NETFILTER=m" "CONFIG_NF_CONNTRACK_BRIDGE=m" \
+                          "CONFIG_NFT_BRIDGE_META=m" "CONFIG_NFT_BRIDGE_REJECT=m" \
+                          "CONFIG_BT_HCIUART_QCA=m" "CONFIG_PWRSEQ_CORE=m" \
+                          "CONFIG_SND_OSSEMUL=y" "CONFIG_SND_MIXER_OSS=m"; do
+                  k=${kv%%=*}; v=${kv#*=}
+                  sed -i -E "/^(# )?${k}[= ]/d" "$CFG" || true
+                  printf '%s=%s\n' "$k" "$v" >> "$CFG"
+                  if [ -f "$KD/.config" ]; then
+                    sed -i -E "/^(# )?${k}[= ]/d" "$KD/.config" || true
+                    printf '%s=%s\n' "$k" "$v" >> "$KD/.config"
+                  fi
+                done
+                rm -f "$KD/.configured" "$KD/.configured-check"
+                echo ">>> kmod 依赖内核符号已补：$(grep -cE '^CONFIG_(BRIDGE|BT_HCIUART_QCA|SND_MIXER_OSS)=' "$CFG" || true) 个"
+                # 运行库/打包依赖也要真选中，否则 CheckDependencies 报 libaio.so.1 / libstdc++.so.6 / liburcu.so.8
+                for p in libaio liburcu libstdcpp; do
+                  grep -qE "^CONFIG_PACKAGE_${p}=" .config || printf 'CONFIG_PACKAGE_%s=m\n' "$p" >> .config
+                done
+                grep -qE '^CONFIG_PACKAGE_kmod-bridge=' .config || printf 'CONFIG_PACKAGE_kmod-bridge=y\n' >> .config
                 if [ ! -s "$KD/.config.override" ]; then
                   if [ ! -f tmp/.packageinfo ]; then
                     make -j1 V=s prepare-tmpinfo > "$LOGDIR/packageinfo.log" 2>&1 || true
@@ -917,7 +939,7 @@ jobs:
                 # target 内核配置 config-6.18，让真实构建的 .config 里始终有确定值。这不是放宽校验：
                 # 每轮仍然是真实编译，编不过就继续补符号，6 轮还不过就硬失败并打原始日志。
                 rc=1
-                for pass in 1 2 3 4 5 6; do
+                for pass in $(seq 1 12); do
                   if make -j"$(nproc)" V=s target/linux/compile > "$LOGDIR/kernel-compile-$pass.log" 2>&1; then
                     echo ">>> target/linux/compile 通过（第 $pass 轮，Kernel/Configure + syncconfig 均真实执行）"
                     rc=0
