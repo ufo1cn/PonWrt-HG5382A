@@ -315,6 +315,15 @@ jobs:
                   printf '%s\n' 'NOSTDINC_FLAGS += -DOVPN_MODULE_VERSION=\"7.3.0\"' >> "$OVN"
                   echo ">>> ovpn-backports：已补 OVPN_MODULE_VERSION 宏定义"
                 fi
+
+                # libarc4.ko 只有 kmod-crypto-arc4 提供，而 kmod-mppe 没声明 DEPENDS：
+                # Package kmod-mppe is missing dependencies for the following libraries: libarc4.ko（run 43676220946 第 12 步）。
+                # 与 bridge.ko 同理，直接内置，让 dep 解析到 vmlinux 而不是找 .ko 包。
+                if ! grep -q 'CONFIG_CRYPTO_ARC4=y' .config; then
+                  sed -i '/^CONFIG_CRYPTO_ARC4=/d' .config
+                  printf '%s\n' 'CONFIG_CRYPTO_ARC4=y' 'CONFIG_CRYPTO_USER_API_ENABLE_OBSOLETE=y' >> .config
+                  echo ">>> libarc4 已设为内置（CONFIG_CRYPTO_ARC4=y）"
+                fi
                 for kv in "CONFIG_BRIDGE=y" "CONFIG_BRIDGE_NETFILTER=y" "CONFIG_NF_CONNTRACK_BRIDGE=y" \
                           "CONFIG_NFT_BRIDGE_META=y" "CONFIG_NFT_BRIDGE_REJECT=y" \
                           "CONFIG_BT_HCIUART_QCA=m" "CONFIG_PWRSEQ_CORE=m" \
