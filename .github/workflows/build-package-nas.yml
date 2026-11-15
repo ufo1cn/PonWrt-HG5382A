@@ -321,6 +321,14 @@ jobs:
                 done
                 rm -f "$KD/.configured" "$KD/.configured-check"
                 echo ">>> kmod 依赖内核符号已补：$(grep -cE '^CONFIG_(BRIDGE|BRIDGE_NETFILTER|BT_HCIUART_QCA|SND_MIXER_OSS)=' "$CFG" || true) 个"
+                # samba4 4.24.5 的 QUIC 封装链接 libgnutls 时缺 gnutls_alpn_set_protocols / gnutls_alpn_get_selected_protocol，
+                # 根因同 gensio：libgnutls 没被选中时 GNUTLS_ALPN 不生效，staging 里的 gnutls 是没 ALPN 的。
+                # aria2 1.37 报 'setClientTLSContext' is not a member of SocketCore，是同一条：没开 --with-gnutls 就没 ENABLE_SSL。
+                for kv in "CONFIG_PACKAGE_libgnutls=m" "CONFIG_GNUTLS_ALPN=y" \
+                          "CONFIG_PACKAGE_aria2=m" "CONFIG_ARIA2_GNUTLS=y"; do
+                  k=${kv%%=*}; v=${kv#*=}
+                  grep -qE "^${k}=" .config || printf '%s=%s\n' "$k" "$v" >> .config
+                done
                 # 运行库/打包依赖也要真选中，否则 CheckDependencies 报 libaio.so.1 / libstdc++.so.6 / liburcu.so.8
                 for p in libaio liburcu libstdcpp; do
                   grep -qE "^CONFIG_PACKAGE_${p}=" .config || printf 'CONFIG_PACKAGE_%s=m\n' "$p" >> .config
