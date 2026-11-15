@@ -354,7 +354,10 @@ jobs:
                   grep -qE "^${k}=" .config || printf '%s=%s\n' "$k" "$v" >> .config
                 done
                 # 运行库/打包依赖也要真选中，否则 CheckDependencies 报 libaio.so.1 / libstdc++.so.6 / liburcu.so.8
-                for p in libaio liburcu libstdcpp; do
+                # libcap 提供 libcap.so.2（samba4-libs 的 CheckDependencies 缺它，run 43685536291 pkg-samba4.log），
+                # musl-fts 提供 libfts.so.0（exfat-mkfs 缺它，同一 run 的 pkg-exfatprogs.log）。
+                # 两者都在 ponwrt 的 package/libs 里，选中即可真编出来，不改任何校验。
+                for p in libaio liburcu libstdcpp libcap musl-fts; do
                   grep -qE "^CONFIG_PACKAGE_${p}=" .config || printf 'CONFIG_PACKAGE_%s=m\n' "$p" >> .config
                 done
                 grep -qE '^CONFIG_PACKAGE_kmod-bridge=' .config || printf 'CONFIG_PACKAGE_kmod-bridge=m\n' >> .config
