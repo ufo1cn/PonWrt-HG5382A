@@ -876,6 +876,41 @@ jobs:
                 grep -q 'net/hsr/hsr.ko' "$MK_NETDEV" || { echo "::error::hsr.ko 的归属没写进 netdevices.mk"; exit 1; }
                 grep -q 'CONFIG_HSR' "$MK_NETDEV" || { echo "::error::CONFIG_HSR 没写进 netdevices.mk 的 KCONFIG"; exit 1; }
                 echo ">>> kmod-dsa 已同时声明 hsr.ko（CONFIG_HSR）"
+          # kmod-fs-cifs 的 cifs.ko 在 modinfo depends 里带 libarc4（内核 6.18 的 cifs 仍用 lib/crypto/libarc4），
+          # 但 ponwrt 的 modules/fs.mk 里 KernelPackage/fs-cifs 没声明提供者，gen-dependencies 直接报
+          #   Package kmod-fs-cifs is missing dependencies for the following libraries: libarc4.ko
+          #   make[3]: *** [modules/fs.mk:148: .../kmod-fs-cifs-6.18.55-r1.apk] Error 1
+          # （run 43865798315 第 24 步 logs 34080-34082；提供者 kmod-crypto-arc4 确实已打出
+          #   arc4.ko 与 libarc4.ko，缺的是 DEPENDS 声明，provides 只从 DEPENDS 继承）。
+          MK_FS=package/kernel/linux/modules/fs.mk
+          if ! grep -q 'KernelPackage/fs-cifs' "$MK_FS" || grep -q 'fs-cifs-arc4-fixed' "$MK_FS"; then :; fi
+          if ! awk '/^define KernelPackage\/fs-cifs$/{f=1} f&&/\+kmod-crypto-arc4/{g=1} f&&/^endef$/{f=0} END{exit !g}' "$MK_FS"; then
+            awk '
+              /^define KernelPackage\/fs-cifs$/ { inc=1 }
+              inc && /\+kmod-dnsresolver/ { print $0 " \\"; print "    +kmod-crypto-arc4"; next }
+              inc && /^endef$/ { inc=0 }
+              { print }
+            ' "$MK_FS" > "$MK_FS.fscifs.new" && mv "$MK_FS.fscifs.new" "$MK_FS"
+          fi
+          if ! awk '/^define KernelPackage\/fs-cifs$/{f=1} f&&/\+kmod-crypto-arc4/{g=1} f&&/^endef$/{f=0} END{exit !g}' "$MK_FS"; then
+            echo "::error::fs.mk 里 KernelPackage/fs-cifs 的 DEPENDS 未补上 kmod-crypto-arc4"
+            exit 1
+          fi
+          echo ">>> kmod-fs-cifs：DEPENDS 已补 +kmod-crypto-arc4（libarc4.ko 由它提供）"
+          # kmod-crypto-arc4 的 DEPENDS 里写了 +kmod-crypto-user，本固件只需要 libarc4
+          # （ppp-mppe / cifs 用），不需要 AF_ALG 用户态接口，结果 package/install 报
+          #   kmod-crypto-user (no such package): required by kmod-crypto-arc4-6.18.55-r1
+          # （run 43857124823 第 24 步 logs 3556-3557）。去掉这条不成立的依赖。
+          MK_CRYPTO=package/kernel/linux/modules/crypto.mk
+          if awk '/^define KernelPackage\/crypto-arc4$/{f=1} f&&/DEPENDS:=\+kmod-crypto-user/{g=1} f&&/^endef$/{f=0} END{exit !g}' "$MK_CRYPTO"; then
+            awk '
+              /^define KernelPackage\/crypto-arc4$/ { ina=1 }
+              ina && /DEPENDS:=\+kmod-crypto-user/ { sub(/\+kmod-crypto-user/, ""); print; next }
+              ina && /^endef$/ { ina=0 }
+              { print }
+            ' "$MK_CRYPTO" > "$MK_CRYPTO.arc4.new" && mv "$MK_CRYPTO.arc4.new" "$MK_CRYPTO"
+            echo ">>> kmod-crypto-arc4：已去掉 +kmod-crypto-user 依赖（只保留 arc4/libarc4）"
+          fi
 
                 # libarc4.ko 的唯一提供者是 kmod-crypto-arc4（crypto.mk:51，打 lib/crypto/libarc4.ko）。
                 # 以前这里把内核符号写成 CONFIG_CRYPTO_ARC4=y：libarc4 编进 vmlinux 后 kmod-crypto-arc4 没有 .ko 可打，
