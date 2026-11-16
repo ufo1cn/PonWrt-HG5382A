@@ -473,12 +473,18 @@ jobs:
           # /libavutil.so.61/libpostproc.so.59/libswresample.so.7/libswscale.so.10/libz.so.1
           # （run 43857129451 第 18 步 full-build.log 180986-180996）；minidlna 侧还要
           # libbz2.so.1.0 / libdrm.so.2 / libmp3lame.so.0 / libopus.so.0（pkg-minidlna.log 342-345）。
-          for p in libffmpeg libbz2 libdrm libopus lame-lib zlib; do
+          # libwebsockets-full 的 full 变体还带 libuv（Makefile DEPENDS += +libopenssl +libuv），
+          # 打包时报缺 libcap.so.2 / libuv.so.1 的提供者（run 43905483565 第 18 步
+          # full-build.log 125156-125163：Package libwebsockets-full is missing dependencies
+          # for the following libraries: libcap.so.2 / libuv.so.1 -> Error 1 ->
+          # ERROR: package/feeds/packages/libwebsockets failed to build (build variant: full)）。
+          # 补真正的提供者 libcap / libuv。
+          for p in libffmpeg libbz2 libdrm libopus lame-lib zlib libcap libuv; do
             sed -i "/^CONFIG_PACKAGE_${p}=/d" .config
             printf 'CONFIG_PACKAGE_%s=m\n' "$p" >> .config
             grep -q "^CONFIG_PACKAGE_${p}=m" .config || { echo "::error::运行库提供者 ${p} 未落成 =m"; exit 1; }
           done
-          echo ">>> libffmpeg 运行库提供者已落成 =m（libav*/libz/libbz2/libdrm/libmp3lame/libopus）"
+          echo ">>> libffmpeg 运行库提供者已落成 =m（libav*/libz/libbz2/libdrm/libmp3lame/libopus/libcap/libuv）"
           devcnt=$(grep -cxF 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' .config || true)
           anydev=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_[A-Za-z0-9_.-]+=y$' .config || true)
           echo ">>> 依赖解析后机型 devcnt=$devcnt anydev=$anydev"
