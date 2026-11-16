@@ -948,7 +948,7 @@ jobs:
                   'define KernelPackage/airoha-eth' \
                   '  SUBMENU:=Network Devices' \
                   '  TITLE:=Airoha AN7581/AN7583 on-chip Ethernet' \
-                  '  DEPENDS:=@(TARGET_airoha_an7581||TARGET_airoha_an7583)' \
+                  '  DEPENDS:=@(TARGET_airoha_an7581||TARGET_airoha_an7583) +kmod-dsa' \
                   '  KCONFIG:=CONFIG_NET_AIROHA' \
                   '  FILES:= $(LINUX_DIR)/drivers/net/ethernet/airoha/airoha-eth.ko' \
                   '  AUTOLOAD:=$(call AutoLoad,30,airoha-eth)' \
