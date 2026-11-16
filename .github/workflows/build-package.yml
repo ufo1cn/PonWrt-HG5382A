@@ -50,6 +50,10 @@ jobs:
       SHA_NAME: SHA256SUMS
       # 与 build-hg5585f.yml 保持同一套内核配置：万一在这里补编 kmod，
       # 生成的 .ko 的 vermagic 才会和固件匹配，装得上也加载得上。
+      # kmod-fs-nfs 的 nfs.ko 链接依赖 lockd.ko / sunrpc.ko（fs.mk 里 kmod-fs-nfs-common 的 KCONFIG=CONFIG_LOCKD/CONFIG_SUNRPC 负责产出），
+      # 但本工作流的内核配置是先 olddefconfig 再固化 9318 个符号，这两个符号被固化成内置 → .ko 不存在，
+      # 打包时报 Package kmod-fs-nfs is missing dependencies for the following libraries: lockd.ko / sunrpc.ko
+      # （alpha run 43937318449 第 18 步 full-build.log 145048-145050）。这里显式压回 =m，产出真正的 .ko 提供者。
       DRIVER_KCONFIGS: >-
         CONFIG_USB_USBNET CONFIG_USB_SERIAL CONFIG_USB_SERIAL_CH341 CONFIG_USB_SERIAL_CP210X CONFIG_USB_SERIAL_FTDI_SIO
         CONFIG_USB_SERIAL_PL2303 CONFIG_USB_ACM CONFIG_USB_WDM CONFIG_BT CONFIG_BT_HCIBTUSB
@@ -63,7 +67,7 @@ jobs:
         CONFIG_NFSD CONFIG_MACVLAN CONFIG_VETH CONFIG_BRIDGE CONFIG_BRIDGE_NF_EBTABLES
         CONFIG_NFT_NAT CONFIG_NF_NAT CONFIG_USB_STORAGE CONFIG_USB_UAS CONFIG_USB_XHCI_HCD
         CONFIG_SND CONFIG_SND_USB_AUDIO CONFIG_MEDIA_SUPPORT CONFIG_VIDEO_DEV CONFIG_USB_VIDEO_CLASS
-        CONFIG_INET_DIAG CONFIG_TUN
+        CONFIG_INET_DIAG CONFIG_TUN CONFIG_LOCKD CONFIG_SUNRPC CONFIG_GRACE_PERIOD
     steps:
       - name: 签出工作流仓库
         uses: actions/checkout@v4
