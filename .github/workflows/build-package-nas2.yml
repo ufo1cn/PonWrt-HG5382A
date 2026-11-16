@@ -381,8 +381,8 @@ jobs:
             cifs-utils
             minidlna
             luci-app-minidlna
-            transmission
             transmission-daemon
+            transmission-web
             luci-app-transmission
             qbittorrent
             luci-app-qbittorrent
