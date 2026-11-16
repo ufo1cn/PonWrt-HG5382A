@@ -591,6 +591,27 @@ jobs:
                 sed -i '/^CONFIG_CRYPTO_ARC4=/d;/^CONFIG_KERNEL_CRYPTO_ARC4=/d;/^CONFIG_PACKAGE_kmod-crypto-arc4=/d' .config
                 printf '%s\n' 'CONFIG_PACKAGE_kmod-crypto-arc4=m' >> .config
                 grep -q '^CONFIG_PACKAGE_kmod-crypto-arc4=m' .config || { echo "::error::CONFIG_PACKAGE_kmod-crypto-arc4 未写入 .config"; exit 1; }
+                # kmod-fs-ksmbd 的 ksmbd.ko modinfo depends=libarc4.ko（内核 6.18 的 ksmbd 直接用 libarc4 符号），
+                # 提供者是 kmod-crypto-arc4（crypto.mk: FILES crypto/arc4.ko + lib/crypto/libarc4.ko），
+                # 但 fs.mk 的 KernelPackage/fs-ksmbd DEPENDS 只列了 crypto-md5/hmac/gcm... 漏了 arc4 →
+                #   Package kmod-fs-ksmbd is missing dependencies for the following libraries: libarc4.ko
+                # （run 43798042478 第 18 步，build_log/pkg-btrfs-progs.log 第 287-288 行）。补真正的提供者，不放宽校验。
+                FSMK=package/kernel/linux/modules/fs.mk
+                if ! grep -q '+kmod-crypto-arc4' "$FSMK"; then
+                  awk '
+                    /^define KernelPackage\/fs-ksmbd$/ { ink=1 }
+                    ink && /\+kmod-fs-smbfs-common/ {
+                      match($0, /^[^+]*/); pre=substr($0,1,RLENGTH)
+                      print pre "+kmod-fs-smbfs-common \\"
+                      print pre "+kmod-crypto-arc4"
+                      next
+                    }
+                    ink && /^endef$/ { ink=0 }
+                    { print }
+                  ' "$FSMK" > "$FSMK.new" && mv "$FSMK.new" "$FSMK"
+                fi
+                grep -q '+kmod-crypto-arc4' "$FSMK" || { echo "::error::fs.mk 的 fs-ksmbd 没补上 +kmod-crypto-arc4"; exit 1; }
+                echo ">>> fs-ksmbd 的 DEPENDS 已补 +kmod-crypto-arc4（libarc4.ko 由 kmod-crypto-arc4 提供）"
                 echo ">>> libarc4 提供者已选中（CONFIG_PACKAGE_kmod-crypto-arc4=m）"
                 for kv in "CONFIG_BRIDGE=y" "CONFIG_BRIDGE_NETFILTER=y" "CONFIG_NF_CONNTRACK_BRIDGE=y" \
                           "CONFIG_NFT_BRIDGE_META=y" "CONFIG_NFT_BRIDGE_REJECT=y" \
