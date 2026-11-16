@@ -522,6 +522,9 @@ jobs:
           printf '# USB 支持（镜像内置）：主机控制器 kmod-usb3 会在 airoha 上\n' >> .config
           printf '# 自动拉入 kmod-usb-xhci-hcd + kmod-usb-xhci-mtk；其余为存储/文件系统\n' >> .config
           printf '# ============================================================\n' >> .config
+          # usbcore.ko 的唯一提供者是 kmod-usb-core：手写 .config 不会自己 select 依赖，
+          # 漏写时本步自检直接报 kmod-usb-core 没落在 =y（run 43858341197 第 20 步）。
+          printf 'CONFIG_PACKAGE_kmod-usb-core=y\n' >> .config
           printf 'CONFIG_PACKAGE_kmod-usb3=y\n' >> .config
           printf 'CONFIG_PACKAGE_kmod-usb-xhci-hcd=y\n' >> .config
           printf 'CONFIG_PACKAGE_kmod-usb-xhci-mtk=y\n' >> .config
