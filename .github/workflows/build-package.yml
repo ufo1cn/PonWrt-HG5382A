@@ -383,6 +383,12 @@ jobs:
             #   make[2]: *** [Makefile:408: .../kmod-rtw88-8723du-6.18.55.7.2-r5.apk] Error 1
             #   ERROR: package/kernel/mac80211 failed to build (build variant: regular).
             # （run 43891442354 第 18 步 full-build.log 172533-172538）——补真正的提供者。
+            # kmod-rtw88-8723d 的 Makefile 声明 DEPENDS+=+kmod-rtw88-8723x（realtek.mk 334-341 行，产出 rtw88_8723x.ko），
+            # 不选提供者时打包报：Package kmod-rtw88-8723d is missing dependencies for the following libraries:
+            #   rtw88_8723x.ko / rtw88_core.ko → make[2]: *** [Makefile:408: .../kmod-rtw88-8723d-6.18.55.7.2-r5.apk] Error 1
+            #   ERROR: package/kernel/mac80211 failed to build (build variant: regular)
+            # （bpkg run 43948046310 第 18 步 full-build.log 180151-180157）——补 rtw88_8723x.ko 的真实提供者。
+            kmod-rtw88-8723x
             kmod-rtw88-8723d
             kmod-rtw88-8723du
             kmod-rtl8xxxu
@@ -900,6 +906,12 @@ jobs:
             #   make[2]: *** [Makefile:408: .../kmod-rtw88-8723du-6.18.55.7.2-r5.apk] Error 1
             #   ERROR: package/kernel/mac80211 failed to build (build variant: regular).
             # （run 43891442354 第 18 步 full-build.log 172533-172538）——补真正的提供者。
+            # kmod-rtw88-8723d 的 Makefile 声明 DEPENDS+=+kmod-rtw88-8723x（realtek.mk 334-341 行，产出 rtw88_8723x.ko），
+            # 不选提供者时打包报：Package kmod-rtw88-8723d is missing dependencies for the following libraries:
+            #   rtw88_8723x.ko / rtw88_core.ko → make[2]: *** [Makefile:408: .../kmod-rtw88-8723d-6.18.55.7.2-r5.apk] Error 1
+            #   ERROR: package/kernel/mac80211 failed to build (build variant: regular)
+            # （bpkg run 43948046310 第 18 步 full-build.log 180151-180157）——补 rtw88_8723x.ko 的真实提供者。
+            kmod-rtw88-8723x
             kmod-rtw88-8723d
             kmod-rtw88-8723du
             kmod-rtl8xxxu
