@@ -438,7 +438,7 @@ jobs:
           # 不会被选中，打包阶段就报 "Package xxx is missing dependencies for the following libraries"
           # （实测：lua5.3 缺 liblua5.3.so.0.0.0、samba4 缺 libpopt/libtasn1/liburing、nfs 缺 libnl-3/libtirpc）。
           # 这里跑一次 defconfig 让 +DEPENDS 被 select，再重新锁机型、把清单压回 =m。这不是放宽校验。
-          make WARN_RECURSIVE_DEP=1 defconfig > ../build_log/defconfig-resolve.log 2>&1 || {
+          mkdir -p ../build_log && make WARN_RECURSIVE_DEP=1 defconfig > ../build_log/defconfig-resolve.log 2>&1 || {
             echo "::error::defconfig 依赖解析失败，尾部："
             tail -n 40 ../build_log/defconfig-resolve.log
             exit 1
