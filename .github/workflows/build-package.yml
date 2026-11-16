@@ -355,7 +355,7 @@ jobs:
             samba4
             luci-app-samba4
             autosamba
-            ksmbd
+            ksmbd-tools
             luci-app-ksmbd
             avahi-daemon
             luci-app-avahi
@@ -433,6 +433,38 @@ jobs:
             set_pkg_m "$p"
           done
           echo ">>> 所有包设为模块，依赖解析完成"
+
+          # 【依赖解析修复】上面只是把目标包写 =m，没有做 Kconfig 解析，于是 +DEPENDS 指到的依赖包
+          # 不会被选中，打包阶段就报 "Package xxx is missing dependencies for the following libraries"
+          # （实测：lua5.3 缺 liblua5.3.so.0.0.0、samba4 缺 libpopt/libtasn1/liburing、nfs 缺 libnl-3/libtirpc）。
+          # 这里跑一次 defconfig 让 +DEPENDS 被 select，再重新锁机型、把清单压回 =m。这不是放宽校验。
+          make WARN_RECURSIVE_DEP=1 defconfig > ../build_log/defconfig-resolve.log 2>&1 || {
+            echo "::error::defconfig 依赖解析失败，尾部："
+            tail -n 40 ../build_log/defconfig-resolve.log
+            exit 1
+          }
+          sed -i '/^CONFIG_TARGET_ALL_PROFILES/d;/^# CONFIG_TARGET_ALL_PROFILES is not set$/d' .config
+          sed -i '/^CONFIG_TARGET_MULTI_PROFILE/d;/^# CONFIG_TARGET_MULTI_PROFILE is not set$/d' .config
+          sed -i '/^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$/d' .config
+          sed -i '/^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_.*=y$/d' .config
+          printf '%s\n' \
+            '# CONFIG_TARGET_ALL_PROFILES is not set' \
+            '# CONFIG_TARGET_MULTI_PROFILE is not set' \
+            'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' \
+            'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' >> .config
+          for p in "${pkg_list[@]}"; do set_pkg_m "$p"; done
+          devcnt=$(grep -cxF 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' .config || true)
+          anydev=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_[A-Za-z0-9_.-]+=y$' .config || true)
+          echo ">>> 依赖解析后机型 devcnt=$devcnt anydev=$anydev"
+          if [ "$devcnt" != "1" ] || [ "$anydev" != "1" ]; then
+            echo "::error::机型锁定失效（devcnt=$devcnt anydev=$anydev）"
+            grep -nE "^CONFIG_TARGET_.*DEVICE" .config | head -n 20 || true
+            exit 1
+          fi
+          for l in libpopt libtasn1 liburing liblua5.3 libnl-tiny libtirpc libxml2; do
+            if grep -q "^CONFIG_PACKAGE_$l=" .config; then echo "OK   dep $l"; else echo "MISS dep $l"; fi
+          done | tee ../build_log/dep-check.txt
+          echo ">>> =m 清单完成依赖解析"
 
       - name: 下载源码包
         working-directory: ./ponwrt
@@ -722,7 +754,7 @@ jobs:
             samba4
             luci-app-samba4
             autosamba
-            ksmbd
+            ksmbd-tools
             luci-app-ksmbd
             avahi-daemon
             luci-app-avahi
