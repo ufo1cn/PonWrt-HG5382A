@@ -441,12 +441,19 @@ jobs:
           #   Package libffmpeg is missing dependencies for the following libraries:
           #   libbz2.so.1.0 / libdrm.so.2 / libmp3lame.so.0 / libopus.so.0
           # （run 43859014336 第 18→26 步，pkg-minidlna.log 342-345）。补真正的提供者。
-          for p in libjpeg-turbo libffmpeg libflac libexif libid3tag libogg libvorbis libsqlite3 libbz2 libdrm libopus lame-lib; do
+          # 另外 ffmpeg 是带 x264 / udev 支持编出来的，libffmpeg 打包时还报
+          #   Package libffmpeg is missing dependencies for the following libraries:
+          #   libudev.so.1 / libx264.so.165
+          #   make[2]: *** [Makefile:684: .../libffmpeg-9.0.1-r2.apk] Error 1
+          # （run 43888457480 第 26 步，build_log/pkg-minidlna.log 342-349；pkg-summary 里
+          #   FAIL minidlna / FAIL l--app-minidlna）。libudev.so.1 由 libudev-zero 提供、
+          # libx264.so.165 由 libx264 提供（build-package / alpha 的 =m 清单里本来就有）。
+          for p in libjpeg-turbo libffmpeg libflac libexif libid3tag libogg libvorbis libsqlite3 libbz2 libdrm libopus lame-lib libx264 libudev-zero; do
             sed -i "/^CONFIG_PACKAGE_${p}=/d" .config
             printf 'CONFIG_PACKAGE_%s=m\n' "$p" >> .config
             grep -q "^CONFIG_PACKAGE_${p}=m" .config || { echo "::error::minidlna 的运行库提供者 ${p} 未选中"; exit 1; }
           done
-          echo ">>> minidlna 运行库提供者已选中：libjpeg-turbo / libffmpeg / libflac / libexif / libid3tag / libogg / libvorbis / libsqlite3"
+          echo ">>> minidlna 运行库提供者已选中：libjpeg-turbo / libffmpeg / libflac / libexif / libid3tag / libogg / libvorbis / libsqlite3 / libbz2 / libdrm / libopus / lame-lib / libx264 / libudev-zero"
 
           devcnt=$(grep -cxF 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' .config || true)
           anydev=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_[A-Za-z0-9_.-]+=y$' .config || true)
