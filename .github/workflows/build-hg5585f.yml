@@ -417,68 +417,17 @@ jobs:
           fi
           cp -f "$KCFG" /tmp/config-6.18.orig
           cat > /tmp/pon_extra_kconfig.txt << 'KEOF'
-          # ---------- 无线网卡（rtw88 全系 USB + rtl8xxxu + rtl8192cu）----------
-          CONFIG_CFG80211=y
-          CONFIG_MAC80211=y
-          CONFIG_NL80211_TESTMODE=y
-          CONFIG_CFG80211_DEVELOPER_WARNINGS=y
-          CONFIG_WIRELESS_EXT=y
-          CONFIG_WEXT_CORE=y
-          CONFIG_WEXT_PROC=y
-          CONFIG_WEXT_PRIV=y
-          CONFIG_CFG80211=y
-          CONFIG_NL80211_TESTMODE=y
-          CONFIG_CFG80211_DEVELOPER_WARNINGS=y
-          # CONFIG_CFG80211_CERTIFICATION_ONUS is not set
-          # CONFIG_CFG80211_REQUIRE_SIGNED_REGDB is not set
-          CONFIG_CFG80211_USE_KERNEL_REGDB_KEYS=y
-          # CONFIG_CFG80211_REG_CELLULAR_HINTS is not set
-          # CONFIG_CFG80211_REG_RELAX_NO_IR is not set
-          # CONFIG_CFG80211_DEFAULT_PS is not set
-          CONFIG_CFG80211_DEBUGFS=y
-          CONFIG_CFG80211_CRDA_SUPPORT=y
-          CONFIG_CFG80211_WEXT=y
-          # CONFIG_CFG80211_KUNIT_TEST is not set
-          CONFIG_MAC80211=y
-          CONFIG_MAC80211_HAS_RC=y
-          CONFIG_MAC80211_RC_MINSTREL=y
-          CONFIG_MAC80211_RC_DEFAULT_MINSTREL=y
-          # CONFIG_MAC80211_KUNIT_TEST is not set
-          CONFIG_MAC80211_MESH=y
-          CONFIG_MAC80211_LEDS=y
-          CONFIG_MAC80211_DEBUGFS=y
-          CONFIG_MAC80211_MESSAGE_TRACING=y
-          # CONFIG_MAC80211_NOINLINE is not set
-          # CONFIG_MAC80211_VERBOSE_DEBUG is not set
-          # CONFIG_MAC80211_MLME_DEBUG is not set
-          # CONFIG_MAC80211_STA_DEBUG is not set
-          # CONFIG_MAC80211_HT_DEBUG is not set
-          # CONFIG_MAC80211_OCB_DEBUG is not set
-          # CONFIG_MAC80211_IBSS_DEBUG is not set
-          # CONFIG_MAC80211_PS_DEBUG is not set
-          # CONFIG_MAC80211_MPL_DEBUG is not set
-          # CONFIG_MAC80211_MPATH_DEBUG is not set
-          # CONFIG_MAC80211_MHWMP_DEBUG is not set
-          # CONFIG_MAC80211_MESH_SYNC_DEBUG is not set
-          # CONFIG_MAC80211_MESH_CSA_DEBUG is not set
-          # CONFIG_MAC80211_MESH_PS_DEBUG is not set
-          # CONFIG_MAC80211_TDLS_DEBUG is not set
-          # CONFIG_MAC80211_DEBUG_COUNTERS is not set
-          # CONFIG_MAC80211_DEBUG_MENU is not set
-          # CONFIG_PKCS8_PRIVATE_KEY_PARSER is not set
-          # CONFIG_PKCS7_MESSAGE_PARSER is not set
-          CONFIG_CFG80211_DEBUGFS=y
-          CONFIG_MAC80211_MESH=y
-          CONFIG_MAC80211_DEBUGFS=y
-          CONFIG_RTW88=y
-          CONFIG_RTW88_USB=y
-          CONFIG_RTW88_8822CU=y
-          CONFIG_RTW88_8821CU=y
-          CONFIG_RTW88_8723DU=y
-          CONFIG_RTW88_8822CE=y
-          CONFIG_RTW88_8821CE=y
-          CONFIG_RTL8XXXU=y
-          CONFIG_RTL8192CU=y
+          # ---------- 无线网卡：不在 target 内核配置里强写 ----------
+          # 反证（run 43820621783 第 24 步，logs/firmware-errors.txt 第 2-331 行）：
+          #   ERROR: modpost: net/wireless/cfg80211: 'wiphy_register' exported twice.
+          #   Previous export was in vmlinux  （cfg80211 + mac80211 共 330 条）
+          #   make: *** [include/toplevel.mk:268: world] Error 1
+          # 与 HG5382A run 43820629249 同源：把 CONFIG_CFG80211=y / CONFIG_MAC80211=y 写进
+          # target 内核配置，会把 cfg80211/mac80211 编进 vmlinux；而 DRIVER_PKGS 里的
+          # kmod-rtw88* 又会经 package/kernel/mac80211（backports）再编一份模块，两边导出
+          # 同一批符号 → modpost 判死。
+          # 正确通路（也是历史成功固件 run 43418429418 的写法）：无线全部交给 kmod 包，
+          # 由 package-metadata 把 CONFIG_CFG80211 / CONFIG_MAC80211 抬成 =m，内核侧只读不写。
           CONFIG_BT=y
           CONFIG_BT_LE=y
           CONFIG_BT_HCIBTUSB=y
@@ -670,7 +619,15 @@ jobs:
           printf '# 组件清单里没有 mjpeg 解码器 / rtsp 复用器，开了反而编不出 go2rtc 要的件。\n' >> .config
           printf '# CONFIG_FFMPEG_SELECT_COMPONENTS is not set\n' >> .config
           printf '# --- 驱动依赖的内核符号（kmod 打包要求 .ko 必须真的被编出来）---\n' >> .config
-          for k in $DRIVER_KCONFIGS; do printf 'CONFIG_KERNEL_%s=m\n' "${k#CONFIG_}" >> .config; done
+          # 无线符号（CFG80211/MAC80211/RTW88/RTL8XXXU/RTL8192CU/NL80211）必须排除：它们由
+          # backports(package/kernel/mac80211) 以模块形式提供，这里再写 CONFIG_KERNEL_CFG80211=m
+          # 会让内核侧也按模块编，与 backports 撞成重复导出（run 43820621783 第 24 步）。
+          for k in $DRIVER_KCONFIGS; do
+            case "$k" in
+              *CFG80211*|*MAC80211*|*RTW88*|*RTL8XXXU*|*RTL8192CU*|*NL80211*) continue ;;
+            esac
+            printf 'CONFIG_KERNEL_%s=m\n' "${k#CONFIG_}" >> .config
+          done
           printf '# --- 独立包不参与固件镜像 ---\n' >> .config
           printf '# CONFIG_PACKAGE_usbutils is not set\n' >> .config
           printf '# CONFIG_PACKAGE_luci-app-airoha-soc is not set\n' >> .config
