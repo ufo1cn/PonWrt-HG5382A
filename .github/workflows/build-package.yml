@@ -373,6 +373,13 @@ jobs:
             kmod-rtw88-8821c
             kmod-rtw88-8822cu
             kmod-rtw88-8821cu
+            # kmod-rtw88-8723du（USB 版 rtw88_8723du.ko）链接依赖 rtw88_8723d.ko，
+            # 该 .ko 由 PCI 变体 kmod-rtw88-8723d 提供；提供者没被选中时 mac80211 打包阶段报
+            #   Package kmod-rtw88-8723du is missing dependencies for the following libraries: rtw88_8723d.ko
+            #   make[2]: *** [Makefile:408: .../kmod-rtw88-8723du-6.18.55.7.2-r5.apk] Error 1
+            #   ERROR: package/kernel/mac80211 failed to build (build variant: regular).
+            # （run 43891442354 第 18 步 full-build.log 172533-172538）——补真正的提供者。
+            kmod-rtw88-8723d
             kmod-rtw88-8723du
             kmod-rtl8xxxu
             kmod-rtl8192cu
@@ -883,6 +890,13 @@ jobs:
             kmod-rtw88-8821c
             kmod-rtw88-8822cu
             kmod-rtw88-8821cu
+            # kmod-rtw88-8723du（USB 版 rtw88_8723du.ko）链接依赖 rtw88_8723d.ko，
+            # 该 .ko 由 PCI 变体 kmod-rtw88-8723d 提供；提供者没被选中时 mac80211 打包阶段报
+            #   Package kmod-rtw88-8723du is missing dependencies for the following libraries: rtw88_8723d.ko
+            #   make[2]: *** [Makefile:408: .../kmod-rtw88-8723du-6.18.55.7.2-r5.apk] Error 1
+            #   ERROR: package/kernel/mac80211 failed to build (build variant: regular).
+            # （run 43891442354 第 18 步 full-build.log 172533-172538）——补真正的提供者。
+            kmod-rtw88-8723d
             kmod-rtw88-8723du
             kmod-rtl8xxxu
             kmod-rtl8192cu
