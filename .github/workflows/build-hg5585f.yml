@@ -974,6 +974,14 @@ jobs:
                   printf 'CONFIG_PACKAGE_kmod-airoha-eth=y\n' >> .config
                 fi
                 echo ">>> airoha-eth：已用 modules/netdev-airoha-eth.mk 声明 kmod-airoha-eth，airoha-xpon 的 DEPENDS 已声明"
+                # kmod-airoha-eth 的 modinfo depends=dsa_core.ko，而 dsa_core.ko 的唯一提供者是 kmod-dsa。
+                # 本工作流是手写 .config、不跑 defconfig，Kconfig 里 +kmod-dsa 这个依赖不会被 select，
+                # 于是 dsa_core.ko 没有归属包，报
+                #   Package kmod-airoha-eth is missing dependencies for the following libraries: dsa_core.ko
+                # （run 43782012565 / 43780198319 第 24 步 30221-30223 行）。这里补的是真正的提供者，不是放宽校验。
+                grep -qE '^CONFIG_PACKAGE_kmod-dsa=' .config || printf 'CONFIG_PACKAGE_kmod-dsa=y\n' >> .config
+                grep -qE '^CONFIG_PACKAGE_kmod-dsa=y' .config || { echo "::error::dsa_core.ko 的提供者 kmod-dsa 未选中"; exit 1; }
+                echo ">>> dsa_core.ko 提供者已选中（CONFIG_PACKAGE_kmod-dsa=y）"
 
                 # libarc4.ko 只有 kmod-crypto-arc4 提供，而 kmod-mppe 没声明 DEPENDS：
                 # Package kmod-mppe is missing dependencies for the following libraries: libarc4.ko（run 43676220946 第 12 步）。
