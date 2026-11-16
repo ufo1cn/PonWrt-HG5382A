@@ -923,6 +923,24 @@ jobs:
                 printf 'CONFIG_PACKAGE_kmod-crypto-arc4=y\n' >> .config
                 grep -q '^CONFIG_PACKAGE_kmod-crypto-arc4=y' .config || { echo "::error::libarc4.ko 的提供者 kmod-crypto-arc4 未选中"; exit 1; }
                 echo ">>> libarc4.ko 提供者已选中（CONFIG_PACKAGE_kmod-crypto-arc4=y）"
+                # 同 build-package run 43857129451 / 43888447787 的根因（跨工作流借鉴）：
+                # kmod-mac80211 的 mac80211.ko 在 modinfo depends 里带 libarc4，但 ponwrt 的
+                # package/kernel/mac80211/Makefile（第 130 行 define KernelPackage/mac80211，
+                # 第 134 行 DEPENDS）只写到
+                #   +kmod-cfg80211 +kmod-crypto-cmac +kmod-crypto-ccm +kmod-crypto-gcm +hostapd-common
+                # 没有 arc4，于是 gen-dependencies 报
+                #   Package kmod-mac80211 is missing dependencies for the following libraries: libarc4.ko
+                #   make[3]: *** [Makefile:410: .../kmod-mac80211-6.18.55.7.2-r5.apk] Error 1
+                #   ERROR: package/kernel/mac80211 failed to build (build variant: regular).
+                # （run 43888447787 第 24 步 logs/build.log.txt 40208-40217）。补真正的提供者。
+                MK_MAC=package/kernel/mac80211/Makefile
+                if [ -f "$MK_MAC" ] && ! grep -q 'kmod-crypto-gcm +hostapd-common +kmod-crypto-arc4' "$MK_MAC"; then
+                  sed -i 's/^  DEPENDS+= +kmod-cfg80211 +kmod-crypto-cmac +kmod-crypto-ccm +kmod-crypto-gcm +hostapd-common$/  DEPENDS+= +kmod-cfg80211 +kmod-crypto-cmac +kmod-crypto-ccm +kmod-crypto-gcm +hostapd-common +kmod-crypto-arc4/' "$MK_MAC"
+                fi
+                if [ -f "$MK_MAC" ]; then
+                  grep -q 'kmod-crypto-gcm +hostapd-common +kmod-crypto-arc4' "$MK_MAC" || { echo "::error::mac80211 Makefile 里 kmod-mac80211 的 DEPENDS 未补上 +kmod-crypto-arc4"; exit 1; }
+                fi
+                echo ">>> kmod-mac80211：DEPENDS 已补 +kmod-crypto-arc4（libarc4.ko 由它提供）"
                 for kv in "CONFIG_BRIDGE=y" "CONFIG_BRIDGE_NETFILTER=y" "CONFIG_NF_CONNTRACK_BRIDGE=y" \
                           "CONFIG_NFT_BRIDGE_META=y" "CONFIG_NFT_BRIDGE_REJECT=y"; do
                   k=${kv%%=*}; v=${kv#*=}
