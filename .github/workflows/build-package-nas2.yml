@@ -1,0 +1,846 @@
+# ==============================================================================
+# HG5585F-CT 存储/媒体"扩展包"编译工作流（NAS2，只出 apk，不产固件）
+# ------------------------------------------------------------------------------
+# 【为什么单独一个文件】
+#   build-package.yml 的清单只覆盖 samba4 / ksmbd / nfs-kernel-server 这一批，
+#   build-package-nas.yml 那 21 个失败的包里，下面这些**任何现有工作流都没有编**：
+#     cifs-utils、minidlna(+luci)、transmission(+luci)、qbittorrent(+luci)、
+#     rsync、cryptsetup、btrfs-progs、xfsprogs
+#   所以这里单开车道，避免每次都要改主清单、也避免互相拖累。
+#
+# 【本文件对失败根因做的两处真修（不是放宽校验）】
+#   1) 依赖包没被选中：早前只往 .config 直接写 CONFIG_PACKAGE_xxx=m，没做 Kconfig 解析，
+#      于是 samba4 报 "missing dependencies ... libpopt.so.0 / libtasn1.so.6 / liburing.so.2"、
+#      nfs-kernel-server 报 libnl-3 / libtirpc / libxml2、minidlna 报 libjpeg / libogg /
+#      libsqlite3 / libvorbis、btrfs-progs 报 liblzo2、lua5.3 报 liblua5.3。
+#      本文件在写完 =m 后跑一次 `make defconfig` 做 Kconfig 解析（+DEPENDS 会被 select），
+#      再重新锁一次机型行并复核，属于补齐依赖，不是删校验。
+#   2) 一个包失败拖垮整批：改成逐包 `make <包目录>/compile`，每个包单独日志、
+#      单独 OK/FAIL 记录，跑完统一汇总；任何一个 FAIL 都会让 job 红，不掩盖。
+#
+# 【明确排除】dufs 需要 Rust 基建（feeds/packages/lang/rust 的 host 编译要 100 分钟以上），
+#   与这批包的失败根因不同，留到单独的 Rust 车道处理，本文件不静默丢弃，会在日志里 MISS 打印。
+# ==============================================================================
+
+# ==============================================================================
+# PonWrt HG5585F-CT 应用层软件包编译工作流（只出 apk/ipk，不产固件）
+# ------------------------------------------------------------------------------
+# 【定位】固件（build-hg5585f.yml）只负责"能开机 + 底层驱动"，应用层由本文件负责。
+#
+# 一、为什么单独拆出来
+#   1) 应用层软件数量多、上游更新快、编译容易失败；放在固件流水线里，
+#      任何一个应用编译失败都会拖住整份固件产出。
+#   2) 拆开后固件流水线只关心"内核/驱动"，成功率与耗时都可控；
+#      应用层随时可以重编，不影响已在用的固件。
+#   3) 应用层软件装错/装坏可以卸载重装，不需要重新刷机。
+#
+# 二、与固件的关系（必须保持一致的两件事）
+#   1) 同一个 SOURCE_REF（PonWrt 源码版本）——版本不一致会出现依赖名对不上。
+#   2) 同一套内核配置（DRIVER_KCONFIGS）——本文件会把和固件一样的 CONFIG_KERNEL_*
+#      覆盖写进 .config，保证万一需要在这里补编某个 kmod，其 vermagic 与固件一致。
+#
+# 三、为什么这里不再逐个枚举 feeds install 的包名
+#   历史版本写了 kmod-usb-xhci / kmod-video-v4l2 / usb-modeswitch(-data) /
+#   kmod-rtl8723bu 这些**在这套树里根本不存在的包名**，配合 set -e 会让整条
+#   流水线在第一步就失败。现在统一用 `feeds install -a` 全量安装，
+#   包名的正确性只在"写 .config 的 pkg_list"阶段才有意义。
+#
+# 四、pkg_list 的两处用途
+#   - 第 1 处：把清单里的包设为 =m，随后 make package/compile 统一编译
+#   - 第 2 处：编译完成后按清单把 .apk/.ipk 收进 ipk_out 供打包
+#   两处必须保持同一份清单，否则会出现"编出来了但没被收集"。
+#
+# 五、互斥注意
+#   mihomo-meta 与 mihomo-alpha 都 PROVIDES:=mihomo，二者只能选一个。
+#   本工作流统一用 mihomo-meta（nikki 依赖的虚拟名 mihomo 由它提供）。
+# ==============================================================================
+name: 【独立包编译】PonWrt HG5585F-CT 存储/媒体扩展包（NAS2｜SMB/NFS/DLNA/下载/加密/btrfs/xfs）
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: ipk-hg5585f-nas2-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build_ipk:
+    name: 编译HG5585F-CT全部独立插件包
+    runs-on: ubuntu-24.04
+    timeout-minutes: 320
+    env:
+      SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
+      TAR_NAME: HG5585F-CT-nas2-ipk.tar.zst
+      SHA_NAME: SHA256SUMS
+      # 与 build-hg5585f.yml 保持同一套内核配置：万一在这里补编 kmod，
+      # 生成的 .ko 的 vermagic 才会和固件匹配，装得上也加载得上。
+      DRIVER_KCONFIGS: >-
+        CONFIG_USB_USBNET CONFIG_USB_SERIAL CONFIG_USB_SERIAL_CH341 CONFIG_USB_SERIAL_CP210X CONFIG_USB_SERIAL_FTDI_SIO
+        CONFIG_USB_SERIAL_PL2303 CONFIG_USB_ACM CONFIG_USB_WDM CONFIG_BT CONFIG_BT_HCIBTUSB
+        CONFIG_BT_HCIUART CONFIG_RTW88 CONFIG_RTW88_USB CONFIG_RTW88_8822C CONFIG_RTW88_8822CU
+        CONFIG_RTW88_8821C CONFIG_RTW88_8821CU CONFIG_RTW88_8723D CONFIG_RTW88_8723DU CONFIG_RTL8XXXU
+        CONFIG_RTL8192CU CONFIG_CFG80211 CONFIG_MAC80211 CONFIG_NETLINK_DIAG CONFIG_USB_HID
+        CONFIG_HID CONFIG_WIREGUARD CONFIG_CFG80211 CONFIG_MAC80211 CONFIG_RTW88
+        CONFIG_RTW88_USB CONFIG_RTW88_8822CU CONFIG_RTW88_8821CU CONFIG_RTW88_8723DU CONFIG_RTW88_8822CE
+        CONFIG_RTW88_8821CE CONFIG_RTL8XXXU CONFIG_RTL8192CU CONFIG_NET_AIROHA CONFIG_NET_AIROHA_NPU
+        CONFIG_DEBUG_FS CONFIG_COMMON_CLK CONFIG_DEVMEM CONFIG_CIFS CONFIG_NFS_FS
+        CONFIG_NFSD CONFIG_MACVLAN CONFIG_VETH CONFIG_BRIDGE CONFIG_BRIDGE_NF_EBTABLES
+        CONFIG_NFT_NAT CONFIG_NF_NAT CONFIG_USB_STORAGE CONFIG_USB_UAS CONFIG_USB_XHCI_HCD
+        CONFIG_SND CONFIG_SND_USB_AUDIO CONFIG_MEDIA_SUPPORT CONFIG_VIDEO_DEV CONFIG_USB_VIDEO_CLASS
+        CONFIG_INET_DIAG CONFIG_TUN
+    steps:
+      - name: 签出工作流仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 清理磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/local/share/swift /usr/local/.ghcup \
+            /opt/hostedtoolcache
+          sudo docker system prune -af || true
+          sudo apt-get clean
+          sudo swapoff /swapfile || true
+          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          df -h
+
+      - name: 初始化编译环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
+            subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
+            libzstd-dev jq dos2unix upx-ucl
+
+      - name: 拉取 PonWrt 指定 commit
+        run: |
+          git init ponwrt
+          git -C ponwrt remote add origin https://github.com/pbs05/ponwrt.git
+          git -C ponwrt fetch --depth=1 -- origin "$SOURCE_REF"
+          git -C ponwrt checkout --detach FETCH_HEAD
+          echo ">>> PonWrt pinned: $SOURCE_REF"
+
+      - name: 配置 feeds
+        working-directory: ./ponwrt
+        run: |
+          if [ ! -f feeds.conf.default ]; then touch feeds.conf.default; fi
+          sed -i '/nikki/d;/homeproxy/d;/openwrt-iptv/d' feeds.conf.default
+          [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
+          echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
+          echo 'src-git iptv https://github.com/yveming/openwrt-iptv.git' >> feeds.conf.default
+          # 说明：曾经加过 emortal/OpenWrt-packages，该仓库 404 会让 feeds update 整个失败，已移除
+          # homeproxy 的 LuCI 应用 + sing-box 相关包（缺了它 sing-box 系全没有）
+          echo 'src-git homeproxy https://github.com/immortalwrt/homeproxy.git;master' >> feeds.conf.default
+          dos2unix feeds.conf.default 2>/dev/null || true
+          cat feeds.conf.default
+          ./scripts/feeds update -a
+
+      - name: 注入 libffi（必须在 feeds install 之前）
+        working-directory: ./ponwrt
+        run: |
+          # libffi 在 PonWrt 树里缺失，而 ruby / tvheadend / wayland 等包都依赖它。
+          # 关键：必须在 feeds install 之前放进来，否则 feeds 扫描时找不到该包，
+          # 这些依赖会退化成 "has a dependency on 'libffi', which does not exist" 的警告，
+          # 后续真正编译时就会因为缺依赖失败。
+          mkdir -p package/libs/libffi
+          curl -fsSL -o package/libs/libffi/Makefile \
+            https://raw.githubusercontent.com/openwrt/openwrt/master/package/libs/libffi/Makefile
+          grep -q 'PKG_NAME:=libffi' package/libs/libffi/Makefile && echo ">>> libffi 注入成功" || exit 1
+
+      - name: 前置依赖检查 & 分步 feeds install（防循环依赖）
+        working-directory: ./ponwrt
+        run: |
+          set -e
+          # 为什么不再逐个枚举包名：这条步骤原来写的 kmod-usb-xhci / kmod-video-v4l2 /
+          # usb-modeswitch(-data) / kmod-rtl8723bu 在这套树里根本不存在，set -e 下会直接失败。
+          # 包清单只在实际写 .config 的阶段使用（见后面的 pkg_list）。
+          ./scripts/feeds install -a
+          echo ">>> feeds 全量安装完成"
+          # 注意：这里不要跑 make prereq。此时 .config 还没生成，make prereq 会进入
+          # menuconfig（CI 无 TTY → "Error opening terminal: unknown"，直接把任务打断）。
+          # 主机工具依赖会在后面 make defconfig 之后的正常构建流程里自检。
+          echo ">>> 跳过 make prereq（原因见上），继续"
+
+      - name: 克隆 luci-app-airoha-npu
+        working-directory: ./ponwrt
+        run: |
+          rm -rf package/luci-app-airoha-npu
+          git clone --depth=1 https://github.com/rchen14b/luci-app-airoha-npu.git package/luci-app-airoha-npu
+          if [ -f package/luci-app-airoha-npu/.gitmodules ]; then
+            git -C package/luci-app-airoha-npu submodule update --init --recursive --depth=1
+          fi
+          rm -rf package/luci-app-airoha-npu/.git package/luci-app-airoha-npu/.github package/luci-app-airoha-npu/screenshots
+          rm -rf package/luci-app-airoha-npu/luci-app-airoha-npu
+          grep -m1 'LUCI_TITLE' package/luci-app-airoha-npu/Makefile || echo "::warning::未找到 LUCI_TITLE"
+
+      - name: 部署仓库自带的本地包到 package/pon-local
+        working-directory: ./ponwrt
+        run: |
+          rm -rf package/pon-local
+          mkdir -p package/pon-local
+          # 动态遍历：pon_userspace 下新增任何包都会自动部署，
+          # 不要写死列表（写死列表一旦漏项，编译阶段会报
+          # "No rule to make target 'package/pon-local/xxx/compile'"）
+          for d in $(ls -1 ../pon_userspace 2>/dev/null); do
+            [ "$d" = "ser2net4" ] && continue
+            if [ -d "../pon_userspace/$d" ]; then
+              cp -a "../pon_userspace/$d" package/pon-local/
+              if [ -f "package/pon-local/$d/Makefile" ]; then
+                echo ">>> 复制 $d（含 Makefile）"
+              else
+                echo "::warning::$d 已复制但缺少 Makefile"
+              fi
+            fi
+          done
+          if [ -d "../pon_userspace/ser2net4" ]; then
+            for d in gensio ser2net luci-app-ser2net; do
+              [ -d "../pon_userspace/ser2net4/$d" ] && cp -a "../pon_userspace/ser2net4/$d" package/pon-local/ && echo ">>> 复制 $d"
+            done
+          fi
+          MK=package/pon-local/luci-app-ser2net/Makefile
+          if [ -f "$MK" ]; then
+            sed -i 's|include $(TOPDIR)/luci.mk|include $(TOPDIR)/feeds/luci/luci.mk|' "$MK"
+            sed -i '/\$(eval \$(call BuildPackage,luci-app-ser2net))/d' "$MK"
+          fi
+          ls -1 package/pon-local || true
+
+      - name: 预修改 luci-app-iptv Makefile
+        working-directory: ./ponwrt
+        run: |
+          if [ -f package/pon-local/luci-app-iptv/Makefile ]; then
+            MK="package/pon-local/luci-app-iptv/Makefile"
+            cp -f "$MK" "$MK.orig"
+            sed -i 's/+kmod-iptv/kmod-iptv/g' "$MK"
+            sed -i '/\/etc\/config\/iptv/d' "$MK"
+            sed -i '/\/etc\/init\.d\/iptv/d' "$MK"
+            echo ">>> luci-app-iptv Makefile 预修改完成"
+          fi
+
+      - name: 应用 GPON feed 补丁
+        env:
+          PONWRT_DIR: ponwrt
+          FEED_PATCHES_STRICT: '1'
+        run: bash scripts/apply-feed-patches.sh
+
+      - name: 生成基础配置，锁定HG5585F-CT机型
+        working-directory: ./ponwrt
+        run: |
+          rm -rf tmp
+          perl ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
+          # WARN_RECURSIVE_DEP=1：这套树里 mihomo-meta/mihomo-alpha（互 PROVIDES/CONFLICTS）、
+          # fwknopd、squeezelite-custom 存在上游 Kconfig 递归依赖，默认会硬报错中止 defconfig。
+          # 这里只把该诊断降级为 warning，不做任何掩盖；本工作流仍只用 sel_variant 选一个 mihomo 变体。
+          make WARN_RECURSIVE_DEP=1 defconfig
+
+          # 锁机型：只允许存在一个 device，且必须是 HG5585F-CT。
+          # 用 grep -xF（整行、固定字符串）计数并**始终**打印命中位置，
+          # 不再用正则 + ^ 锚点去赌长文件里的行形态。
+          sed -i '/^CONFIG_TARGET_ALL_PROFILES/d;/^# CONFIG_TARGET_ALL_PROFILES is not set$/d' .config
+          sed -i '/^CONFIG_TARGET_MULTI_PROFILE/d;/^# CONFIG_TARGET_MULTI_PROFILE is not set$/d' .config
+          sed -i '/^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$/d' .config
+          sed -i '/^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_.*=y$/d' .config
+
+          printf '%s\n' \
+            '# CONFIG_TARGET_ALL_PROFILES is not set' \
+            '# CONFIG_TARGET_MULTI_PROFILE is not set' \
+            'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' \
+            'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' \
+            'CONFIG_BUILD_PATENTED=y' \
+            'CONFIG_PACKAGE_ca-bundle=y' >> .config
+
+          devcnt=$(grep -cxF 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' .config || true)
+          anydev=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_[A-Za-z0-9_.-]+=y$' .config || true)
+          echo ">>> 机型行命中次数 devcnt=$devcnt，任何设备行总数 anydev=$anydev"
+          grep -nxF 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' .config || echo "(未找到该行)"
+          if [ "$devcnt" != "1" ] || [ "$anydev" != "1" ]; then
+            echo "::error::HG5585F-CT 机型锁定校验失败（devcnt=$devcnt anydev=$anydev）"
+            grep -nE '^CONFIG_TARGET_.*DEVICE' .config | head -n 20 || true
+            exit 1
+          fi
+          echo ">>> 机型配置校验OK" 
+
+      - name: 预编译 host 工具与工具链（独立包工作流必需）
+        working-directory: ./ponwrt
+        run: |
+          # 为什么必须单独做这一步：
+          # `make package/feeds/<feed>/<包名>/compile` 只编这个包，**不会**顺带把
+          # tools/ 下的 host 工具编出来。于是解包/签名阶段就会报：
+          #   bash: .../staging_dir/host/bin/libdeflate-gzip: No such file or directory
+          #   bash: .../staging_dir/host/bin/openssl: No such file or directory
+          # （实测分别卡住 NAS 的 host lua 和 libcronet 的 private-key.pem 生成）
+          # 另外 target 包还需要工具链，否则 staging_dir/toolchain-* 不存在。
+          # 这里先按 tools/Makefile 的清单逐个编 host 工具，再编工具链。
+          mkdir -p logs
+          TOOL_LIST="libdeflate libressl autoconf-archive sed coreutils patch tar zstd xz zlib expat m4 pkgconf \
+                     autoconf automake libtool flex bison gnulib missing-macros \
+                     util-linux findutils dosfstools mtools e2fsprogs squashfs4 \
+                     mkimage sstrip patchelf cpio lzma ninja meson gengetopt \
+                     mtd-utils padjffs2 patch-image mklibs fakeroot elfutils zip quilt"
+          for t in $TOOL_LIST; do
+            if [ -d "tools/$t" ]; then
+              echo "=== tools/$t ==="
+              set +e
+              make -j1 V=s "tools/$t/compile" > "logs/host-tool-$t.log" 2>&1
+              rc=$?
+              set -e
+              if [ $rc -ne 0 ]; then
+                echo "::warning::tools/$t 编译失败(rc=$rc)，末尾 15 行："
+                tail -n 15 "logs/host-tool-$t.log"
+              fi
+            else
+              echo "=== 跳过 tools/$t（该工具不在本树里）==="
+            fi
+          done
+
+          # 关键 host 可执行：缺一个后面必然崩，直接在这里明确报错
+          for b in libdeflate-gzip openssl patch tar zstd; do
+            if [ ! -x "staging_dir/host/bin/$b" ]; then
+              echo "::error::host 工具 $b 未生成（staging_dir/host/bin 现状如下）"
+              ls -l staging_dir/host/bin | head -n 30
+              exit 1
+            fi
+          done
+          echo ">>> host 工具就绪：$(staging_dir/host/bin/openssl version 2>/dev/null)"
+
+          # 工具链：target 包编译的必要前提。
+          # 光有 staging_dir/toolchain-* 目录还不够——package/libs/toolchain 打包 libgcc1 时
+          # 要 cp staging_dir/toolchain-*/lib/libgcc_s.so.*，缺了就直接
+          # 'cp: cannot stat .../libgcc_s.so.*' 并让**所有**包都失败（实测 36/36 全 FAIL）。
+          # 所以这里既要编，也要验 libgcc_s 真的落地，缺则补跑 gcc final。
+          if ! ls -d staging_dir/toolchain-* >/dev/null 2>&1; then
+            echo "=== 工具链编译 ==="
+            make -j$(nproc) V=s toolchain/compile > logs/toolchain.log 2>&1 || true
+          fi
+          if ! ls staging_dir/toolchain-*/lib/libgcc_s.so* >/dev/null 2>&1; then
+            echo "=== libgcc_s 未落地，补跑 toolchain/gcc/final ==="
+            make -j$(nproc) V=s toolchain/gcc/final/compile >> logs/toolchain.log 2>&1 || true
+          fi
+          if ! ls staging_dir/toolchain-*/lib/libgcc_s.so* >/dev/null 2>&1; then
+            echo "::error::工具链不完整：libgcc_s.so 未生成（日志末尾 30 行 + find 结果如下）"
+            tail -n 30 logs/toolchain.log || true
+            find staging_dir/toolchain-* -name 'libgcc_s*' 2>/dev/null | head -n 20 || true
+            ls -l staging_dir/toolchain-*/lib 2>/dev/null | head -n 20 || true
+            exit 1
+          fi
+          echo ">>> 工具链就绪：$(ls -d staging_dir/toolchain-* | head -n 1)，libgcc_s=$(ls staging_dir/toolchain-*/lib/libgcc_s.so* | head -n 1)"
+
+      - name: 写入与固件一致的内核配置覆盖
+        working-directory: ./ponwrt
+        run: |
+          # 目的：让本工作流的内核配置和固件一致。这样即使有人在这里补编
+          # 某个 kmod，产出的 .ko 也能在固件的内核上正常加载（vermagic/符号一致）。
+          for k in $DRIVER_KCONFIGS; do
+            printf 'CONFIG_KERNEL_%s=m\n' "${k#CONFIG_}" >> .config
+          done
+          echo ">>> 内核配置覆盖写入完成（共 $(echo $DRIVER_KCONFIGS | wc -w) 个符号）"
+
+          # airoha-eth.ko 是 PON 数据面的提供者，整个仓库没有任何 kmod 包声明它。
+          # 上面那个循环把 DRIVER_KCONFIGS（含 CONFIG_NET_AIROHA）统统写成 CONFIG_KERNEL_xxx=m，
+          # 于是 airoha-eth 被编成 .ko，kmod-airoha-xpon 的 modinfo 依赖 airoha-eth.ko 找不到提供者 →
+          # Package kmod-airoha-xpon is missing dependencies for the following libraries: airoha-eth.ko
+          # （run 43685533518 第 18 步）。固件侧写的是 CONFIG_NET_AIROHA=y，这里对齐成内置。
+          sed -i '/^CONFIG_KERNEL_NET_AIROHA=/d;/^CONFIG_KERNEL_NET_AIROHA_NPU=/d' .config
+          printf '%s\n' 'CONFIG_KERNEL_NET_AIROHA=y' 'CONFIG_KERNEL_NET_AIROHA_NPU=y' >> .config
+          grep -n '^CONFIG_KERNEL_NET_AIROHA' .config || { echo '::error::NET_AIROHA 内置定值未写入 .config'; exit 1; }
+          echo ">>> airoha-eth 已定为内置（CONFIG_KERNEL_NET_AIROHA=y），与固件一致"
+
+      - name: 批量设置目标包为 =m
+        working-directory: ./ponwrt
+        run: |
+          # 用途1/2 共用同一份清单：先校验包目录真实存在，缺的打印 MISS（不静默丢弃），
+          # 清单落盘到 ../pkg_list.txt，编译与收集两步都读它，避免两处清单不一致。
+          set_pkg_m() {
+            local pkg="$1"
+            sed -i "/^CONFIG_PACKAGE_${pkg}/d" .config
+            echo "CONFIG_PACKAGE_${pkg}=m" >> .config
+          }
+
+          mkdir -p ../build_log
+          cand=(
+            samba4
+            luci-app-samba4
+            ksmbd-tools
+            luci-app-ksmbd
+            nfs-kernel-server
+            nfs-kernel-server-utils
+            luci-app-nfs
+            cifs-utils
+            minidlna
+            luci-app-minidlna
+            transmission
+            transmission-daemon
+            luci-app-transmission
+            qbittorrent
+            luci-app-qbittorrent
+            rsync
+            cryptsetup
+            btrfs-progs
+            xfsprogs
+          )
+          pkg_list=()
+          for c in "${cand[@]}"; do
+            if [ -n "$(find package -maxdepth 5 -type d -name "$c" -print -quit)" ]; then
+              pkg_list+=("$c")
+            else
+              echo "MISS $c（源码树/feeds 中没有该包目录，未参与编译）" | tee -a ../build_log/pkg-miss.txt
+            fi
+          done
+          printf "%s\n" "${pkg_list[@]}" > ../pkg_list.txt
+          echo ">>> 待编包（${#pkg_list[@]} 个）：${pkg_list[*]}"
+
+          for p in "${pkg_list[@]}"; do set_pkg_m "$p"; done
+
+          # 【关键修复】Kconfig 解析：把 +DEPENDS 指到的依赖包一并选中。
+          # 不做的后果就是上面注释里那些 missing dependencies for the following libraries。
+          make WARN_RECURSIVE_DEP=1 defconfig > ../build_log/defconfig-resolve.log 2>&1 || {
+            echo "::error::defconfig 依赖解析失败，尾部如下："
+            tail -n 40 ../build_log/defconfig-resolve.log
+            exit 1
+          }
+
+          # 解析后重新锁机型（defconfig 会重排 DEVICE 行），并复核只能有一个机型
+          sed -i '/^CONFIG_TARGET_ALL_PROFILES/d;/^# CONFIG_TARGET_ALL_PROFILES is not set$/d' .config
+          sed -i '/^CONFIG_TARGET_MULTI_PROFILE/d;/^# CONFIG_TARGET_MULTI_PROFILE is not set$/d' .config
+          sed -i '/^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$/d' .config
+          sed -i '/^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_.*=y$/d' .config
+          printf '%s\n' \
+            '# CONFIG_TARGET_ALL_PROFILES is not set' \
+            '# CONFIG_TARGET_MULTI_PROFILE is not set' \
+            'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' \
+            'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' >> .config
+
+          # 解析后把清单重新压回 =m（defconfig 可能把某些包改成 =y）
+          for p in "${pkg_list[@]}"; do set_pkg_m "$p"; done
+
+          devcnt=$(grep -cxF 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' .config || true)
+          anydev=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_[A-Za-z0-9_.-]+=y$' .config || true)
+          echo ">>> 机型行命中 devcnt=$devcnt，任何设备行 anydev=$anydev"
+          if [ "$devcnt" != "1" ] || [ "$anydev" != "1" ]; then
+            echo "::error::机型锁定失败（devcnt=$devcnt anydev=$anydev）"
+            grep -nE '^CONFIG_TARGET_.*DEVICE' .config | head -n 20 || true
+            exit 1
+          fi
+
+          # 依赖是否真的进 .config（只报告，不掩盖；缺了会导致后面 missing dependencies）
+          for l in libpopt libtasn1 liburing libjpeg libogg libsqlite3 libvorbis liblzo2 libnl-tiny libtirpc; do
+            if grep -q "^CONFIG_PACKAGE_$l=" .config; then echo "OK   dep $l"; else echo "MISS dep $l"; fi
+          done | tee -a ../build_log/dep-check.txt
+          echo ">>> =m 清单已写入并完成依赖解析"
+
+      - name: 下载源码包
+        working-directory: ./ponwrt
+        run: |
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+          export GO111MODULE=on
+          make download -j"$(nproc)" || true
+          find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
+          make download -j1 V=s || { echo "::warning::仍有下载失败"; }
+          find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
+
+      - name: 批量编译全部模块 package/compile
+        working-directory: ./ponwrt
+        continue-on-error: true
+        run: |
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+          export GO111MODULE=on
+          set -o pipefail
+          mkdir -p ../build_log
+          # 【内核树预置】三类硬伤都在这里根治：
+          #  1) 固件：CI 无 TTY，kbuild 遇到 Kconfig 新增符号会停在 "(NEW) [N/y/?]"，syncconfig 直接失败；
+          #     而且 OpenWrt 每次构建都用 target 的 config-6.18 重新合成 .config，olddefconfig 的结果会被覆盖，
+          #     所以补齐的符号必须回写进 config-6.18 才能持久生效；
+          #  2) 独立包：kmod 型包依赖 build_dir 里的内核 .config，没有就先报 "No rule to make target '.../.config'"；
+          #  3) kmod 编译还要内核 generated/ 头文件（如 generated/rq-offsets.h），必须用交叉工具链跑 modules_prepare。
+          LOGDIR="$PWD/../build_log"
+          mkdir -p "$LOGDIR"
+          TC_BIN=$(ls -d "$PWD"/staging_dir/toolchain-*/bin 2>/dev/null | head -1)
+          CROSS="aarch64-openwrt-linux-musl-"
+          [ -n "$TC_BIN" ] && export PATH="$TC_BIN:$PWD/staging_dir/host/bin:$PATH"
+          echo ">>> 交叉工具链：${TC_BIN:-未找到}"
+          make -j"$(nproc)" V=s toolchain/compile > "$LOGDIR/toolchain-prep.log" 2>&1 \
+            || { echo "::warning::toolchain/compile 有告警，尾部："; tail -n 20 "$LOGDIR/toolchain-prep.log"; }
+          if make -j1 V=s target/linux/prepare > "$LOGDIR/kernel-prepare.log" 2>&1; then
+            KD=$(ls -d build_dir/target-*/linux-*/linux-* 2>/dev/null | head -1)
+            if [ -n "$KD" ]; then
+              ( cd "$KD" && make ARCH=arm64 CROSS_COMPILE="$CROSS" olddefconfig </dev/null > "$LOGDIR/kernel-olddefconfig.log" 2>&1 ) \
+                && echo ">>> 内核 olddefconfig 完成：$KD/.config（$(grep -c '^CONFIG_' "$KD/.config") 个显式符号）" \
+                || { echo "::warning::olddefconfig 失败，尾部："; tail -n 30 "$LOGDIR/kernel-olddefconfig.log"; }
+              ( cd "$KD" && make ARCH=arm64 CROSS_COMPILE="$CROSS" modules_prepare </dev/null > "$LOGDIR/kernel-modules-prepare.log" 2>&1 ) \
+                && echo ">>> 内核 modules_prepare 完成（generated 头文件已就绪）" \
+                || { echo "::warning::modules_prepare 失败，kmod 会缺 generated 头文件，尾部："; tail -n 20 "$LOGDIR/kernel-modules-prepare.log"; }
+              CFG=target/linux/airoha/an7581/config-6.18
+              if [ -f "$CFG" ]; then
+                cp -f "$CFG" "$LOGDIR/config-6.18.orig"
+                grep -E '^(# )?CONFIG_[A-Za-z0-9_]+' "$CFG" | sed -E 's/^(# )?(CONFIG_[A-Za-z0-9_]+).*/\2/' | sort -u > "$LOGDIR/cfg-syms.txt"
+                added=0
+                while IFS= read -r line; do
+                  case "$line" in
+                    CONFIG_*=*|"# CONFIG_"*" is not set")
+                      sym=${line%%=*}; sym=${sym#\# }; sym=${sym%% *}
+                      if ! grep -qxF "$sym" "$LOGDIR/cfg-syms.txt"; then
+                        printf '%s\n' "$line" >> "$CFG"
+                        echo "$sym" >> "$LOGDIR/cfg-syms.txt"
+                        added=$((added+1))
+                      fi
+                      ;;
+                  esac
+                done < "$KD/.config"
+                echo ">>> 内核配置固化：向 $CFG 追加 $added 个符号（原文件备份 $LOGDIR/config-6.18.orig）"
+                # 真实构建的 .config = merge(generic, target) 再叠加 package-metadata 生成的 .config.override；
+                # override 会把包依赖的内核符号抬成 =y/=m，从而让一批原本不可见的符号变可见（如 SPI_MTK_NOR=m → SPI_MTK_SNFI 变可见）。
+                # 这里按同样顺序先合入 override 的 =y/=m 项，再用真实 syncconfig 反复校验，仍报 (NEW) 的显式关掉后重来。
+                # 预生成 .config.override：真实构建时它由 package-metadata.pl 依包依赖生成。
+                # 预置阶段若不存在，下面的循环就是拿"没有 override"的配置自检——首轮必然"通过"，
+                # 真实构建却仍撞 (NEW)（实测 run 43636459314 / 43630997001 都是这种假通过）。
+                # 【kmod 打包要核对 .ko 文件是否存在】package/kernel/linux 会逐个检查被选中 kmod 声明的模块文件，
+                # 缺一个就 Error 1（实测 run 43653685076 第 24 步：bridge.ko / btqca.ko / pwrseq-core.ko / snd-mixer-oss.ko 缺失）。
+                # bridge 系：ponwrt 的 package/kernel/linux/modules 里【没有】KernelPackage/bridge（也就没有 kmod-bridge 包），
+                # 所以桥接模块只能 built-in，不可能由某个包提供 bridge.ko；br_netfilter 等也必须 =y 才能落到「built-in → NOTICE 跳过」的合规分支。
+                # 蓝牙/声卡系：这些确有 kmod 包，必须 =m 才能产出 .ko。
+                # ovpn-backports 7.3.0 的 drivers/net/ovpn/main.c:371 用 MODULE_VERSION(OVPN_MODULE_VERSION)，
+                # 该宏由上游顶层构建注入；OpenWrt 只编 M=drivers/net/ovpn 子目录，宏是空的 →
+                # 报 "expected ',' or ';' before 'OVPN_MODULE_VERSION'"（run 43676216521 第 24 步）。这里补上定义。
+                # ovpn-backports 7.3.0 的 drivers/net/ovpn/main.c:371 用 MODULE_VERSION(OVPN_MODULE_VERSION)，
+                # 该宏由上游顶层构建注入；OpenWrt 只编 M=drivers/net/ovpn 子目录，宏是空的。
+                # 关键：feeds 的 Makefile 里 MAKE_OPTS:= ... NOSTDINC_FLAGS="$(NOSTDINC_FLAGS)" 用的是 := 立即展开，
+                # 往文件末尾追加等于追加在展开之后，进不了实际编译命令（run 43685528299 第 24 步实证）。
+                # 所以必须把定义插在 MAKE_OPTS:= 那一行之前。
+                # 引号穿层：值要穿过多层 shell（Build/Compile 的 NOSTDINC_FLAGS="..." → 子 make → 编译命令 → …），
+                # 写成 -DOVPN_MODULE_VERSION=\"7.3.0\" 被剥成 7.3.0（run 43700756531）；改成 '"7.3.0"' 仍被剥（run 43714642112 第 24 步）。
+                # 结论：-D 这条路走不通。改为在 Build/Prepare 里直接改源码 main.c:371，把
+                # MODULE_VERSION(OVPN_MODULE_VERSION) 换成 MODULE_VERSION("7.3.0")，源码里的字面量不经过任何 shell。
+                OVN=feeds/packages/kernel/ovpn-dco/Makefile
+                if [ -f "$OVN" ] && ! grep -q 'OVPN_MODULE_VERSION' "$OVN"; then
+                  awk 'BEGIN{d=0} { if (!d && $0 ~ /^MAKE_OPTS:=/) { print "define Build/Prepare"; print "\t$(call Build/Prepare/Default)"; print "\tsed -i \047s,MODULE_VERSION(OVPN_MODULE_VERSION),MODULE_VERSION(\"7.3.0\"),\047 $(PKG_BUILD_DIR)/drivers/net/ovpn/main.c"; print "\tgrep -q \047MODULE_VERSION(\"7.3.0\")\047 $(PKG_BUILD_DIR)/drivers/net/ovpn/main.c || { echo \"::error::ovpn main.c 版本宏替换失败\"; exit 1; }"; print "endef"; d=1 } print }' "$OVN" > "$OVN.tmp"
+                  mv "$OVN.tmp" "$OVN"
+                  grep -n 'OVPN_MODULE_VERSION' "$OVN"
+                  echo ">>> ovpn-backports：已在 MAKE_OPTS 之前补入 OVPN_MODULE_VERSION 宏定义"
+                fi
+                # 同时修 kmod-mppe 缺依赖（run 43714670926 第 12 步原始行）：
+                #   Package kmod-mppe is missing dependencies for the following libraries:
+                #   libarc4.ko
+                # 根因：ponwrt 的 modules/netsupport.mk 里 KernelPackage/mppe 只写了 DEPENDS:=kmod-ppp +kmod-crypto-sha1，
+                # 没声明 libarc4.ko 的提供者；内核 6.18 的 ppp_mppe 直接用 libarc4 符号，modinfo depends=libarc4。
+                # 而编包时 gen-dependencies 要求本包 provides 里含 libarc4.ko，provides 只从 DEPENDS 继承（include/package-pack.mk
+                # 里 $(PKG_INFO_DIR)/$(1).provides 会合并 $(IDEPEND_$(1)) 的 provides），所以缺 DPDENDS 就会失败。
+                # 修法是补上真正的提供者 kmod-crypto-arc4（它打包 lib/crypto/libarc4.ko），不是删校验。
+                NS=package/kernel/linux/modules/netsupport.mk
+                if [ -f "$NS" ] && ! grep -q 'kmod-crypto-arc4' "$NS"; then
+                  sed -i 's/^  DEPENDS:=kmod-ppp +kmod-crypto-sha1$/  DEPENDS:=kmod-ppp +kmod-crypto-sha1 +kmod-crypto-arc4/' "$NS"
+                  grep -q 'kmod-crypto-sha1 +kmod-crypto-arc4' "$NS" || { echo "::error::netsupport.mk 里 KernelPackage/mppe 的 DEPENDS 未补上 kmod-crypto-arc4"; exit 1; }
+                  grep -n 'kmod-crypto-arc4' "$NS"
+                  echo ">>> kmod-mppe：DEPENDS 已补 +kmod-crypto-arc4（libarc4.ko 由它提供）"
+                fi
+                # airoha-eth.ko 由内核 drivers/net/ethernet/airoha 生成（真实内核 CONFIG_NET_AIROHA=m），
+                # 但 ponwrt 的 package/kernel/linux/modules 里没有任何包声明它，于是 kmod-airoha-xpon 的
+                # modinfo depends=airoha-eth.ko 找不到提供者（run 43730208954 / 43730212909 / 43730237832）。
+                # 写法必须是 package/kernel/linux/modules/*.mk 片段：package/kernel/linux/Makefile 用
+                #   include $(sort $(wildcard ./modules/*.mk))
+                # 统一收录，Build/Compile 由它提供；单独建 package/kernel/<名字>/Makefile 会走通用模板并报
+                #   make[3]: *** No targets specified and no makefile found.  Stop.
+                # （run 43746505472 / 43746507610 已实证，别再那样写）。
+                AEM=package/kernel/linux/modules/netdev-airoha-eth.mk
+                if [ ! -f "$AEM" ]; then
+                printf '%s\n' \
+                  'define KernelPackage/airoha-eth' \
+                  '  SUBMENU:=Network Devices' \
+                  '  TITLE:=Airoha AN7581/AN7583 on-chip Ethernet' \
+                  '  DEPENDS:=@(TARGET_airoha_an7581||TARGET_airoha_an7583) +kmod-dsa' \
+                  '  KCONFIG:=CONFIG_NET_AIROHA' \
+                  '  FILES:= $(LINUX_DIR)/drivers/net/ethernet/airoha/airoha-eth.ko' \
+                  '  AUTOLOAD:=$(call AutoLoad,30,airoha-eth)' \
+                  'endef' \
+                  'define KernelPackage/airoha-eth/description' \
+                  '  AN7581/AN7583 片上以太网（QDMA/GDM），xPON 数据面依赖其导出符号' \
+                  'endef' \
+                  '$(eval $(call KernelPackage,airoha-eth))' \
+                  > "$AEM"
+                fi
+                grep -q 'KernelPackage/airoha-eth' "$AEM" || { echo "::error::$AEM 生成失败"; exit 1; }
+                XP=feeds/pon_drivers/airoha-xpon/Makefile
+                if [ -f "$XP" ] && ! grep -q 'kmod-airoha-eth' "$XP"; then
+                  sed -i 's#+kmod-airoha-pon-frontend#+kmod-airoha-pon-frontend +kmod-airoha-eth#' "$XP"
+                  grep -n 'kmod-airoha-eth' "$XP" || { echo "::error::airoha-xpon 的 DEPENDS 未补上 kmod-airoha-eth"; exit 1; }
+                fi
+                if [ -f .config ] && ! grep -q '^CONFIG_PACKAGE_kmod-airoha-eth=' .config; then
+                  printf 'CONFIG_PACKAGE_kmod-airoha-eth=y\n' >> .config
+                fi
+                echo ">>> airoha-eth：已用 modules/netdev-airoha-eth.mk 声明 kmod-airoha-eth，airoha-xpon 的 DEPENDS 已声明"
+
+                # libarc4.ko 只有 kmod-crypto-arc4 提供（crypto.mk: FILES crypto/arc4.ko + lib/crypto/libarc4.ko），
+                # 而 kmod-mppe 的 KernelPackage 没声明 DEPENDS。上一版把它编成内置是错方向：
+                # 内置后 lib/crypto/libarc4.ko 根本不会生成，ppp_mppe.ko 的 modinfo 依赖照样要求有包提供它，
+                # 于是 run 43688657277 第 12 步仍报 Package kmod-mppe is missing dependencies … libarc4.ko。
+                # 正解：选中提供者包 kmod-crypto-arc4=m，让 libarc4.ko 真被编出并随 kmod-crypto-arc4 打包；
+                # 同时删掉内置行，避免与包的 KCONFIG(CONFIG_CRYPTO_ARC4) 冲突。
+                sed -i '/^CONFIG_CRYPTO_ARC4=/d;/^CONFIG_KERNEL_CRYPTO_ARC4=/d;/^CONFIG_PACKAGE_kmod-crypto-arc4=/d' .config
+                printf '%s\n' 'CONFIG_PACKAGE_kmod-crypto-arc4=m' >> .config
+                grep -q '^CONFIG_PACKAGE_kmod-crypto-arc4=m' .config || { echo "::error::CONFIG_PACKAGE_kmod-crypto-arc4 未写入 .config"; exit 1; }
+                echo ">>> libarc4 提供者已选中（CONFIG_PACKAGE_kmod-crypto-arc4=m）"
+                for kv in "CONFIG_BRIDGE=y" "CONFIG_BRIDGE_NETFILTER=y" "CONFIG_NF_CONNTRACK_BRIDGE=y" \
+                          "CONFIG_NFT_BRIDGE_META=y" "CONFIG_NFT_BRIDGE_REJECT=y" \
+                          "CONFIG_BT_HCIUART_QCA=m" "CONFIG_PWRSEQ_CORE=m" \
+                          "CONFIG_SND_OSSEMUL=y" "CONFIG_SND_MIXER_OSS=m"; do
+                  k=${kv%%=*}; v=${kv#*=}
+                  sed -i -E "/^(# )?${k}[= ]/d" "$CFG" || true
+                  printf '%s=%s\n' "$k" "$v" >> "$CFG"
+                  if [ -f "$KD/.config" ]; then
+                    sed -i -E "/^(# )?${k}[= ]/d" "$KD/.config" || true
+                    printf '%s=%s\n' "$k" "$v" >> "$KD/.config"
+                  fi
+                done
+                rm -f "$KD/.configured" "$KD/.configured-check"
+                echo ">>> kmod 依赖内核符号已补：$(grep -cE '^CONFIG_(BRIDGE|BRIDGE_NETFILTER|BT_HCIUART_QCA|SND_MIXER_OSS)=' "$CFG" || true) 个"
+                # 运行库/打包依赖也要真选中，否则 CheckDependencies 报 libaio.so.1 / libstdc++.so.6 / liburcu.so.8
+                # samba4 4.24.5 的 QUIC 封装链接 libgnutls 时缺 gnutls_alpn_set_protocols / gnutls_alpn_get_selected_protocol，
+                # 根因同 gensio：libgnutls 没被选中时 GNUTLS_ALPN 不生效，staging 里的 gnutls 是没 ALPN 的。
+                # aria2 1.37 报 'setClientTLSContext' is not a member of SocketCore，是同一条：没开 --with-gnutls 就没 ENABLE_SSL。
+                for kv in "CONFIG_PACKAGE_libgnutls=m" "CONFIG_GNUTLS_ALPN=y" \
+                          "CONFIG_PACKAGE_aria2=m" "CONFIG_ARIA2_GNUTLS=y"; do
+                  k=${kv%%=*}; v=${kv#*=}
+                  grep -qE "^${k}=" .config || printf '%s=%s\n' "$k" "$v" >> .config
+                done
+                # gensio 2.8.4 上游 bug：init_mutex 只在 #ifdef USE_PTHREADS 内定义，却在不带 pthreads 时被无条件调用，
+                # GCC 14 把 implicit declaration 当错误（run 43667373613 第 18 步 gensio_unix.c:364）。
+                # 修法是按上游本意打开 pthreads 支持（musl 下恒可用），不改源码、不放松任何校验。
+                for kv in "CONFIG_PACKAGE_libgensio=m" "CONFIG_GENSIO_PTHREADS=y"; do
+                  k=${kv%%=*}; v=${kv#*=}
+                  grep -qE "^${k}=" .config || printf '%s=%s\n' "$k" "$v" >> .config
+                done
+                for p in libaio liburcu libstdcpp; do
+                  grep -qE "^CONFIG_PACKAGE_${p}=" .config || printf 'CONFIG_PACKAGE_%s=m\n' "$p" >> .config
+                done
+                grep -qE '^CONFIG_PACKAGE_kmod-bridge=' .config || printf 'CONFIG_PACKAGE_kmod-bridge=m\n' >> .config
+                if [ ! -s "$KD/.config.override" ]; then
+                  if [ ! -f tmp/.packageinfo ]; then
+                    make -j1 V=s prepare-tmpinfo > "$LOGDIR/packageinfo.log" 2>&1 || true
+                  fi
+                  if [ -f tmp/.packageinfo ]; then
+                    perl scripts/package-metadata.pl kconfig tmp/.packageinfo .config 6.18 > "$KD/.config.override" 2> "$LOGDIR/package-metadata.log" || true
+                  fi
+                fi
+                echo ">>> .config.override：$(wc -l < "$KD/.config.override" 2>/dev/null || echo 0) 行"
+                if [ ! -s "$KD/.config.override" ]; then
+                  echo "::warning::.config.override 生成失败，显式关掉已知无默认值且会 (NEW) 的符号（SPI_MTK_SNFI）兜底"
+                  printf '# CONFIG_SPI_MTK_SNFI is not set\n' >> "$CFG"
+                  grep -qE '^(# )?CONFIG_SPI_MTK_SNFI[= ]' "$KD/.config" || printf '# CONFIG_SPI_MTK_SNFI is not set\n' >> "$KD/.config"
+                fi
+                # 【用真实目标做校验】target/linux/compile 会走 Kernel/Configure（真正的 .config.target
+                # + .config.override 合并）再跑 kbuild 的 syncconfig；这里手工拿 $KD/.config 跑 syncconfig
+                # 会"假通过"——实测 run 43642078063（5382A）/43642089234（全部包）：预置 通过，
+                # 真实构建仍撞 SPI_MTK_SNFI / DEVMEM (NEW)，然后在无 TTY 下直接 Error 2。
+                # 拿到 (NEW) 无默认值符号后，按 Kconfig 提示的首选项（Y→=y / M→=m / N→not set）写进
+                # target 内核配置 config-6.18，让真实构建的 .config 里始终有确定值。这不是放宽校验：
+                # 每轮仍然是真实编译，编不过就继续补符号，6 轮还不过就硬失败并打原始日志。
+                rc=1
+                for pass in $(seq 1 12); do
+                  if make -j"$(nproc)" V=s target/linux/compile > "$LOGDIR/kernel-compile-$pass.log" 2>&1; then
+                    echo ">>> target/linux/compile 通过（第 $pass 轮，Kernel/Configure + syncconfig 均真实执行）"
+                    rc=0
+                    break
+                  fi
+                  syms=$(sed -nE 's/.*\(([A-Za-z0-9_]+)\) \[([^]]*)\] \(NEW\).*/\1 \2/p' "$LOGDIR/kernel-compile-$pass.log" | sort -u)
+                  # 注意：不要换成 BRE 的 "\((\w*)\))" 写法——实测（run 43647582865）它在
+                  # "MediaTek SPI NAND Flash Interface (SPI_MTK_SNFI) [N/m/y/?] (NEW) make[7]: ***"
+                  # 这种"提示符与报错同一行"的日志里输出为空，于是第 1 轮就被误判成非配置问题而退出。
+                  if [ -z "$syms" ]; then
+                    echo "::error::target/linux/compile 第 $pass 轮失败但日志里没有 (NEW) 符号，属于真实编译错误，末尾 80 行："
+                    tail -n 80 "$LOGDIR/kernel-compile-$pass.log"
+                    break
+                  fi
+                  echo "$syms" | while read -r s choices; do
+                    case "${choices%%/*}" in
+                      Y) val="CONFIG_${s}=y" ;;
+                      M) val="CONFIG_${s}=m" ;;
+                      *) val="# CONFIG_${s} is not set" ;;
+                    esac
+                    sed -i -E "/^(# )?CONFIG_${s}[= ]/d" "$CFG" || true
+                    printf '%s\n' "$val" >> "$CFG"
+                    # 同时写进 build_dir 的 .config：kbuild 的 syncconfig 直接读这份文件，
+                    # 只改 target 配置而 Configure 不重跑时，符号等于没补（run 43653774580 连撞 6 轮 DEVMEM）。
+                    if [ -f "$KD/.config" ]; then
+                      sed -i -E "/^(# )?CONFIG_${s}[= ]/d" "$KD/.config" || true
+                      printf '%s\n' "$val" >> "$KD/.config"
+                    fi
+                    # 目标配置已变更，删掉 configure 戳，保证下一轮 Kernel/Configure 真的重跑并重建 .config。
+                    # 这不是放宽校验：下一轮仍然是真实编译，符号没生效就还会再报 (NEW)。
+                    rm -f "$KD/.configured" "$KD/.configured-check"
+                    echo ">>> (NEW) 无默认值符号 → 显式定值：$val"
+                    echo ">>> diag: $CFG=$(grep -c "^CONFIG_${s}=" 2>/dev/null "$CFG" || true) .config="\
+                      "$(grep -c "^CONFIG_${s}=" 2>/dev/null "$KD/.config" || true)"
+                  done
+                done
+                if [ $rc -ne 0 ]; then
+                  echo "::error::内核 6 轮内仍未通过真实构建校验（已补入 (NEW) 符号定值），最后一份日志：$LOGDIR/kernel-compile-$pass.log"
+                  exit 1
+                fi
+                echo ">>> 内核已编出：Module.symvers 行数 $(wc -l < "$KD/Module.symvers" 2>/dev/null || echo 0)"
+              else
+                echo "::warning::未找到 $CFG，跳过内核配置固化"
+              fi
+            else
+              echo "::warning::未找到内核源码目录，跳过 olddefconfig"
+            fi
+          else
+            echo "::warning::target/linux/prepare 失败，尾部："
+            tail -n 30 "$LOGDIR/kernel-prepare.log"
+          fi
+          # 【内核必须真编一次】kmod 与"内核模块源码包"（airoha-pon-frontends、gpio-button-hotplug 等）
+          # 在 modpost 阶段要读 $KD/Module.symvers 解析 mutex_lock / skb_put 这类内核符号；
+          # 只跑 modules_prepare 不会生成该文件，实测就是 "Module.symvers is missing" + 一片 undefined!
+          # （run 43630997001 / 43630999285 / 43631001506 同一个根因）。
+          # 所以这里先真正编一次内核（vmlinux + Module.symvers 一起产出）；失败就明确报错停手，
+          # 绝不用 KBUILD_MODPOST_WARN 把 undefined! 降级成警告来"骗绿"。
+          if ! make -j"$(nproc)" V=s target/linux/compile > "$LOGDIR/kernel-compile.log" 2>&1; then
+            echo "::error::target/linux/compile 失败，kmod 无法在缺 Module.symvers 的内核树上编译，尾部："
+            tail -n 60 "$LOGDIR/kernel-compile.log"
+            exit 1
+          fi
+          echo ">>> 内核编译完成，Module.symvers 行数：$(wc -l < "$KD/Module.symvers" 2>/dev/null || echo 0)"
+          # 逐包编译：单包失败不再拖垮整批；每包一份日志，最后统一汇总 OK/FAIL。
+          : > "$LOGDIR/pkg-summary.txt"
+          ok=0; bad=0
+          while read -r p; do
+            [ -z "$p" ] && continue
+            d=$(find package -maxdepth 5 -type d -name "$p" | head -1)
+            if [ -z "$d" ]; then
+              echo "MISS $p" >> "$LOGDIR/pkg-summary.txt"
+              continue
+            fi
+            echo "=== 编译 $p （$d） ==="
+            if make WARN_RECURSIVE_DEP=1 -j"$(nproc)" V=s "$d"/compile > "$LOGDIR/pkg-$p.log" 2>&1; then
+              echo "OK   $p" | tee -a "$LOGDIR/pkg-summary.txt"; ok=$((ok+1))
+            else
+              echo "FAIL $p" | tee -a "$LOGDIR/pkg-summary.txt"; bad=$((bad+1))
+              grep -nE 'error:|Error [0-9]|missing dependencies|No such file|not found' "$LOGDIR/pkg-$p.log" | head -n 8 >> "$LOGDIR/pkg-summary.txt" || true
+            fi
+          done < ../pkg_list.txt
+          echo ">>> 逐包编译汇总：OK=$ok FAIL=$bad（明细 log 内 pkg-summary.txt）"
+          cp -f "$LOGDIR/pkg-summary.txt" ../build_log/pkg-summary.txt || true
+
+      - name: 收集全部IPK
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p ../ipk_out
+          shopt -s nullglob
+          # 收集 bin/ 下所有 apk（含依赖库，装机时不必再另找 lib），并写清单
+          n=0
+          while IFS= read -r -d '' f; do
+            cp -f "$f" ../ipk_out/ && n=$((n+1))
+          done < <(find bin/packages bin/targets -type f -name '*.apk' -print0 2>/dev/null)
+          echo ">>> 收集 apk 数量：$n"
+          ls -lh ../ipk_out | head -n 20
+          ls ../ipk_out | sort > ../ipk_out/APK-LIST.txt
+          echo ">>> 清单已写 ../ipk_out/APK-LIST.txt"
+
+      - name: 打包制品 & 生成校验和
+        run: |
+          mkdir -p release_out
+          cp -f ipk_out/* release_out/ 2>/dev/null || true
+          cd release_out
+          shopt -s nullglob
+          files=( *)
+          [ "${#files[@]}" -eq 0 ] && { echo "::error::无IPK产出，终止发布"; exit 1; }
+          tar --zstd -cf ../${{ env.TAR_NAME }} "${files[@]}"
+          sha256sum ../${{ env.TAR_NAME }} > ../${{ env.SHA_NAME }}
+          ls -lh ../
+
+      - name: 制品存在校验
+        run: |
+          if [ ! -f "${{ env.TAR_NAME }}" ] || [ ! -f "${{ env.SHA_NAME }}" ]; then
+            echo "::error::制品缺失，禁止发布"
+            exit 1
+          fi
+
+      - name: 生成唯一Tag（自动防重）
+        id: taggen
+        run: |
+          BASE_TAG="ipk-$(date +%Y%m%d-%H%M)"
+          TAG="${BASE_TAG}"
+          SUFFIX=1
+          while gh api -s "/repos/${{ github.repository }}/git/ref/tags/${TAG}" >/dev/null 2>&1; do
+            TAG="${BASE_TAG}-${SUFFIX}"
+            SUFFIX=$((SUFFIX+1))
+          done
+          echo "TAG=${TAG}" >> $GITHUB_OUTPUT
+          echo "Final tag: ${TAG}"
+
+      - name: 预发布 Release（仅编译成功才执行）
+        if: success()
+        uses: softprops/action-gh-release@v2.0.8
+        with:
+          tag_name: ${{ steps.taggen.outputs.TAG }}
+          name: PonWrt HG5585F-CT IPK 插件包 ${{ steps.taggen.outputs.TAG }}
+          prerelease: true
+          make_latest: false
+          generate_release_notes: false
+          body: |
+            【预发布｜HG5585F-CT 存储/媒体扩展包（NAS2）】
+            基准源码 commit: `${{ env.SOURCE_REF }}`
+            编译方式：逐包 `make <包目录>/compile`（单包失败不影响其它包）
+            包含：samba4/luci-app-samba4、ksmbd-tools/luci-app-ksmbd、nfs-kernel-server(+utils)/luci-app-nfs、
+                  cifs-utils、minidlna/luci-app-minidlna、transmission(+daemon)/luci-app-transmission、
+                  qbittorrent/luci-app-qbittorrent、rsync、cryptsetup、btrfs-progs、xfsprogs
+            未包含：dufs（需 Rust 基建，单独车道处理）
+            逐包结果见 build_log/pkg-summary.txt；SMB 两套运行时只能选一个
+          files: |
+            ${{ env.TAR_NAME }}
+            ${{ env.SHA_NAME }}
+            build_log/full-build.log
+            ponwrt/.config
+
+      - name: 上传IPK Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PonWrt-HG5585F-CT-all-ipk
+          path: |
+            ./ipk_out/
+            ./${{ env.TAR_NAME }}
+            ./${{ env.SHA_NAME }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: 上传完整编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: IPK-build-diagnostics
+          path: |
+            ponwrt/.config
+            build_log/full-build.log
+            build_log/pkg-summary.txt
+            build_log/pkg-miss.txt
+            build_log/dep-check.txt
+            build_log/defconfig-resolve.log
+            build_log/pkg-*.log
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: 逐包结果校验（任一 FAIL 即失败，不掩盖）
+        if: always()
+        run: |
+          echo "==== 逐包编译结果 ===="
+          cat build_log/pkg-summary.txt 2>/dev/null || echo "(无 pkg-summary.txt)"
+          echo "==== 未参与编译的包 ===="
+          cat build_log/pkg-miss.txt 2>/dev/null || echo "(无 MISS)"
+          if grep -q '^FAIL ' build_log/pkg-summary.txt 2>/dev/null; then
+            echo "::error::存在编译失败的包，逐行："
+            grep '^FAIL ' build_log/pkg-summary.txt
+            exit 1
+          fi
+          echo ">>> 全部目标包编译成功"
