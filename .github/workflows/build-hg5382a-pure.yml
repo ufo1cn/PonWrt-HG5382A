@@ -392,19 +392,19 @@ jobs:
           grep -q "o.value('gpon'" feeds/pon_userspace/luci-app-pon/htdocs/luci-static/resources/view/pon/config.js
           echo "OK: GPON patches are present."
 
-      - name: 强制打开底层驱动内核符号（直接写进 target 内核配置，绕开 CONFIG_KERNEL_* 不生成的问题）
+      - name: 写入内核自有符号（NPU / DEBUG_FS / DEVMEM），驱动一律交给 kmod 包
         working-directory: ./ponwrt
         run: |
-          # 【为什么必须这么干】
-          # 先前用的是往 .config 里加 CONFIG_KERNEL_RTW88=m 这类写法，但实测产物 diagnostics 里
-          # logs/kernel-config-check.txt 显示 CONFIG_RTW88 / RTL8XXXU / USB_SERIAL_CH341 /
-          # SND_USB_AUDIO / USB_UAS / EXFAT_FS / NTFS3_FS / WIREGUARD / CIFS / NFSD /
-          # NETLINK_DIAG / BRIDGE_NF_EBTABLES / NFT_NAT / BT_LE / NET_AIROHA 全部“（未出现）”。
-          # 原因是 CONFIG_KERNEL_xxx 这类符号只有在某个“被选中的 kmod 包”引用它时才会在 .config 里
-          # 出现；没人引用的符号会被 kconfig 直接丢弃，于是内核根本没打开这些驱动（.ko 自然不存在）。
-          # 唯一确定生效的入口是 target 的内核配置文件：build 时它会被 merge 进内核 .config。
-          # 这里同时统一改成 =y（编进内核镜像里，而不是 =m 生成 .ko 却没人打包），
-          # 这样后期单独编出来的应用包只要用驱动就能直接工作，不必再回来重编固件。
+          # 【为什么只写这几行】
+          # run 43820621783 的 logs/kernel-config-check.txt（同一份内核 .config）实测：
+          #   · CONFIG_BRIDGE_NF_EBTABLES=m、CONFIG_NFT_NAT=m、CONFIG_NET_AIROHA=m ——
+          #     注入了 =y，最终仍是 m：有 kmod 包声明的符号由包声明决定，=y 注入无效；
+          #   · CONFIG_USB_STORAGE=y、CONFIG_USB_SERIAL_CH341=y —— 这类注入真生效，把驱动编进
+          #     vmlinux，kmod-usb-storage / kmod-usb-serial-ch341 就没有 .ko 可打包；
+          #   · CONFIG_CFG80211=y、CONFIG_MAC80211=y —— 注入后与 backports 重复导出，modpost 判死。
+          # 结论：驱动一律靠 kmod 包（镜像内 =y，内核符号抬成 =m）打开；内核配置只留没有任何 kmod
+          # 包声明的符号 —— NPU（状态页 / iptv-ppe）、PPE flow offload 表要 debugfs、Frame Engine
+          # 与 PLL 超频段要读 /dev/mem，这三样没有 kmod 提供者，只能写在内核配置里。
           KCFG=target/linux/airoha/an7581/config-6.18
           if [ ! -f "$KCFG" ]; then
             echo "::error::找不到 $KCFG，无法注入底层驱动符号"
