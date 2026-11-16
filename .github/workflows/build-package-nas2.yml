@@ -425,6 +425,22 @@ jobs:
 
           # 解析后把清单重新压回 =m（defconfig 可能把某些包改成 =y）
           for p in "${pkg_list[@]}"; do set_pkg_m "$p"; done
+          # minidlna 1.3.3 的 DEPENDS 里有虚拟名 libjpeg / libffmpeg，Kconfig 的 select 解析不到，
+          # defconfig 之后提供者包仍未选中，打包时报（run 43839192470 第 26 步校验，
+          # build_log/pkg-minidlna.log 第 8828-8837 行）：
+          #   Package minidlna is missing dependencies for the following libraries:
+          #   libFLAC.so.12 libavcodec.so.63 libavformat.so.63 libavutil.so.61 libexif.so.12
+          #   libid3tag.so.0 libjpeg.so.62 libogg.so.0 libvorbis.so.0
+          # 对应真实包（openwrt/packages 原文）：
+          #   libjpeg-turbo（PROVIDES:=libjpeg，装 libjpeg.so.62）、libffmpeg（PROVIDES:=libffmpeg-full，
+          #   装 libavcodec/libavformat/libavutil）、libflac、libexif、libid3tag、libogg、libvorbis、libsqlite3。
+          # 这里把提供者真正选中，缺一个就报错，不放宽校验。
+          for p in libjpeg-turbo libffmpeg libflac libexif libid3tag libogg libvorbis libsqlite3; do
+            sed -i "/^CONFIG_PACKAGE_${p}=/d" .config
+            printf 'CONFIG_PACKAGE_%s=m\n' "$p" >> .config
+            grep -q "^CONFIG_PACKAGE_${p}=m" .config || { echo "::error::minidlna 的运行库提供者 ${p} 未选中"; exit 1; }
+          done
+          echo ">>> minidlna 运行库提供者已选中：libjpeg-turbo / libffmpeg / libflac / libexif / libid3tag / libogg / libvorbis / libsqlite3"
 
           devcnt=$(grep -cxF 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' .config || true)
           anydev=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_[A-Za-z0-9_.-]+=y$' .config || true)
@@ -436,7 +452,8 @@ jobs:
           fi
 
           # 依赖是否真的进 .config（只报告，不掩盖；缺了会导致后面 missing dependencies）
-          for l in libpopt libtasn1 liburing libjpeg libogg libsqlite3 libvorbis liblzo2 libnl-tiny libtirpc; do
+          for l in libpopt libtasn1 liburing libjpeg-turbo libogg libsqlite3 libvorbis liblzo2 libnl-tiny libtirpc \
+                   libffmpeg libflac libexif libid3tag; do
             if grep -q "^CONFIG_PACKAGE_$l=" .config; then echo "OK   dep $l"; else echo "MISS dep $l"; fi
           done | tee -a ../build_log/dep-check.txt
           echo ">>> =m 清单已写入并完成依赖解析"
