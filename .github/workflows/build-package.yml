@@ -606,6 +606,39 @@ jobs:
                   printf 'CONFIG_PACKAGE_kmod-airoha-eth=y\n' >> .config
                 fi
                 echo ">>> airoha-eth：已用 modules/netdev-airoha-eth.mk 声明 kmod-airoha-eth，airoha-xpon 的 DEPENDS 已声明"
+                # kmod-airoha-eth 的 modinfo depends=dsa_core.ko，而 dsa_core.ko 的唯一提供者是 kmod-dsa；
+                # kmod-dsa 自身 DEPENDS +kmod-mdio-devres +kmod-net-selftests +kmod-phylink（netdevices.mk:711），
+                # phylink 又依赖 +kmod-libphy。手写 .config 不会 select 这些 DEPENDS，于是打包报
+                #   Package kmod-airoha-eth is missing dependencies for the following libraries: dsa_core.ko
+                # （run 43821379462 第 18 步，build_log/full-build.log 第 148632-148633 行）。这里补的是真正缺失的提供者链。
+                for p in kmod-dsa kmod-mdio-devres kmod-net-selftests kmod-phylink kmod-libphy; do
+                  sed -i "/^CONFIG_PACKAGE_${p}=/d" .config
+                  printf 'CONFIG_PACKAGE_%s=y\n' "$p" >> .config
+                  grep -q "^CONFIG_PACKAGE_${p}=y" .config || { echo "::error::dsa_core.ko 依赖链上的 ${p} 未选中"; exit 1; }
+                done
+                # dsa_core.ko 在 6.18 的 modinfo 里还带 hsr.ko（DSA 支持 HSR offload），
+                # 而 ponwrt 的 KernelPackage/dsa 只声明了 dsa_core.ko：
+                #   Package kmod-dsa is missing dependencies for the following libraries: hsr.ko
+                # （run 43798016127 / 43798023124 第 24 步）。让 kmod-dsa 一并提供 hsr.ko（已验证的写法）。
+                MK_NETDEV=package/kernel/linux/modules/netdevices.mk
+                if ! grep -q 'net/hsr/hsr.ko' "$MK_NETDEV"; then
+                  awk '
+                    /^define KernelPackage\/dsa$/ { in_dsa=1 }
+                    in_dsa && /KCONFIG:=CONFIG_NET_DSA/ {
+                      sub(/KCONFIG:=CONFIG_NET_DSA.*/, "KCONFIG:=CONFIG_NET_DSA CONFIG_HSR")
+                    }
+                    in_dsa && /dsa_core\.ko/ {
+                      print "  FILES:=$(LINUX_DIR)/net/dsa/dsa_core.ko \\"
+                      print "\t$(LINUX_DIR)/net/hsr/hsr.ko"
+                      next
+                    }
+                    in_dsa && /^endef$/ { in_dsa=0 }
+                    { print }
+                  ' "$MK_NETDEV" > "$MK_NETDEV.new" && mv "$MK_NETDEV.new" "$MK_NETDEV"
+                fi
+                grep -q 'net/hsr/hsr.ko' "$MK_NETDEV" || { echo "::error::hsr.ko 的归属没写进 netdevices.mk"; exit 1; }
+                grep -q 'CONFIG_HSR' "$MK_NETDEV" || { echo "::error::CONFIG_HSR 没写进 netdevices.mk 的 KCONFIG"; exit 1; }
+                echo ">>> dsa_core.ko 依赖链已选中：kmod-dsa + mdio-devres / net-selftests / phylink / libphy；kmod-dsa 已声明 hsr.ko"
 
                 # libarc4.ko 只有 kmod-crypto-arc4 提供（crypto.mk: FILES crypto/arc4.ko + lib/crypto/libarc4.ko），
                 # 而 kmod-mppe 的 KernelPackage 没声明 DEPENDS。上一版把它编成内置是错方向：
@@ -638,6 +671,16 @@ jobs:
                 grep -q '+kmod-crypto-arc4' "$FSMK" || { echo "::error::fs.mk 的 fs-ksmbd 没补上 +kmod-crypto-arc4"; exit 1; }
                 echo ">>> fs-ksmbd 的 DEPENDS 已补 +kmod-crypto-arc4（libarc4.ko 由 kmod-crypto-arc4 提供）"
                 echo ">>> libarc4 提供者已选中（CONFIG_PACKAGE_kmod-crypto-arc4=m）"
+                # lsblk（util-linux）的 DEPENDS 是 +libblkid +libmount +libsmartcols +libncurses，
+                # pkg_list 只写了 lsblk，手写 .config 不会 select 依赖 → libncurses 没被编，
+                # lsblk 链接的 libncursesw.so.6 找不到提供者：
+                #   Package lsblk is missing dependencies for the following libraries: libncursesw.so.6
+                # （run 43821379462 第 18 步，build_log/full-build.log 第 121347-121348 行）。
+                # libncurses 包里装的就是 libncursesw.so.6（package/libs/ncurses 的 Package/libncurses/install）。
+                sed -i '/^CONFIG_PACKAGE_libncurses=/d' .config
+                printf 'CONFIG_PACKAGE_libncurses=m\n' >> .config
+                grep -q '^CONFIG_PACKAGE_libncurses=m' .config || { echo "::error::libncursesw.so.6 的提供者 libncurses 未选中"; exit 1; }
+                echo ">>> libncursesw.so.6 提供者已选中（CONFIG_PACKAGE_libncurses=m）"
                 for kv in "CONFIG_BRIDGE=y" "CONFIG_BRIDGE_NETFILTER=y" "CONFIG_NF_CONNTRACK_BRIDGE=y" \
                           "CONFIG_NFT_BRIDGE_META=y" "CONFIG_NFT_BRIDGE_REJECT=y" \
                           "CONFIG_BT_HCIUART_QCA=m" "CONFIG_PWRSEQ_CORE=m" \
