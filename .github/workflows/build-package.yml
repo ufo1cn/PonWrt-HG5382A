@@ -409,6 +409,8 @@ jobs:
             luci-app-ttyd
             ttyd
             usbutils
+            libusb-1.0
+            libudev-zero
             luci-theme-argon
             luci-app-ddns
             ddns-scripts
@@ -829,6 +831,8 @@ jobs:
             luci-app-ttyd
             ttyd
             usbutils
+            libusb-1.0
+            libudev-zero
             luci-theme-argon
             luci-app-ddns
             ddns-scripts
@@ -874,6 +878,19 @@ jobs:
           if [ ! -f "${{ env.TAR_NAME }}" ] || [ ! -f "${{ env.SHA_NAME }}" ]; then
             echo "::error::制品缺失，禁止发布"
             exit 1
+          fi
+          # usbutils(lsusb) 的运行库依赖必须有对应 apk，否则装到设备上解析不了依赖。
+          # 之前 libusb-1.0 / libudev-zero 只被当构建依赖 stage 过、没产出 apk，
+          # 于是出现 "Package usbutils is missing dependencies for the following libraries:
+          # libudev.so.1 / libusb-1.0.so.0" 直接把整批编译打断（run 43798029752 第 18 步）。
+          if ls ipk_out/usbutils-*.apk >/dev/null 2>&1; then
+            for dep in libudev-zero libusb-1.0; do
+              ls ipk_out/${dep}-*.apk >/dev/null 2>&1 || {
+                echo "::error::usbutils 已出包，但缺少运行库依赖 ${dep} 的 apk（会造成依赖解析失败）"
+                exit 1
+              }
+            done
+            echo ">>> usbutils 的运行库依赖齐全：$(ls ipk_out/libudev-zero-*.apk ipk_out/libusb-1.0-*.apk)"
           fi
 
       - name: 生成唯一Tag（自动防重）
