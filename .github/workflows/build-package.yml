@@ -455,6 +455,19 @@ jobs:
             'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' \
             'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' >> .config
           for p in "${pkg_list[@]}"; do set_pkg_m "$p"; done
+          # ttyd（feeds/packages/utils/ttyd/Makefile，ttyd-1.7.7）DEPENDS 是 +libwebsockets-full，
+          # 只有 full 变体才加 -DLWS_WITH_LIBUV=ON（libs/libwebsockets/Makefile 第 90-93 行）；
+          # openssl / mbedtls 变体都不带 libuv。实测 .config 里落的是 openssl 变体
+          # （build_dir/.../libwebsockets-openssl/，stamp .libwebsockets.openssl_installed），
+          # 于是 ttyd 配置阶段直接报
+          #   CMake Error at CMakeLists.txt:64: libwebsockets was not build with libuv support (-DLWS_WITH_LIBUV=ON)
+          #   make[2]: *** [Makefile:58: .../ttyd-1.7.7/.configured_...] Error 1
+          # （run 43857134468 第 18 步 full-build.log 126681-126690）。
+          # 修法：把变体改成 full（libuv / libopenssl 由 full 的 DEPENDS 自动带入）。
+          sed -i '/^CONFIG_PACKAGE_libwebsockets=/d;/^CONFIG_PACKAGE_libwebsockets-openssl=/d;/^CONFIG_PACKAGE_libwebsockets-mbedtls=/d;/^CONFIG_PACKAGE_libwebsockets-full=/d' .config
+          printf 'CONFIG_PACKAGE_libwebsockets-full=m\n' >> .config
+          grep -q '^CONFIG_PACKAGE_libwebsockets-full=m' .config || { echo "::error::libwebsockets-full 未落成 =m（ttyd 需要带 libuv 的 full 变体）"; exit 1; }
+          echo ">>> libwebsockets 变体已锁定为 full（ttyd 需要的 -DLWS_WITH_LIBUV=ON 只在 full 里）"
           # libffmpeg / ffmpeg 的运行库提供者必须落成 =m：gen-dependencies 只认 .apk 的 provides，
           # 实测 ffmpeg 打包时报缺 libavcodec.so.63/libavdevice.so.63/libavfilter.so.12/libavformat.so.63
           # /libavutil.so.61/libpostproc.so.59/libswresample.so.7/libswscale.so.10/libz.so.1
