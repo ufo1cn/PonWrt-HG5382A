@@ -990,7 +990,7 @@ jobs:
                     in_dsa && /KCONFIG:=CONFIG_NET_DSA/ {
                       sub(/KCONFIG:=CONFIG_NET_DSA.*/, "KCONFIG:=CONFIG_NET_DSA CONFIG_HSR")
                     }
-                    in_dsa && /FILES:=\$(LINUX_DIR)\/net\/dsa\/dsa_core\.ko/ {
+                    in_dsa && /dsa_core\.ko/ {
                       print "  FILES:=$(LINUX_DIR)/net/dsa/dsa_core.ko \\"
                       print "\t$(LINUX_DIR)/net/hsr/hsr.ko"
                       next
