@@ -443,6 +443,17 @@ jobs:
           for p in "${pkg_list[@]}"; do
             set_pkg_m "$p"
           done
+          # libffmpeg / ffmpeg 的运行库提供者必须落成 =m：gen-dependencies 只认 .apk 的 provides，
+          # 实测 ffmpeg 打包时报缺 libavcodec.so.63/libavdevice.so.63/libavfilter.so.12/libavformat.so.63
+          # /libavutil.so.61/libpostproc.so.59/libswresample.so.7/libswscale.so.10/libz.so.1
+          # （run 43857129451 第 18 步 full-build.log 180986-180996）；minidlna 侧还要
+          # libbz2.so.1.0 / libdrm.so.2 / libmp3lame.so.0 / libopus.so.0（pkg-minidlna.log 342-345）。
+          for p in libffmpeg libbz2 libdrm libopus lame-lib zlib; do
+            sed -i "/^CONFIG_PACKAGE_${p}=/d" .config
+            printf 'CONFIG_PACKAGE_%s=m\n' "$p" >> .config
+            grep -q "^CONFIG_PACKAGE_${p}=m" .config || { echo "::error::运行库提供者 ${p} 未落成 =m"; exit 1; }
+          done
+          echo ">>> libffmpeg 运行库提供者已落成 =m（libav*/libz/libbz2/libdrm/libmp3lame/libopus）"
           echo ">>> 所有包设为模块，依赖解析完成"
 
       - name: 下载源码包
@@ -647,6 +658,21 @@ jobs:
                 fi
                 grep -q '+kmod-crypto-arc4' "$FSMK" || { echo "::error::fs.mk 的 fs-ksmbd 没补上 +kmod-crypto-arc4"; exit 1; }
                 echo ">>> fs-ksmbd 的 DEPENDS 已补 +kmod-crypto-arc4（libarc4.ko 由 kmod-crypto-arc4 提供）"
+                # kmod-mac80211 的 mac80211.ko 在 modinfo depends 里带 libarc4，但 ponwrt 的
+                # package/kernel/mac80211/Makefile（第 134 行）DEPENDS 只写了
+                #   +kmod-cfg80211 +kmod-crypto-cmac +kmod-crypto-ccm +kmod-crypto-gcm +hostapd-common
+                # 没有 arc4；而 kmod-crypto-arc4 已选中=m 并打包 lib/crypto/libarc4.ko，报
+                #   Package kmod-mac80211 is missing dependencies for the following libraries: libarc4.ko
+                #   make[2]: *** [Makefile:410: .../kmod-mac80211-6.18.55.7.2-r5.apk] Error 1
+                # （run 43857129451 第 18 步 full-build.log 180661-180663）。补真正的提供者。
+                MKM=package/kernel/mac80211/Makefile
+                if [ -f "$MKM" ] && ! grep -q 'kmod-crypto-gcm +hostapd-common +kmod-crypto-arc4' "$MKM"; then
+                  sed -i 's/^  DEPENDS+= +kmod-cfg80211 +kmod-crypto-cmac +kmod-crypto-ccm +kmod-crypto-gcm +hostapd-common$/  DEPENDS+= +kmod-cfg80211 +kmod-crypto-cmac +kmod-crypto-ccm +kmod-crypto-gcm +hostapd-common +kmod-crypto-arc4/' "$MKM"
+                fi
+                if [ -f "$MKM" ]; then
+                  grep -q 'kmod-crypto-gcm +hostapd-common +kmod-crypto-arc4' "$MKM" || { echo "::error::mac80211 Makefile 里 kmod-mac80211 的 DEPENDS 未补上 +kmod-crypto-arc4"; exit 1; }
+                fi
+                echo ">>> kmod-mac80211：DEPENDS 已补 +kmod-crypto-arc4（libarc4.ko 由它提供）"
                 echo ">>> libarc4 提供者已选中（CONFIG_PACKAGE_kmod-crypto-arc4=m）"
                 # lsblk（util-linux）的 DEPENDS 是 +libblkid +libmount +libsmartcols +libncurses，
                 # pkg_list 只写了 lsblk，手写 .config 不会 select 依赖 → libncurses 没被编，
