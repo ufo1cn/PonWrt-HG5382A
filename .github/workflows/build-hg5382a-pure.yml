@@ -148,7 +148,7 @@ jobs:
         CONFIG_USB_HID CONFIG_HID CONFIG_WIREGUARD CONFIG_CIFS
         CONFIG_NFS_FS CONFIG_NFSD CONFIG_MACVLAN CONFIG_VETH
         CONFIG_BRIDGE_NF_EBTABLES CONFIG_NFT_NAT
-        CONFIG_NET_AIROHA CONFIG_NET_AIROHA_NPU CONFIG_DEBUG_FS CONFIG_DEVMEM CONFIG_PROC_KCORE
+        CONFIG_NET_AIROHA CONFIG_NET_AIROHA_NPU CONFIG_DEBUG_FS CONFIG_DEVMEM CONFIG_PROC_KCORE CONFIG_NET_AIROHA_FLOW_STATS CONFIG_BRIDGE_NF_EBTABLES CONFIG_NFT_NAT
       # 以 =m 单独出包的附加内核模块（全部来自 package/kernel/linux/modules）
       EXTRA_KMODS: >-
         kmod-usb-serial kmod-usb-serial-ch341 kmod-usb-serial-cp210x
@@ -412,66 +412,23 @@ jobs:
           fi
           cp -f "$KCFG" /tmp/config-6.18.orig
           cat > /tmp/pon_extra_kconfig.txt << 'KEOF'
-          # ---------- 无线网卡：不在 target 内核配置里强写 ----------
-          # 反证（run 43820629249 第 24 步，logs/firmware-errors.txt 第 32685-33020 行）：
-          #   ERROR: modpost: net/wireless/cfg80211: 'wiphy_register' exported twice. Previous export was in vmlinux
-          #   （cfg80211 174 条、mac80211 146 条）
-          #   make[2]: *** [package/Makefile:255: package/kernel/mac80211/compile] Error 1
-          # 原因：把 CONFIG_CFG80211=y / CONFIG_MAC80211=y 写进 target 内核配置，cfg80211/mac80211
-          # 会被编进 vmlinux；而 DRIVER_PKGS 选中的 kmod-rtw88* 又会经 package/kernel/mac80211
-          # （backports）再编一份 cfg80211.ko / mac80211.ko，两边导出同一批符号 → modpost 判死。
-          # 正确通路（也是历史成功固件 run 43418429418 的写法）：无线全部交给 kmod 包，
-          # 由 package-metadata 把 CONFIG_CFG80211 / CONFIG_MAC80211 抬成 =m，内核侧只读不写。
-          CONFIG_BT=y
-          CONFIG_BT_LE=y
-          CONFIG_BT_HCIBTUSB=y
-          CONFIG_BT_HCIUART=y
-          # ---------- USB 串口 / 网卡 / 存储 / 摄像头 / 声卡 ----------
-          CONFIG_USB_SERIAL=y
-          CONFIG_USB_SERIAL_CH341=y
-          CONFIG_USB_SERIAL_CP210X=y
-          CONFIG_USB_SERIAL_FTDI_SIO=y
-          CONFIG_USB_SERIAL_PL2303=y
-          CONFIG_USB_ACM=y
-          CONFIG_USB_UAS=y
-          CONFIG_USB_STORAGE=y
-          CONFIG_USB_NET_RTL8152=y
-          CONFIG_USB_NET_AX88179_178A=y
-          CONFIG_USB_NET_CDCETHER=y
-          CONFIG_USB_NET_CDC_NCM=y
-          CONFIG_MEDIA_SUPPORT=y
-          CONFIG_MEDIA_USB_SUPPORT=y
-          CONFIG_VIDEO_DEV=y
-          CONFIG_VIDEO_V4L2=y
-          CONFIG_USB_VIDEO_CLASS=y
-          CONFIG_SND=y
-          CONFIG_SND_USB=y
-          CONFIG_SND_USB_AUDIO=y
-          # ---------- 文件系统（U 盘 / 移动硬盘直接挂载）----------
-          CONFIG_EXT4_FS=y
-          CONFIG_VFAT_FS=y
-          CONFIG_EXFAT_FS=y
-          CONFIG_NTFS3_FS=y
-          CONFIG_CIFS=y
-          CONFIG_NFS_FS=y
-          CONFIG_NFSD=y
-          # ---------- 网络（代理 / 隧道 / 桥接相关底层）----------
-          CONFIG_INET_DIAG=y
-          CONFIG_NETLINK_DIAG=y
-          CONFIG_TUN=y
-          CONFIG_WIREGUARD=y
-          CONFIG_MACVLAN=y
-          CONFIG_VETH=y
-          CONFIG_BRIDGE_NF_EBTABLES=y
-          CONFIG_NFT_NAT=y
-          CONFIG_NF_CONNTRACK=y
-          # ---------- Airoha NPU（luci-app-airoha-npu 状态页需要）----------
+          # 只保留「kmod 树里没有任何 KernelPackage 声明」的内核符号；有 kmod 提供者的一律不写。
+          # 证据（run 43820621783 的 logs/kernel-config-check.txt，同一份 .config 实测）：
+          #   CONFIG_BRIDGE_NF_EBTABLES=m / CONFIG_NFT_NAT=m —— 注入了 =y，最终仍是 m，包声明优先，
+          #     这类注入无效且多一层风险；CONFIG_NET_AIROHA=y 最终也是 m（kmod-airoha-eth 声明）。
+          #   CONFIG_USB_STORAGE=y / CONFIG_USB_SERIAL_CH341=y —— 这类注入把驱动编进 vmlinux，
+          #     kmod-usb-storage / kmod-usb-serial-ch341 就没有 .ko 可打包（历史成功 run 的做法是不注入）。
+          #   CONFIG_CFG80211=y / CONFIG_MAC80211=y —— 注入后与 backports 重复导出，modpost 直接判死。
+          # 所以驱动一律交给 kmod 包（镜像内 =y → 内核符号抬成 =m），内核侧只留内核自有符号。
           CONFIG_NET_AIROHA=y
           CONFIG_NET_AIROHA_NPU=y
+          # NPU 流表 / PPE offload 计数（target config-6.18 里原本是 is not set）
+          CONFIG_NET_AIROHA_FLOW_STATS=y
+          # luci-app-airoha-npu 的 PPE flow offload 表读 debugfs；Frame Engine / PLL 超频段读 /dev/mem
           CONFIG_DEBUG_FS=y
           CONFIG_DEBUG_FS_ALLOW_ALL=y
-          CONFIG_COMMON_CLK=y
           CONFIG_DEVMEM=y
+          CONFIG_COMMON_CLK=y
           KEOF
           # 先删掉同名旧行（含 "# CONFIG_X is not set"），再整体追加，保证后写的生效
           while read -r line; do
@@ -533,7 +490,9 @@ jobs:
           clear_sym CONFIG_PACKAGE_squeezelite-custom
           clear_sym CONFIG_KERNEL_DEBUG_FS
           clear_sym CONFIG_KERNEL_DEVMEM
-          clear_sym CONFIG_BUSYBOX_CONFIG_DEVMEM
+          # 注意：不再 clear_sym CONFIG_BUSYBOX_CONFIG_DEVMEM ——
+          # luci-app-airoha-npu 的 Frame Engine 与 PLL 超频段靠 busybox devmem 读写寄存器，
+          # 关掉等于砍掉面板这两段功能；下面显式写 CONFIG_BUSYBOX_CONFIG_DEVMEM=y。
           clear_sym CONFIG_PACKAGE_usbutils
 
           printf '# CONFIG_TARGET_ALL_PROFILES is not set\n' >> .config
@@ -591,6 +550,8 @@ jobs:
           printf 'CONFIG_PACKAGE_kmod-input-core=y\n' >> .config
           printf 'CONFIG_PACKAGE_kmod-sound-core=y\n' >> .config
           printf 'CONFIG_PACKAGE_kmod-usb-audio=y\n' >> .config
+          # luci-app-airoha-npu 的 Frame Engine / 超频段需要 devmem applet
+          printf 'CONFIG_BUSYBOX_CONFIG_DEVMEM=y\n' >> .config
 
           printf '# ============================================================\n' >> .config
           printf '# go2rtc / camlive 及其用户态依赖：一律只编独立包，不进镜像\n' >> .config
@@ -622,6 +583,24 @@ jobs:
             esac
             printf 'CONFIG_KERNEL_%s=m\n' "${k#CONFIG_}" >> .config
           done
+
+          # --- 驱动包自检：内核符号不再靠注入，驱动必须由这些 kmod 包提供（缺一个就判死）---
+          miss=""
+          for p in kmod-usb-serial kmod-usb-serial-ch341 kmod-usb-serial-cp210x kmod-usb-serial-ftdi kmod-usb-serial-pl2303 kmod-usb-acm kmod-usb-storage kmod-usb-storage-uas \
+                   kmod-usb-storage-extras kmod-usb-net-cdc-ether kmod-usb-net-cdc-ncm kmod-usb-net-rtl8152 kmod-usb-net-asix-ax88179 kmod-usb-hid \
+                   kmod-usb3 kmod-usb-core kmod-usb-xhci-hcd kmod-usb-xhci-mtk kmod-fs-ext4 kmod-fs-vfat \
+                   kmod-fs-exfat kmod-fs-ntfs3 kmod-fs-cifs kmod-fs-nfs kmod-fs-nfs-common kmod-fs-nfs-v4 \
+                   kmod-fs-nfsd kmod-tun kmod-wireguard kmod-macvlan kmod-veth kmod-br-netfilter \
+                   kmod-nft-nat kmod-netlink-diag kmod-inet-diag kmod-video-core kmod-video-videobuf2 kmod-video-uvc \
+                   kmod-sound-core kmod-usb-audio kmod-input-core kmod-bluetooth kmod-btusb kmod-btbcm \
+                   kmod-hci-uart kmod-iptv; do
+            grep -q "^CONFIG_PACKAGE_${p}=y" .config || miss="${miss} ${p}"
+          done
+          if [ -n "$miss" ]; then
+            echo "::error::这些驱动包没落在 .config（=y），内核符号就不会被打开：${miss}"
+            exit 1
+          fi
+          echo ">>> 驱动包自检通过：46 个 kmod 全部 =y（内核符号由包声明抬成 =m）"
           printf '# --- 独立包不参与固件镜像 ---\n' >> .config
           printf '# CONFIG_PACKAGE_usbutils is not set\n' >> .config
           printf '# CONFIG_PACKAGE_luci-app-airoha-soc is not set\n' >> .config
