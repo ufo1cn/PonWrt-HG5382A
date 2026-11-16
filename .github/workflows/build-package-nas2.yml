@@ -435,7 +435,13 @@ jobs:
           #   libjpeg-turbo（PROVIDES:=libjpeg，装 libjpeg.so.62）、libffmpeg（PROVIDES:=libffmpeg-full，
           #   装 libavcodec/libavformat/libavutil）、libflac、libexif、libid3tag、libogg、libvorbis、libsqlite3。
           # 这里把提供者真正选中，缺一个就报错，不放宽校验。
-          for p in libjpeg-turbo libffmpeg libflac libexif libid3tag libogg libvorbis libsqlite3; do
+          # libffmpeg 的运行库提供者：上游 multimedia/ffmpeg/Makefile 里是条件式依赖
+          #   +FFMPEG_BZLIB:libbz2 +FFMPEG_LIBDRM:libdrm +FFMPEG_LAME:lame-lib +FFMPEG_LIBOPUS:libopus，
+          # 本工作流只按清单编包，这几个提供者不单独编出来，libffmpeg 打包时报
+          #   Package libffmpeg is missing dependencies for the following libraries:
+          #   libbz2.so.1.0 / libdrm.so.2 / libmp3lame.so.0 / libopus.so.0
+          # （run 43859014336 第 18→26 步，pkg-minidlna.log 342-345）。补真正的提供者。
+          for p in libjpeg-turbo libffmpeg libflac libexif libid3tag libogg libvorbis libsqlite3 libbz2 libdrm libopus lame-lib; do
             sed -i "/^CONFIG_PACKAGE_${p}=/d" .config
             printf 'CONFIG_PACKAGE_%s=m\n' "$p" >> .config
             grep -q "^CONFIG_PACKAGE_${p}=m" .config || { echo "::error::minidlna 的运行库提供者 ${p} 未选中"; exit 1; }
