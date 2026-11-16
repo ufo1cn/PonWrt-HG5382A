@@ -363,7 +363,7 @@ jobs:
             samba4
             luci-app-samba4
             autosamba
-            ksmbd
+            ksmbd-tools
             luci-app-ksmbd
             avahi-daemon
             luci-app-avahi
@@ -422,6 +422,7 @@ jobs:
             ddns-scripts
             lua5.3
             liblua5.3
+            libyaml
             zerotier
             luci-app-zerotier
             tailscale
@@ -730,7 +731,7 @@ jobs:
             samba4
             luci-app-samba4
             autosamba
-            ksmbd
+            ksmbd-tools
             luci-app-ksmbd
             avahi-daemon
             luci-app-avahi
@@ -807,10 +808,10 @@ jobs:
             while IFS= read -r -d '' f; do
               cp -f "$f" ../ipk_out/
               found=1
-            done < <(find bin -type f \( -name "${pkg}*.ipk" \) -print0 )
+            done < <(find bin -type f \( -name "${pkg}*.ipk" -o -name "${pkg}*.apk" \) -print0 )
             [ "$found" -eq 1 ] && echo ">>> 已收集 $pkg" || echo "::notice::$pkg 未生成，跳过"
           done
-          ls -lh ../ipk_out/*.ipk 2>/dev/null || true
+          ls -lh ../ipk_out/*.ipk ../ipk_out/*.apk 2>/dev/null || true
 
       - name: 打包制品 & 生成校验和
         run: |
