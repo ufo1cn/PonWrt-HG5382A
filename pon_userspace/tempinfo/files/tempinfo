@@ -1,0 +1,65 @@
+#!/bin/sh
+# /sbin/tempinfo —— LuCI 概览「温度」行的取数脚本
+#
+# luci-base 的 getTempInfo() 会 popen('/sbin/tempinfo') 并把它打印的一行文本
+# 直接显示在 状态 -> 概览 里；本文件不存在时前端会整行隐藏。
+#
+# 输出示例：
+#   SoC 48.3 °C
+#   SoC 48.3 °C / SFP 45.0 °C
+#   ?
+#
+# - SoC 温度：/sys/class/thermal/thermal_zone*/temp（毫摄氏度），优先 cpu-thermal
+# - 光模块温度：ethtool -m 的 Temperature 行（仅当网口是带 DDM 的 SFP 时才有输出；
+#   5382A 的 DTS 里没有 SFP，自然不会打印这一段）
+
+set -u
+
+read_zone() {
+	# $1 = thermal_zone 目录
+	[ -r "$1/temp" ] || return 1
+	v=$(cat "$1/temp" 2>/dev/null) || return 1
+	case "$v" in
+		''|*[!0-9-]*) return 1 ;;
+	esac
+	awk -v x="$v" 'BEGIN { printf "%.1f", x / 1000 }'
+}
+
+soc=""
+for z in /sys/class/thermal/thermal_zone*; do
+	[ -d "$z" ] || continue
+	t=$(cat "$z/type" 2>/dev/null || true)
+	s=$(read_zone "$z") || continue
+	if [ "$t" = "cpu-thermal" ]; then
+		soc="$s"
+		break
+	fi
+	[ -z "$soc" ] && soc="$s"
+done
+
+sfp=""
+if command -v ethtool >/dev/null 2>&1; then
+	for d in /sys/class/net/*; do
+		n=${d##*/}
+		out=$(ethtool -m "$n" 2>/dev/null) || continue
+		[ -n "$out" ] || continue
+		v=$(printf '%s\n' "$out" | awk '
+			/Temperature/ {
+				for (i = 1; i <= NF; i++)
+					if ($i ~ /^[-+]?[0-9]+(\.[0-9]+)?$/) { print $i; exit }
+			}')
+		[ -n "$v" ] || continue
+		sfp=$(awk -v x="$v" 'BEGIN { printf "%.1f", x }')
+		break
+	done
+fi
+
+if [ -n "$soc" ] && [ -n "$sfp" ]; then
+	printf 'SoC %s °C / SFP %s °C\n' "$soc" "$sfp"
+elif [ -n "$soc" ]; then
+	printf 'SoC %s °C\n' "$soc"
+elif [ -n "$sfp" ]; then
+	printf 'SFP %s °C\n' "$sfp"
+else
+	printf '?\n'
+fi
