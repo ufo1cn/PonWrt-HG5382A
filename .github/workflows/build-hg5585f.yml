@@ -62,7 +62,7 @@ on:
   workflow_dispatch:
     inputs:
       device:
-        description: "机型变体：ct=原厂形态（lan5 2.5G 可用，USB 口不启用）；ct-usb-sfp=启用 USB 口（lan5 的 PCS 让给 USB）"
+        description: "机型变体（按 DTS）：ct=原厂形态，lan1 2.5G + lan2/3/4；usb0(USB3+USB2) 与 usb1(USB2) 均启用，两个 USB 口都可用。ct-usb-sfp=USB3 的 SerDes 让给 lan5 做 2.5G，usb0 降为仅 USB2"
         required: true
         default: "ct"
         type: choice
@@ -1453,9 +1453,12 @@ jobs:
             PonWrt HG5585F 集成驱动版自动预发布，本次机型：`fiberhome_hg5585f-${{ github.event.inputs.device || 'ct' }}`。
 
             机型变体说明（一次构建只能选一个）：
-            - `ct`：原厂形态，lan5（2.5G）可用，但对应用户态的 USB 口不启用（DTS 未开启 `usb0`）。
-            - `ct-usb-sfp`：启用 `usb0`（USB2 PHY），USB 口可用；该变体把 USB PHY 的 PCS 让给 lan5 使用。
-              需要 USB 硬件真正可用时，请用 `device=ct-usb-sfp` 重新触发一次。
+            - `ct`：原厂形态。lan1 走 gdm4 + `eth_pcs` + GPY211（2.5G），lan2/3/4 用内部 PHY2/3/4；
+              `&usb0`（USB3 超速 + USB2 伴侣，SerDes USB1）与 `&usb1`（纯 USB2，`u3p-dis-msk = <0x1>`）
+              在 DTS 中均为 `status = "okay"`，**两个 USB 口都可直接用**。
+            - `ct-usb-sfp`：把 `usb_pcs` 作为以太网 PCS 打开，gdm4 多出 `lan5`（`in-band-status`，2.5G）；
+              代价是 `&usb0` 只剩 USB2 PHY（`u3p-dis-msk = <0x1>`），USB3 超速不可用。
+              只有确实需要 lan5 接 SFP/2.5G 光模块时才用这个变体。
 
             **镜像内置**：PON 修复、透明代理内核模块、mihomo-meta、IPTV 驱动、omcproxy、
             USB 主机控制器（kmod-usb3 → xhci-hcd + xhci-mtk）、USB 存储（storage/uas/extras）、
