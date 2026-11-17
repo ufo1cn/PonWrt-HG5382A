@@ -1,5 +1,11 @@
 # ==============================================================================
-# PonWrt HG5585F（光猫 FiberHome HG5585F 电信版 / CT）固件编译工作流
+# PonWrt HG5585F（光猫 FiberHome HG5585F 电信版 / CT）集成驱动版固件编译工作流
+# ------------------------------------------------------------------------------
+# 命名更正（2026-11-17，仅改说明文字，构建逻辑零改动）：
+#   本流程与 build-hg5382a-pure.yml 同系，都是“集成驱动版”——底层 + USB 主机/存储/串口/网卡、
+#   无线（rtw88 / rtl8xxxu / rtl8192cu）、蓝牙、USB 声卡、UVC 摄像头等驱动一并开足；
+#   应用层软件仍一律不进镜像。HG5382A 那边的“纯净版”（默认内核选项、无 USB 驱动）是
+#   build-hg5382a-nousb.yml。
 # ------------------------------------------------------------------------------
 # 【这一条工作流只干一件事】产出可以刷机的固件（itb/bootinfo）以及"底层支持"。
 #
@@ -51,7 +57,7 @@
 #   - kmod-usb-net：包选中但内核 CONFIG_USB_USBNET 未开时，打包阶段才报
 #     "usbnet.ko is missing"
 # ==============================================================================
-name: 编译 PonWrt HG5585F 电信版集成版固件
+name: 编译 PonWrt HG5585F 电信版集成驱动固件（底层＋USB/无线/蓝牙/音频/摄像头驱动）
 on:
   workflow_dispatch:
     inputs:
@@ -72,7 +78,7 @@ concurrency:
 
 jobs:
   build-firmware:
-    name: 编译 HG5585F 集成版固件（USB 全支持）
+    name: 编译 HG5585F 集成驱动固件（驱动全开）
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     # 注意：下面 env 里的多行值（>- 折叠块）中**不能写 # 注释**——
@@ -1439,12 +1445,12 @@ jobs:
         uses: softprops/action-gh-release@v2.0.8
         with:
           tag_name: hg5585f-${{ github.event.inputs.device || 'ct' }}-${{ github.run_number }}-${{ github.run_attempt }}
-          name: PonWrt HG5585F-${{ github.event.inputs.device || 'ct' }} 集成版预发布 #${{ github.run_number }}
+          name: PonWrt HG5585F-${{ github.event.inputs.device || 'ct' }} 集成驱动版预发布 #${{ github.run_number }}
           prerelease: true
           make_latest: false
           generate_release_notes: true
           body: |
-            PonWrt HG5585F 集成版自动预发布，本次机型：`fiberhome_hg5585f-${{ github.event.inputs.device || 'ct' }}`。
+            PonWrt HG5585F 集成驱动版自动预发布，本次机型：`fiberhome_hg5585f-${{ github.event.inputs.device || 'ct' }}`。
 
             机型变体说明（一次构建只能选一个）：
             - `ct`：原厂形态，lan5（2.5G）可用，但对应用户态的 USB 口不启用（DTS 未开启 `usb0`）。
