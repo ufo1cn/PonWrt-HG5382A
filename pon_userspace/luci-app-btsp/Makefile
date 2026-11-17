@@ -7,7 +7,7 @@ PKG_MAINTAINER:=Self
 PKG_LICENSE:=GPLv3
 
 LUCI_TITLE:=BTSP 蓝牙串口透传
-LUCI_DEPENDS:=+ser2net +bluez
+LUCI_DEPENDS:=+ser2net +bluez-daemon
 LUCI_PKGARCH:=all
 
 include $(TOPDIR)/feeds/luci/luci.mk
