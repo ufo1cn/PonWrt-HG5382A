@@ -844,9 +844,10 @@ jobs:
               #   931 修 AN7581 WAN IPv6 PPPoE 硬件流卸载四处硬伤（L3 误跌 L2、PPPoE ID 被抹平、IPv6 条目改写端口 6、MTU 开销未计）；
               #   932 让 PPE 支持 br-lan 这类桥主设备做硬件流表卸载（按目的 MAC 查 FDB 换成真实从端口）。
               # 我们 pin 的 pbs05/ponwrt 树缺这三条，由本仓库携带、在内核树上显式应用。
-              # 每条先反向 dry-run 判是否已应用（已应用则跳过），再正向 dry-run 校验上下文，通过才应用；
+              # 【坑】patch 的位置参数是 originalfile，补丁必须用 -i 传：写成 -d "$KD" "$PP" 会让 patch 从空 stdin 读补丁，
+            # 反向 dry-run 静默返回 0 → 误判“已应用”直接跳过（实测 kmod run 44051347250：三条补丁全被跳过，patch*-apply.log 根本不存在）。
+            # 每条先反向 dry-run 判是否已应用（已应用则跳过），再正向 dry-run 校验上下文，通过才应用；
               # 正向 dry-run 不通过说明上游源码漂移，必须按新源码重做补丁，这里直接 ::error:: 退出（不得跳过放行）。
-              for PN in  \
               for PN in 928-net-airoha-expose-PPE-bind-rate-threshold.patch \
                         931-net-airoha-fix-wan-ipv6-pppoe-flow-offload.patch \
                         932-net-airoha-ppe-support-bridge-fdb-port-offload.patch; do
@@ -856,10 +857,10 @@ jobs:
                   echo "::warning::未找到补丁 $PN，跳过"
                   continue
                 fi
-                if patch -p1 -N -t --dry-run -R -d "$KD" "$PP" > "$LOGDIR/patch$PNUM-reverse.log" 2>&1; then
+                if patch -p1 -N -t --dry-run -R -d "$KD" -i "$PP" > "$LOGDIR/patch$PNUM-reverse.log" 2>&1; then
                   echo ">>> 补丁 $PN 已在内核树（跳过重复应用）"
-                elif patch -p1 -N -t --dry-run -d "$KD" "$PP" > "$LOGDIR/patch$PNUM-dryrun.log" 2>&1; then
-                  patch -p1 -t -d "$KD" "$PP" >> "$LOGDIR/patch$PNUM-apply.log" 2>&1 \
+                elif patch -p1 -N -t --dry-run -d "$KD" -i "$PP" > "$LOGDIR/patch$PNUM-dryrun.log" 2>&1; then
+                  patch -p1 -t -d "$KD" -i "$PP" >> "$LOGDIR/patch$PNUM-apply.log" 2>&1 \
                     && echo ">>> 已应用补丁 $PN" \
                     || { echo "::error::补丁 $PN 应用失败"; tail -n 20 "$LOGDIR/patch$PNUM-apply.log"; exit 1; }
                 else
@@ -1281,7 +1282,7 @@ jobs:
             exit 1
           fi
           miss=""
-          for m in usbcore xhci-hcd xhci-mtk usb-storage usbhid uas snd-usb-audio uvcvideo ch341 usbnet r8152; do
+          for m in usbcore xhci-hcd xhci-mtk-hcd usb-storage usbhid uas snd-usb-audio uvcvideo ch341 usbnet r8152; do
             find build_dir -type f \( -name "${m}.ko" -o -name "${m}.ko.xz" \) 2>/dev/null | grep -q . || miss="${miss} ${m}.ko"
           done
           if [ -n "$miss" ]; then
