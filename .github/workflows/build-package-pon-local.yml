@@ -1,0 +1,419 @@
+# ==============================================================================
+# pon_userspace 自建包专用编译工作流
+# ------------------------------------------------------------------------------
+# 目标：只编仓库 pon_userspace/ 下的自建包（不产固件、不掺入 passwall2/IPTV 等大清单）
+#   tempinfo            —— /sbin/tempinfo，供 LuCI 概览页 getTempInfo 读取 SoC / SFP 温度
+#   camlive / go2rtc    —— 摄像头与流媒体后端
+#   ser2net / gensio-bin—— 串口转发
+#   luci-app-camlive / luci-app-go2rtc / luci-app-blueaudio / luci-app-btsp / luci-app-ser2net
+#
+# 与固件保持同一 SOURCE_REF 与同一机型，保证 kmod 的 vermagic 与固件一致。
+# 包依赖：
+#   luci-app-blueaudio 需要 bluez-alsa（标准 feeds 无源）→ 从 bluealsa4openwrt 取 bluez-alsa 目录
+#   luci-app-btsp 需要 bluez-daemon（immortalwrt/packages/utils/bluez 提供子包）
+#   luci-app-camlive / camlive 需要 kmod-video-uvc → 因此本工作流必须先真编内核
+# ==============================================================================
+name: 【独立包编译】pon_userspace 自建包（camlive/go2rtc/luci前端/tempinfo）
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: write
+concurrency:
+  group: ponlocal-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build_pon_local:
+    name: 编译 pon_userspace 自建包
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
+    steps:
+      - name: 签出工作流仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 清理磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/local/share/swift /usr/local/.ghcup \
+            /opt/hostedtoolcache
+          sudo docker system prune -af || true
+          sudo apt-get clean
+          sudo swapoff /swapfile || true
+          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          df -h
+
+      - name: 初始化编译环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            python3-setuptools qemu-utils re2c rsync scons squashfs-tools \
+            subversion swig texinfo uglifyjs unzip wget xmlto xxd zlib1g-dev zstd \
+            libzstd-dev jq dos2unix upx-ucl
+
+      - name: 拉取 PonWrt 指定 commit
+        run: |
+          git init ponwrt
+          git -C ponwrt remote add origin https://github.com/pbs05/ponwrt.git
+          git -C ponwrt fetch --depth=1 -- origin "$SOURCE_REF"
+          git -C ponwrt checkout --detach FETCH_HEAD
+          echo ">>> PonWrt pinned: $SOURCE_REF"
+
+      - name: 配置 feeds（只保留本工作流需要的源）
+        working-directory: ./ponwrt
+        run: |
+          if [ ! -f feeds.conf.default ]; then touch feeds.conf.default; fi
+          # 本工作流不需要 nikki / homeproxy / iptv / passwall2，删掉可减少外部依赖与失败面
+          sed -i '/nikki/d;/homeproxy/d;/openwrt-iptv/d;/passwall2/d' feeds.conf.default
+          [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
+          dos2unix feeds.conf.default 2>/dev/null || true
+          cat feeds.conf.default
+          ./scripts/feeds update -a
+
+      - name: feeds 全量安装
+        working-directory: ./ponwrt
+        run: |
+          ./scripts/feeds install -a
+          echo ">>> feeds 全量安装完成"
+          # 这里不跑 make prereq：此时 .config 还没生成，CI 无 TTY 会进 menuconfig 卡死
+          echo ">>> 跳过 make prereq"
+
+      - name: 部署 pon_userspace 到 package/pon-local
+        working-directory: ./ponwrt
+        run: |
+          rm -rf package/pon-local
+          mkdir -p package/pon-local
+          for d in $(ls -1 ../pon_userspace 2>/dev/null); do
+            [ "$d" = "ser2net4" ] && continue
+            feedhit=$(find feeds -maxdepth 3 -type d -name "$d" 2>/dev/null | head -n 1)
+            if [ -n "$feedhit" ]; then
+              echo "::warning::$d 已由 feed 提供（$feedhit），跳过本地同名包，避免重复集成"
+              continue
+            fi
+            if [ -d "../pon_userspace/$d" ]; then
+              cp -a "../pon_userspace/$d" package/pon-local/
+              if [ -f "package/pon-local/$d/Makefile" ]; then
+                echo ">>> 复制 $d（含 Makefile）"
+              else
+                echo "::error::$d 已复制但缺少 Makefile"
+                exit 1
+              fi
+            fi
+          done
+          if [ -d "../pon_userspace/ser2net4" ]; then
+            for d in gensio ser2net luci-app-ser2net; do
+              [ -d "../pon_userspace/ser2net4/$d" ] || continue
+              feedhit=$(find feeds -maxdepth 3 -type d -name "$d" 2>/dev/null | head -n 1)
+              if [ -n "$feedhit" ]; then
+                echo "::warning::$d 已由 feed 提供（$feedhit），跳过本地同名包"
+                continue
+              fi
+              cp -a "../pon_userspace/ser2net4/$d" package/pon-local/ && echo ">>> 复制 $d"
+            done
+          fi
+          MK=package/pon-local/luci-app-ser2net/Makefile
+          if [ -f "$MK" ]; then
+            sed -i 's|include $(TOPDIR)/luci.mk|include $(TOPDIR)/feeds/luci/luci.mk|' "$MK"
+            sed -i '/\$(eval \$(call BuildPackage,luci-app-ser2net))/d' "$MK"
+          fi
+          # 每个自建包的 PKG_NAME 与目录名一致性自检（防止复制到一半的残缺包）
+          for d in $(ls -1 package/pon-local); do
+            MKF=package/pon-local/$d/Makefile
+            [ -f "$MKF" ] || { echo "::error::package/pon-local/$d 缺 Makefile"; exit 1; }
+            grep -q 'PKG_NAME' "$MKF" || { echo "::error::$d 的 Makefile 没有 PKG_NAME"; exit 1; }
+          done
+          ls -1 package/pon-local
+
+      - name: 注入 bluez-alsa（luci-app-blueaudio 的硬依赖，标准 feeds 无源）
+        working-directory: ./ponwrt
+        run: |
+          # bluez-alsa 在 immortalwrt/packages 与 openwrt/packages 均不存在（已逐一 404 核对）。
+          # 唯一可用源是 bluealsa4openwrt 仓库的 bluez-alsa 目录。
+          # 取不到时明确记录 SKIP，不伪造依赖；后续 luci-app-blueaudio 会在收包阶段如实报 FAIL。
+          mkdir -p ../build_log
+          if git clone --depth=1 https://github.com/raphikWasHere/bluealsa4openwrt.git /tmp/b4a > ../build_log/bluez-alsa-clone.log 2>&1; then
+            if [ -d /tmp/b4a/bluez-alsa ] && [ -f /tmp/b4a/bluez-alsa/Makefile ] \
+               && grep -q 'PKG_NAME:=bluez-alsa' /tmp/b4a/bluez-alsa/Makefile; then
+              rm -rf package/pon-local/bluez-alsa
+              cp -a /tmp/b4a/bluez-alsa package/pon-local/bluez-alsa
+              echo ">>> bluez-alsa 已注入（$(grep -m1 'PKG_VERSION:=' package/pon-local/bluez-alsa/Makefile || true)）"
+              echo "bluez-alsa=INJECTED" >> ../build_log/pre-inject.txt
+            else
+              echo "::warning::bluealsa4openwrt 仓库里没有合法的 bluez-alsa 包定义，跳过注入"
+              echo "bluez-alsa=SKIP_NO_MAKEFILE" >> ../build_log/pre-inject.txt
+            fi
+          else
+            echo "::warning::bluealsa4openwrt 拉取失败（见 build_log/bluez-alsa-clone.log），跳过注入"
+            echo "bluez-alsa=SKIP_CLONE_FAILED" >> ../build_log/pre-inject.txt
+          fi
+
+      - name: 生成 .config（先 defconfig，再锁机型与包，之后不再 defconfig）
+        working-directory: ./ponwrt
+        run: |
+          set -e
+          mkdir -p ../build_log
+          # 历史坑：make defconfig 会重算并丢掉手工追加的机型行，所以顺序必须是
+          #   1) make defconfig 生成基础 .config
+          #   2) 追加机型行 + 包清单 =m
+          #   3) 需要依赖解析时再 defconfig 一次，然后重新追加机型行与包清单（不再 defconfig）
+          make WARN_RECURSIVE_DEP=1 defconfig > ../build_log/defconfig-1.log 2>&1 || {
+            echo "::error::首次 defconfig 失败，尾部："; tail -n 40 ../build_log/defconfig-1.log; exit 1;
+          }
+
+          lock_target() {
+            sed -i '/^CONFIG_TARGET_ALL_PROFILES/d;/^# CONFIG_TARGET_ALL_PROFILES is not set$/d' .config
+            sed -i '/^CONFIG_TARGET_MULTI_PROFILE/d;/^# CONFIG_TARGET_MULTI_PROFILE is not set$/d' .config
+            sed -i '/^CONFIG_TARGET_airoha_an7581_DEVICE_.*=y$/d' .config
+            sed -i '/^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_.*=y$/d' .config
+            printf '%s\n' \
+              '# CONFIG_TARGET_ALL_PROFILES is not set' \
+              '# CONFIG_TARGET_MULTI_PROFILE is not set' \
+              'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' \
+              'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' >> .config
+          }
+
+          # 包清单：只含 pon_userspace 自建包 + 其直接依赖
+          pkg_list=(
+            tempinfo
+            camlive
+            go2rtc
+            ser2net
+            gensio-bin
+            luci-app-camlive
+            luci-app-go2rtc
+            luci-app-btsp
+            luci-app-ser2net
+            luci-app-blueaudio
+            bluez-daemon
+            bluez-libs
+            dbus
+            kmod-video-core
+            kmod-video-videobuf2
+            kmod-video-uvc
+            kmod-bluetooth
+          )
+          if [ -d package/pon-local/bluez-alsa ]; then pkg_list+=(bluez-alsa); fi
+
+          set_pkg_m() {
+            local pkg="$1"
+            sed -i "/^CONFIG_PACKAGE_${pkg}=/d;/^# CONFIG_PACKAGE_${pkg} is not set/d" .config
+            echo "CONFIG_PACKAGE_${pkg}=m" >> .config
+          }
+
+          lock_target
+          for p in "${pkg_list[@]}"; do set_pkg_m "$p"; done
+
+          # 依赖解析：让 +DEPENDS / select 真正落进 .config
+          make WARN_RECURSIVE_DEP=1 defconfig > ../build_log/defconfig-2.log 2>&1 || {
+            echo "::error::依赖解析 defconfig 失败，尾部："; tail -n 40 ../build_log/defconfig-2.log; exit 1;
+          }
+          lock_target
+          for p in "${pkg_list[@]}"; do set_pkg_m "$p"; done
+
+          # 清单落地自检（这里只记录，不提前退出：先让能编的编，收包阶段再按真实产物判定）
+          miss=""
+          for p in "${pkg_list[@]}"; do
+            grep -qE "^CONFIG_PACKAGE_${p}=[ym]" .config || miss="$miss $p"
+          done
+          devcnt=$(grep -cxF 'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' .config || true)
+          anydev=$(grep -cE '^CONFIG_TARGET_airoha_an7581_DEVICE_[A-Za-z0-9_.-]+=y$' .config || true)
+          echo ">>> 机型锁定 devcnt=$devcnt anydev=$anydev"
+          if [ "$devcnt" != "1" ] || [ "$anydev" != "1" ]; then
+            echo "::error::机型锁定失效（devcnt=$devcnt anydev=$anydev）"
+            grep -nE "^CONFIG_TARGET_.*DEVICE" .config | head -n 20 || true
+            exit 1
+          fi
+          if [ -n "$miss" ]; then
+            echo "::warning::以下包未在 .config 落地（包名不存在或依赖不可满足）：$miss"
+            echo "MISS:$miss" > ../build_log/config-miss.txt
+          else
+            echo ">>> 清单自检通过：${#pkg_list[@]} 个包全部在 .config 中落地"
+            : > ../build_log/config-miss.txt
+          fi
+          # 逐个打印实际取值，便于定位依赖被谁降级
+          for p in "${pkg_list[@]}"; do
+            echo "cfg: $(grep -E "^CONFIG_PACKAGE_${p}=" .config | head -n1)"
+          done | tee ../build_log/config-values.txt
+
+      - name: 下载源码包
+        working-directory: ./ponwrt
+        run: |
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+          export GO111MODULE=on
+          make download -j"$(nproc)" || true
+          find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
+          make download -j1 V=s || { echo "::warning::仍有下载失败"; }
+
+      - name: 内核准备（kmod 依赖必须真编，否则 luci-app-camlive 打包缺 kmod-video-uvc）
+        working-directory: ./ponwrt
+        run: |
+          set -o pipefail
+          LOGDIR="$PWD/../build_log"
+          mkdir -p "$LOGDIR"
+          TC_BIN=$(ls -d "$PWD"/staging_dir/toolchain-*/bin 2>/dev/null | head -1)
+          CROSS="aarch64-openwrt-linux-musl-"
+          [ -n "$TC_BIN" ] && export PATH="$TC_BIN:$PWD/staging_dir/host/bin:$PATH"
+          echo ">>> 交叉工具链：${TC_BIN:-未找到}"
+          make -j"$(nproc)" V=s toolchain/compile > "$LOGDIR/toolchain.log" 2>&1 \
+            || { echo "::error::toolchain/compile 失败，尾部："; tail -n 30 "$LOGDIR/toolchain.log"; exit 1; }
+          if ! make -j1 V=s target/linux/prepare > "$LOGDIR/kernel-prepare.log" 2>&1; then
+            echo "::error::target/linux/prepare 失败，尾部："
+            tail -n 40 "$LOGDIR/kernel-prepare.log"
+            exit 1
+          fi
+          KD=$(ls -d build_dir/target-*/linux-*/linux-* 2>/dev/null | head -1)
+          [ -n "$KD" ] || { echo "::error::未找到内核源码目录"; exit 1; }
+          echo ">>> 内核源码：$KD"
+          ( cd "$KD" && make ARCH=arm64 CROSS_COMPILE="$CROSS" olddefconfig </dev/null > "$LOGDIR/kernel-olddefconfig.log" 2>&1 ) \
+            || { echo "::warning::olddefconfig 失败，尾部："; tail -n 20 "$LOGDIR/kernel-olddefconfig.log"; }
+          CFG=target/linux/airoha/an7581/config-6.18
+          [ -f "$CFG" ] || { echo "::error::未找到 $CFG"; exit 1; }
+          # kmod-video-uvc / kmod-bluetooth 依赖的内核符号显式定值（目标配置生效，KCONFIG 才看得见）
+          for kv in "CONFIG_MEDIA_SUPPORT=y" "CONFIG_MEDIA_USB_SUPPORT=y" "CONFIG_VIDEO_DEV=m" \
+                    "CONFIG_USB_VIDEO_CLASS=m" "CONFIG_VIDEOBUF2_CORE=m" "CONFIG_VIDEOBUF2_V4L2=m" \
+                    "CONFIG_VIDEOBUF2_VMALLOC=m" "CONFIG_BT=m" "CONFIG_BT_HCIBTUSB=m" \
+                    "CONFIG_BT_HCIUART=m"; do
+            k=${kv%%=*}; v=${kv#*=}
+            sed -i -E "/^(# )?${k}[= ]/d" "$CFG" || true
+            printf '%s=%s\n' "$k" "$v" >> "$CFG"
+            if [ -f "$KD/.config" ]; then
+              sed -i -E "/^(# )?${k}[= ]/d" "$KD/.config" || true
+              printf '%s=%s\n' "$k" "$v" >> "$KD/.config"
+            fi
+          done
+          rm -f "$KD/.configured" "$KD/.configured-check"
+          echo ">>> 内核符号已固化：MEDIA/VIDEO/UVC/BT 系"
+          # 真实跑 target/linux/compile；无 TTY 下 syncconfig 遇到 (NEW) 会失败，
+          # 按 Kconfig 提示的首选项显式定值后重试（每轮仍是真实编译，不是放宽校验）
+          rc=1
+          for pass in $(seq 1 12); do
+            if make -j"$(nproc)" V=s target/linux/compile > "$LOGDIR/kernel-compile-$pass.log" 2>&1; then
+              echo ">>> target/linux/compile 通过（第 $pass 轮）"
+              rc=0
+              break
+            fi
+            syms=$(sed -nE 's/.*\(([A-Za-z0-9_]+)\) \[([^]]*)\] \(NEW\).*/\1 \2/p' "$LOGDIR/kernel-compile-$pass.log" | sort -u)
+            if [ -z "$syms" ]; then
+              echo "::error::target/linux/compile 第 $pass 轮失败且日志无 (NEW) 符号，真实编译错误，末尾 80 行："
+              tail -n 80 "$LOGDIR/kernel-compile-$pass.log"
+              break
+            fi
+            echo "$syms" | while read -r s choices; do
+              case "${choices%%/*}" in
+                Y) val="CONFIG_${s}=y" ;;
+                M) val="CONFIG_${s}=m" ;;
+                *) val="# CONFIG_${s} is not set" ;;
+              esac
+              sed -i -E "/^(# )?CONFIG_${s}[= ]/d" "$CFG" || true
+              printf '%s\n' "$val" >> "$CFG"
+              if [ -f "$KD/.config" ]; then
+                sed -i -E "/^(# )?CONFIG_${s}[= ]/d" "$KD/.config" || true
+                printf '%s\n' "$val" >> "$KD/.config"
+              fi
+              rm -f "$KD/.configured" "$KD/.configured-check"
+              echo ">>> (NEW) 符号定值：$val"
+            done
+          done
+          [ $rc -eq 0 ] || { echo "::error::内核 12 轮内未通过真实编译校验"; exit 1; }
+          echo ">>> Module.symvers 行数：$(wc -l < "$KD/Module.symvers" 2>/dev/null || echo 0)"
+
+      - name: 编译 kmod 依赖与 pon_userspace 包
+        working-directory: ./ponwrt
+        run: |
+          set -o pipefail
+          export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+          export GO111MODULE=on
+          LOGDIR="$PWD/../build_log"
+          # 先编被选中的 kmod（uvc / bluetooth 系），让 luci-app-camlive 的依赖检查拿得到 .provides
+          make -j"$(nproc)" V=s package/kernel/linux/compile > "$LOGDIR/kmod-compile.log" 2>&1 \
+            || { echo "::warning::package/kernel/linux/compile 有报错，尾部："; tail -n 40 "$LOGDIR/kmod-compile.log"; }
+          # 再编 pon-local（纯用户态 + LuCI 前端 + tempinfo）
+          make -j"$(nproc)" V=s package/pon-local/compile > "$LOGDIR/ponlocal-compile.log" 2>&1
+          rc=$?
+          tail -n 60 "$LOGDIR/ponlocal-compile.log"
+          if [ $rc -ne 0 ]; then
+            echo "::error::package/pon-local/compile 失败（原始错误见上，完整日志 build_log/ponlocal-compile.log）"
+            exit 1
+          fi
+          echo ">>> package/pon-local/compile 成功"
+
+      - name: 收集产物 & 逐包核对（不静默丢弃）
+        working-directory: ./ponwrt
+        run: |
+          mkdir -p ../out
+          LOGDIR="$PWD/../build_log"
+          SUM="$LOGDIR/pon-local-build-summary.txt"
+          : > "$SUM"
+          echo "== pon_userspace 自建包编译结果 ==" >> "$SUM"
+          echo "源码版本: $SOURCE_REF" >> "$SUM"
+          echo "" >> "$SUM"
+          targets=(tempinfo camlive go2rtc ser2net gensio-bin luci-app-camlive luci-app-go2rtc luci-app-btsp luci-app-ser2net luci-app-blueaudio)
+          [ -d package/pon-local/bluez-alsa ] && targets+=(bluez-alsa)
+          fail=0
+          for p in "${targets[@]}"; do
+            f=$(find bin/targets bin/packages -type f -name "${p}-*.apk" 2>/dev/null | head -n1)
+            if [ -n "$f" ]; then
+              cp -f "$f" ../out/
+              sz=$(stat -c%s "$f")
+              echo "OK   $p  ($(basename "$f"), ${sz} bytes)" | tee -a "$SUM"
+            else
+              echo "FAIL $p  （未产出 .apk）" | tee -a "$SUM"
+              fail=$((fail+1))
+            fi
+          done
+          if [ -s "$LOGDIR/config-miss.txt" ]; then
+            echo "" >> "$SUM"
+            echo "== .config 未落地的包（依赖不可满足 / 包名不存在）==" >> "$SUM"
+            cat "$LOGDIR/config-miss.txt" >> "$SUM"
+          fi
+          echo "" >> "$SUM"
+          echo "== 依赖包实际取值 ==" >> "$SUM"
+          cat "$LOGDIR/config-values.txt" >> "$SUM" 2>/dev/null || true
+          cat "$SUM"
+          ls -l ../out || true
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::$fail 个目标包未产出 .apk（明细见 artifacts 内 logs/pon-local-build-summary.txt）"
+            exit 1
+          fi
+          echo ">>> 全部目标包均已产出"
+
+      - name: 上传 APK 产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pon-local-apk
+          path: out/*.apk
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: 上传构建诊断
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pon-local-diagnostics
+          path: |
+            build_log/pon-local-build-summary.txt
+            build_log/config-values.txt
+            build_log/config-miss.txt
+            build_log/defconfig-1.log
+            build_log/defconfig-2.log
+            build_log/ponlocal-compile.log
+            build_log/kmod-compile.log
+          if-no-files-found: warn
+          retention-days: 14
