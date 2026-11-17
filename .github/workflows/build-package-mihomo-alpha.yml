@@ -593,14 +593,15 @@ jobs:
                 # 合并生成 .config，并顺带把 nfs.ko/nfsd.ko/lockd.ko/sunrpc.ko 真编出来；
                 # 仍然是真产物路径，不放宽任何回查判据。
                 rm -f "$KD/.config" "$KD/.config.old" "$KD/.configured"
-                # 【实测 run 44112235690 第 18 步（head 32d44e79）】重跑 target/linux/compile 时 kbuild syncconfig 撞：
-                #   /dev/mem virtual device support (DEVMEM) [Y/n/?] (NEW) make[7]: *** [scripts/kconfig/Makefile:85: syncconfig] Error 1
-                #   ERROR: target/linux failed to build.
-                # CI 无 TTY，任何 Kconfig 无默认值符号都会让 syncconfig 直接失败（本树已知坑）。
-                # 按 Kconfig 首选项（Y→=y / M→=m / N→not set）显式定值后重跑，最多 8 轮：
-                # 每轮仍是真实编译，编不过就补符号，8 轮还不过就硬失败并打原始日志 —— 不是放宽校验。
+                # 【实测 run 44123480908 第 18 步（head 1dcf30bd）】上一版对 (NEW) 符号按 Kconfig 首选项补定值后，
+                # DEVMEM 每轮都以 "[Y/n/?] (NEW)" 复现（同一符号补 4 次仍 (NEW)），最终第 8 轮触发
+                #   ::error::NFS 内核配置 8 轮内仍未通过真实编译（已按 (NEW) 补定值）
+                # 原因：ARCH_HAS_DEVMEM_IS_ALLOWED 等依赖未满足时，写 =y 会被 kconfig 丢弃，符号依旧是空值 → 永远 (NEW)。
+                # 修法：同一符号第二次出现时直接落 "# CONFIG_X is not set"（禁用该符号，不满足依赖时这是唯一能固定的写法），
+                # 并把轮数提到 16；每轮仍然是真实编译，编不过就继续补，16 轮不过就硬失败并打原始日志 —— 不放宽校验。
+                rm -f "$LOGDIR/nfs-new-seen.txt"
                 rc2=1
-                for pass2 in $(seq 1 8); do
+                for pass2 in $(seq 1 16); do
                   if make -j"$(nproc)" V=s target/linux/compile > "$LOGDIR/kernel-compile-nfs-$pass2.log" 2>&1; then
                     rc2=0
                     break
@@ -612,11 +613,18 @@ jobs:
                     break
                   fi
                   echo "$syms" | while read -r s choices; do
-                    case "${choices%%/*}" in
-                      Y) val="CONFIG_${s}=y" ;;
-                      M) val="CONFIG_${s}=m" ;;
-                      *) val="# CONFIG_${s} is not set" ;;
-                    esac
+                    if grep -qxF "$s" "$LOGDIR/nfs-new-seen.txt" 2>/dev/null; then
+                      val="# CONFIG_${s} is not set"
+                      echo ">>> NFS 段：$s 补过仍 (NEW)（依赖不满足，写 =y/=m 会被丢弃）→ 改为 not set"
+                    else
+                      echo "$s" >> "$LOGDIR/nfs-new-seen.txt"
+                      case "${choices%%/*}" in
+                        Y) val="CONFIG_${s}=y" ;;
+                        M) val="CONFIG_${s}=m" ;;
+                        *) val="# CONFIG_${s} is not set" ;;
+                      esac
+                      echo ">>> NFS 段 (NEW) 符号 → 显式定值：$val"
+                    fi
                     sed -i -E "/^(# )?CONFIG_${s}[= ]/d" "$CFG" || true
                     printf '%s\n' "$val" >> "$CFG"
                     if [ -f "$KD/.config" ]; then
@@ -624,10 +632,9 @@ jobs:
                       printf '%s\n' "$val" >> "$KD/.config"
                     fi
                     rm -f "$KD/.configured" "$KD/.configured-check"
-                    echo ">>> NFS 段 (NEW) 无默认值符号 → 显式定值：$val"
                   done
                 done
-                [ "$rc2" = "0" ] || { echo "::error::NFS 内核配置 8 轮内仍未通过真实编译（已按 (NEW) 补定值）"; exit 1; }
+                [ "$rc2" = "0" ] || { echo "::error::NFS 内核配置 16 轮内仍未通过真实编译（(NEW) 符号已按依赖情况定值）"; exit 1; }
                 KD=$(ls -d build_dir/target-*/linux-*/linux-* 2>/dev/null | head -1)
                 [ -n "$KD" ] || { echo "::error::重算后未找到内核目录"; exit 1; }
                 [ -f "$KD/.config" ] || { echo "::error::重算后 $KD/.config 仍不存在（Configure 没重跑，.configured 删除无效）"; exit 1; }
