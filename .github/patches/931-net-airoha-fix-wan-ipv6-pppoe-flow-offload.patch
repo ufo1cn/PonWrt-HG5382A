@@ -1,67 +1,42 @@
 From: Ziwei Wu <wuziwei518@gmail.com>
 Subject: [PATCH] net: airoha: fix AN7581 WAN IPv6 PPPoE hardware flow offloading
 
-Fix three critical bugs in Airoha AN7581 PPE hardware flowtable offload
-that caused severe packet drops, NPU stalls, and throughput degradation
-(throttled down to tens of KB/s) on IPv6 PPPoE connections:
-
-1. Prevent routed L3 IPv6 packets from falling through to L2 subflow:
-   When an incoming routed IPv6 packet is looked up in ppe->foe_flow
-   and no matching entry is found (or not committed), the execution
-   previously fell through unconditionally into l2_lookup. Since the
-   client MAC belongs to br-lan, it was erroneously committed as an
-   L2 subflow entry, which clobbered the PPPoE session ID in src_mac_hi
-   with 0xf and redirected PSE_PORT to 6 (NPU coprocessor), leading to
-   an immediate black hole. Only true PPE_PKT_TYPE_BRIDGE packets should
-   fall through to l2_lookup.
-
-2. Preserve PPPoE session ID when committing IPv6 subflows:
-   Masking src_mac_hi unconditionally with 0xf stripped the lower 16-bit
-   PPPoE session ID (AIROHA_FOE_MAC_PPPOE_ID). Preserve existing PPPoE ID
-   bits.
-
-3. Exempt IPv6 entries from unverified AN7581 NPU counter stats updates:
-   Like native L2B entries, AN7581 does not expose a compatible NPU
-   flow-stats counter layout for IPv6 route entries. Updating NPU stats
-   or reading unverified counters stalls the hardware NPU pipeline.
-
-4. Account for PPPoE and double VLAN overhead in MTU / xmit frame size:
-   Hardcoding 1500 + VLAN_ETH_HLEN (1518 bytes) truncated standard 1500-byte
-   IPv6 packets traversing PPPoE (which requires 8 bytes PPPOE_SES_HLEN)
-   and VLAN tags, causing silent hardware drops at the PPE egress. Add 16
-   bytes headroom to WAN MTU0/MTU1 and PPE frame limit.
+AN7581 PPE offload breaks IPv6 PPPoE: the PPPoE session id is stripped
+when committing IPv6 subflows, non-bridge packets fall through to the L2
+subflow lookup and clobber the PPPoE entry, and IPv6 entries are
+programmed with unverified NPU counters. Reserve PPPoE/VLAN headroom in
+the WAN and PPE MTU registers as well.
 
 Signed-off-by: Ziwei Wu <wuziwei518@gmail.com>
 ---
 --- a/drivers/net/ethernet/airoha/airoha_eth.c
 +++ b/drivers/net/ethernet/airoha/airoha_eth.c
-@@ -2107,10 +2107,14 @@
- static void airoha_dev_set_mtu(struct net_device *netdev)
- {
- 	struct airoha_gdm_dev *dev = netdev_priv(netdev);
- 
- 	airoha_ppe_set_mtu(dev);
--	if (!airoha_is_lan_gdm_dev(dev))
-+	if (!airoha_is_lan_gdm_dev(dev)) {
+@@ -2037,7 +2037,12 @@
+ 	if (!airoha_is_lan_gdm_dev(dev))
  		airoha_fe_rmw(dev->eth, REG_WAN_MTU0,
  			      WAN_MTU0_MASK,
--			      FIELD_PREP(WAN_MTU0_MASK, netdev->mtu));
-+			      FIELD_PREP(WAN_MTU0_MASK, netdev->mtu + 16));
+-			      FIELD_PREP(WAN_MTU0_MASK, netdev->mtu + VLAN_ETH_HLEN));
++			      FIELD_PREP(WAN_MTU0_MASK,
++					 netdev->mtu + VLAN_ETH_HLEN + 16));
 +		airoha_fe_rmw(dev->eth, REG_WAN_MTU0,
 +			      WAN_MTU1_MASK,
-+			      FIELD_PREP(WAN_MTU1_MASK, netdev->mtu + 16));
-+	}
++			      FIELD_PREP(WAN_MTU1_MASK,
++					 netdev->mtu + VLAN_ETH_HLEN + 16));
  }
+ 
+ static int airoha_dev_open(struct net_device *netdev)
 --- a/drivers/net/ethernet/airoha/airoha_ppe.c
 +++ b/drivers/net/ethernet/airoha/airoha_ppe.c
-@@ -101,4 +101,4 @@
- 		netdev = netdev_from_priv(d);
- 		if (netif_running(netdev))
--			mtu = max_t(u32, mtu, netdev->mtu);
-+			mtu = max_t(u32, mtu, netdev->mtu + 16);
+@@ -88,7 +88,7 @@
+ 			len = max_t(u32, len, netdev->mtu);
  	}
-
-@@ -640,9 +640,10 @@
+ 
+-	len += VLAN_ETH_HLEN;
++	len += VLAN_ETH_HLEN + 16;
+ 	ppe_id = !airoha_is_lan_gdm_dev(dev) && airoha_ppe_is_enabled(eth, 1);
+ 	index = port->id == AIROHA_GDM4_IDX ? 7 : port->id;
+ 	airoha_fe_rmw(eth, REG_PPE_MTU(ppe_id, index),
+@@ -745,8 +745,9 @@
  	int ppe_num_stats_entries;
  	u8 nbq;
  
@@ -73,32 +48,31 @@ Signed-off-by: Ziwei Wu <wuziwei518@gmail.com>
  		return;
  
  	ppe_num_stats_entries = airoha_ppe_get_total_num_stats_entries(ppe);
- 
-@@ -896,9 +896,10 @@
+@@ -998,8 +998,9 @@
  		/* setting smac_id to 0xf instruct the hw to keep original
  		 * source mac address
  		 */
 -		hwe.ipv6.l2.src_mac_hi = FIELD_PREP(AIROHA_FOE_MAC_SMAC_ID,
 -						    0xf);
-+		hwe.ipv6.l2.src_mac_hi = FIELD_PREP(AIROHA_FOE_MAC_SMAC_ID,
-+						    0xf) |
-+					 (hwe.ipv6.l2.src_mac_hi & AIROHA_FOE_MAC_PPPOE_ID);
++		hwe.ipv6.l2.src_mac_hi = FIELD_PREP(AIROHA_FOE_MAC_SMAC_ID, 0xf) |
++					(hwe.ipv6.l2.src_mac_hi &
++					 AIROHA_FOE_MAC_PPPOE_ID);
  	} else {
  		memcpy(&hwe.bridge.l2, &e->data.bridge.l2,
  		       sizeof(hwe.bridge.l2));
+@@ -1063,6 +1064,11 @@
+ 	}
  
-@@ -1108,5 +1108,9 @@
  	if (commit_done)
- 		goto unlock;
- 
-+	if (FIELD_GET(AIROHA_FOE_IB1_BIND_PACKET_TYPE, hwe->ib1) !=
-+	    PPE_PKT_TYPE_BRIDGE)
 +		goto unlock;
 +
- l2_lookup:
- 	airoha_ppe_foe_set_bridge_addrs(&br, eth_hdr(skb));
-@@ -1335,9 +1335,11 @@
++	/* Only true BRIDGE packets may fall through to the L2 subflow path. */
++	if (FIELD_GET(AIROHA_FOE_IB1_BIND_PACKET_TYPE, hwe->ib1) !=
++	    PPE_PKT_TYPE_BRIDGE)
+ 		goto unlock;
  
+ l2_lookup:
+@@ -1492,5 +1492,7 @@
  	hwe = ppe->foe + hash * sizeof(*hwe);
  	if (airoha_is_7581(eth) &&
 -	    FIELD_GET(AIROHA_FOE_IB1_BIND_PACKET_TYPE, READ_ONCE(hwe->ib1)) ==
@@ -108,6 +82,3 @@ Signed-off-by: Ziwei Wu <wuziwei518@gmail.com>
 +	     FIELD_GET(AIROHA_FOE_IB1_BIND_PACKET_TYPE, READ_ONCE(hwe->ib1)) >=
 +	     PPE_PKT_TYPE_IPV6_ROUTE_3T))
  		return;
- 
- 	ppe_num_stats_entries = airoha_ppe_get_total_num_stats_entries(ppe);
- 
