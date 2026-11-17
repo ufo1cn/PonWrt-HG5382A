@@ -1223,9 +1223,9 @@ jobs:
           for k in CONFIG_USB_XHCI_HCD CONFIG_USB_STORAGE CONFIG_USB_HID CONFIG_USB_UAS \
                    CONFIG_USB_SERIAL CONFIG_USB_ACM CONFIG_USB_USBNET CONFIG_SND_USB_AUDIO \
                    CONFIG_USB_VIDEO_CLASS CONFIG_BT_HCIBTUSB CONFIG_CFG80211 CONFIG_MAC80211; do
-            v=$(grep -m1 "^${k}=" "$KC" | cut -d= -f2)
+            v=$(grep -m1 "^${k}=" "$KC" | cut -d= -f2 || true)
             echo "  ${k}=${v:-未出现}"
-            [ "$v" = "y" ] && bad="${bad} ${k}"
+            [ "$v" = "y" ] && bad="${bad} ${k}" || true
           done
           if [ -n "$bad" ]; then
             echo "::error::这些驱动被编进了 vmlinux（应为 =m 模块）：${bad}"
@@ -1246,11 +1246,11 @@ jobs:
             echo '```'
             for p in kmod-usb-xhci-hcd kmod-usb-storage kmod-usb-hid kmod-usb-storage-uas \
                      kmod-usb-serial-ch341 kmod-video-uvc kmod-usb-audio kmod-fs-cifs; do
-              f=$(find bin -type f -name "${p}-*.apk" 2>/dev/null | head -1)
+              f=$(find bin -type f -name "${p}-*.apk" 2>/dev/null | head -1 || true)
               if [ -n "$f" ]; then
                 sz=$(stat -c%s "$f")
                 printf '%-32s %9s B  %s\n' "$p" "$sz" "$(basename "$f")"
-                [ "$sz" -lt 2000 ] && small="${small} ${p}"
+                [ "$sz" -lt 2000 ] && small="${small} ${p}" || true
               else
                 printf '%-32s %9s\n' "$p" "（未打包，见 .ko 校验结果）"
               fi
