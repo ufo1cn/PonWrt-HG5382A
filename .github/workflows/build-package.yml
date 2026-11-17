@@ -177,6 +177,11 @@ jobs:
           # "No rule to make target 'package/pon-local/xxx/compile'"）
           for d in $(ls -1 ../pon_userspace 2>/dev/null); do
             [ "$d" = "ser2net4" ] && continue
+            feedhit=$(find feeds -maxdepth 3 -type d -name "$d" 2>/dev/null | head -n 1)
+            if [ -n "$feedhit" ]; then
+              echo "::warning::$d 已由 feed 提供（$feedhit），跳过本地同名包，避免重复集成"
+              continue
+            fi
             if [ -d "../pon_userspace/$d" ]; then
               cp -a "../pon_userspace/$d" package/pon-local/
               if [ -f "package/pon-local/$d/Makefile" ]; then
@@ -188,7 +193,13 @@ jobs:
           done
           if [ -d "../pon_userspace/ser2net4" ]; then
             for d in gensio ser2net luci-app-ser2net; do
-              [ -d "../pon_userspace/ser2net4/$d" ] && cp -a "../pon_userspace/ser2net4/$d" package/pon-local/ && echo ">>> 复制 $d"
+              [ -d "../pon_userspace/ser2net4/$d" ] || continue
+              feedhit=$(find feeds -maxdepth 3 -type d -name "$d" 2>/dev/null | head -n 1)
+              if [ -n "$feedhit" ]; then
+                echo "::warning::$d 已由 feed 提供（$feedhit），跳过本地同名包，避免重复集成"
+                continue
+              fi
+              cp -a "../pon_userspace/ser2net4/$d" package/pon-local/ && echo ">>> 复制 $d"
             done
           fi
           MK=package/pon-local/luci-app-ser2net/Makefile
@@ -338,6 +349,25 @@ jobs:
           grep -n '^CONFIG_KERNEL_NET_AIROHA' .config || { echo '::error::NET_AIROHA 内置定值未写入 .config'; exit 1; }
           echo ">>> airoha-eth 已定为内置（CONFIG_KERNEL_NET_AIROHA=y），与固件一致"
 
+          # kmod-fs-nfs-common 的 KCONFIG 是 CONFIG_LOCKD/SUNRPC/GRACE_PERIOD（fs.mk:458），
+          # 本树只有 target/linux/airoha/an7581/config-6.18 生效，CONFIG_KERNEL_* 覆盖不生效；
+          # 这三个符号若留成内置，就没有 lockd.ko/sunrpc.ko/grace.ko 提供者，
+          # 打包时 kmod-fs-nfs 会缺依赖、kmod-fs-nfs-common 直接不产出（本轮 run 44018128707 实测缺失）。
+          CFG=target/linux/airoha/an7581/config-6.18
+          if [ -f "$CFG" ]; then
+            for s in CONFIG_LOCKD CONFIG_SUNRPC CONFIG_GRACE_PERIOD; do
+              sed -i "/^${s}=/d;/^# ${s} is not set/d" "$CFG"
+            done
+            sed -i "/^CONFIG_NFS_V4=/d;/^# CONFIG_NFS_V4 is not set/d" "$CFG"
+            printf '%s\n' 'CONFIG_LOCKD=m' 'CONFIG_SUNRPC=m' 'CONFIG_GRACE_PERIOD=m' 'CONFIG_NFS_V4=y' >> "$CFG"
+            grep -q '^CONFIG_LOCKD=m' "$CFG" && grep -q '^CONFIG_SUNRPC=m' "$CFG" \
+              && echo ">>> 目标内核配置固化：LOCKD/SUNRPC/GRACE_PERIOD=m、NFS_V4=y（kmod-fs-nfs-common 的 .ko 提供者）" \
+              || { echo "::error::目标内核配置固化失败（LOCKD/SUNRPC 未落成 =m）"; exit 1; }
+          else
+            echo "::error::未找到 $CFG，kmod-fs-nfs-common 无法产出 .ko 提供者"
+            exit 1
+          fi
+
       - name: 批量设置目标包为 =m
         working-directory: ./ponwrt
         run: |
@@ -353,16 +383,16 @@ jobs:
             luci-app-blueaudio
             luci-app-btsp
             luci-app-camlive
-            gensio
+            gensio-bin
             ser2net
             luci-app-ser2net
-            samba4
+            samba4-server
             luci-app-samba4
             autosamba
             ksmbd-tools
             luci-app-ksmbd
             avahi-daemon
-            luci-app-avahi
+            # luci-app-avahi：immortalwrt/luci 与 packages 均无此包源，已确认不存在，不再纳入清单
             nfs-kernel-server
             nfs-kernel-server-utils
             nfs-utils
@@ -406,7 +436,7 @@ jobs:
             audio-support
             camlive
             go2rtc
-            luci-app-go2rtc
+            # luci-app-go2rtc：immortalwrt/luci 与 packages 均无此包源，已确认不存在，不再纳入清单
             ffmpeg
             libx264
             libopus
@@ -424,6 +454,8 @@ jobs:
             omcproxy
             luci-app-omcproxy
             luci-app-ttyd
+            luci-app-cpufreq
+            luci-app-diskman
             ttyd
             usbutils
             libusb-1.0
@@ -436,8 +468,8 @@ jobs:
             zerotier
             luci-app-zerotier
             tailscale
-            luci-app-tailscale
-            wireguard
+            luci-app-tailscale-community
+            wireguard-tools
             luci-proto-wireguard
             kmod-wireguard
             nebula
@@ -472,6 +504,18 @@ jobs:
             'CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' \
             'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' >> .config
           for p in "${pkg_list[@]}"; do set_pkg_m "$p"; done
+          # 清单落地自检：defconfig 会把依赖不满足的包直接从 .config 丢掉（如 luci-app-blueaudio
+          # 依赖上游并不存在的 bluez-alsa 包），导致"写了 =m 却根本没编"的静默丢弃。
+          # 这里逐个回查，只报 ::warning 供定位，不改变成功/失败判定。
+          miss=""
+          for p in "${pkg_list[@]}"; do
+            grep -qE "^CONFIG_PACKAGE_${p}=[ym]" .config || miss="$miss $p"
+          done
+          if [ -n "$miss" ]; then
+            echo "::warning::以下包未在 .config 落地（包名不存在或依赖不可满足，不会编译）：$miss"
+          else
+            echo ">>> 清单自检通过：${#pkg_list[@]} 个包全部在 .config 中落地"
+          fi
           # ttyd（feeds/packages/utils/ttyd/Makefile，ttyd-1.7.7）DEPENDS 是 +libwebsockets-full，
           # 只有 full 变体才加 -DLWS_WITH_LIBUV=ON（libs/libwebsockets/Makefile 第 90-93 行）；
           # openssl / mbedtls 变体都不带 libuv。实测 .config 里落的是 openssl 变体
@@ -876,16 +920,16 @@ jobs:
             luci-app-blueaudio
             luci-app-btsp
             luci-app-camlive
-            gensio
+            gensio-bin
             ser2net
             luci-app-ser2net
-            samba4
+            samba4-server
             luci-app-samba4
             autosamba
             ksmbd-tools
             luci-app-ksmbd
             avahi-daemon
-            luci-app-avahi
+            # luci-app-avahi：immortalwrt/luci 与 packages 均无此包源，已确认不存在，不再纳入清单
             nfs-kernel-server
             nfs-kernel-server-utils
             nfs-utils
@@ -929,7 +973,7 @@ jobs:
             audio-support
             camlive
             go2rtc
-            luci-app-go2rtc
+            # luci-app-go2rtc：immortalwrt/luci 与 packages 均无此包源，已确认不存在，不再纳入清单
             ffmpeg
             libx264
             libopus
@@ -947,6 +991,8 @@ jobs:
             omcproxy
             luci-app-omcproxy
             luci-app-ttyd
+            luci-app-cpufreq
+            luci-app-diskman
             ttyd
             usbutils
             libusb-1.0
@@ -958,8 +1004,8 @@ jobs:
             zerotier
             luci-app-zerotier
             tailscale
-            luci-app-tailscale
-            wireguard
+            luci-app-tailscale-community
+            wireguard-tools
             luci-proto-wireguard
             kmod-wireguard
             nebula
