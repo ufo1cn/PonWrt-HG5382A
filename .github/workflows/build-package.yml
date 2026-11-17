@@ -118,13 +118,17 @@ jobs:
         working-directory: ./ponwrt
         run: |
           if [ ! -f feeds.conf.default ]; then touch feeds.conf.default; fi
-          sed -i '/nikki/d;/homeproxy/d;/openwrt-iptv/d' feeds.conf.default
+          sed -i '/nikki/d;/homeproxy/d;/openwrt-iptv/d;/passwall2/d' feeds.conf.default
           [ -n "$(tail -c1 feeds.conf.default 2>/dev/null)" ] && echo "" >> feeds.conf.default
           echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git;main' >> feeds.conf.default
           echo 'src-git iptv https://github.com/yveming/openwrt-iptv.git' >> feeds.conf.default
           # 说明：曾经加过 emortal/OpenWrt-packages，该仓库 404 会让 feeds update 整个失败，已移除
           # homeproxy 的 LuCI 应用 + sing-box 相关包（缺了它 sing-box 系全没有）
           echo 'src-git homeproxy https://github.com/immortalwrt/homeproxy.git;master' >> feeds.conf.default
+          # passwall2：只引 LuCI 前端 feed。核心与依赖全部由现有 immortalwrt/packages(master) 提供，
+          # 实测其 net/ 下已有 xray-core / sing-box / chinadns-ng / tcping / geoview / v2ray-geodata，
+          # 因此**不引** Openwrt-Passwall/openwrt-passwall-packages，避免同名包重复集成。
+          echo 'src-git passwall2 https://github.com/Openwrt-Passwall/openwrt-passwall2.git;main' >> feeds.conf.default
           dos2unix feeds.conf.default 2>/dev/null || true
           cat feeds.conf.default
           ./scripts/feeds update -a
@@ -140,6 +144,33 @@ jobs:
           curl -fsSL -o package/libs/libffi/Makefile \
             https://raw.githubusercontent.com/openwrt/openwrt/master/package/libs/libffi/Makefile
           grep -q 'PKG_NAME:=libffi' package/libs/libffi/Makefile && echo ">>> libffi 注入成功" || exit 1
+          # lyaml：luci-app-passwall2 的硬依赖（其 LUCI_DEPENDS 里是 +lyaml）。
+          # 本树 packages feed 用 immortalwrt/packages master，而 master 已移除 lyaml（master/lang 只有
+          # 20 个包，无 lyaml 也无 luarocks，utils 里也没有），只有 openwrt-24.10 分支保留完整依赖链：
+          #   lang/lyaml（Lua 的 libyaml 绑定，DEPENDS:+lua +libyaml，PKG_BUILD_DEPENDS:lua/host luarocks/host）
+          #   lang/luarocks（host 侧 luarocks，lyaml 的 Build 段要用 luarocks make）
+          #   libs/yaml（包名 libyaml）
+          # 这里按需 sparse 取这三件注入本地 package/，树里已有则跳过，不覆盖原有包。
+          if ! find package feeds -maxdepth 3 -type d -name lyaml 2>/dev/null | grep -q .; then
+            echo "=== 注入 lyaml 依赖链（immortalwrt/packages openwrt-24.10）==="
+            rm -rf /tmp/pk24
+            git clone --depth=1 --filter=blob:none --sparse -b openwrt-24.10 \
+              https://github.com/immortalwrt/packages.git /tmp/pk24
+            git -C /tmp/pk24 sparse-checkout set lang/lyaml lang/luarocks libs/yaml
+            mkdir -p package/lang package/libs
+            cp -a /tmp/pk24/lang/lyaml package/lang/lyaml
+            [ -d package/lang/luarocks ] || cp -a /tmp/pk24/lang/luarocks package/lang/luarocks
+            [ -d package/libs/yaml ] || cp -a /tmp/pk24/libs/yaml package/libs/yaml
+            grep -q 'PKG_NAME:=lyaml' package/lang/lyaml/Makefile \
+              || { echo "::error::lyaml 注入失败（Makefile 未取到）"; exit 1; }
+            grep -q 'PKG_NAME:=luarocks' package/lang/luarocks/Makefile \
+              || { echo "::error::luarocks 注入失败（lyaml 的 Build 段依赖它）"; exit 1; }
+            find package/libs/yaml -maxdepth 2 -name Makefile -exec grep -l 'PKG_NAME:=libyaml' {} \; \
+              | grep -q . || { echo "::error::libyaml(yaml) 注入失败"; exit 1; }
+            echo ">>> lyaml / luarocks / libyaml 注入完成"
+          else
+            echo ">>> 树里已有 lyaml，跳过注入"
+          fi
 
       - name: 前置依赖检查 & 分步 feeds install（防循环依赖）
         working-directory: ./ponwrt
@@ -379,6 +410,14 @@ jobs:
 
           pkg_list=(
             luci-app-iptv
+            luci-app-passwall2
+            xray-core
+            chinadns-ng
+            geoview
+            tcping
+            v2ray-geoip
+            v2ray-geosite
+            lyaml
             luci-app-airoha-npu
             luci-app-blueaudio
             luci-app-btsp
@@ -557,6 +596,22 @@ jobs:
           for l in libpopt libtasn1 liburing liblua5.3 libnl-tiny libtirpc libxml2; do
             if grep -q "^CONFIG_PACKAGE_$l=" .config; then echo "OK   dep $l"; else echo "MISS dep $l"; fi
           done | tee ../build_log/dep-check.txt
+          # passwall2 核心选择：只锁 Xray，显式关掉 SingBox / All。
+          # 理由：Makefile 的 choice 对 aarch64 默认是 Basic_Core_All，会 select xray-core **和** sing-box；
+          # 本清单已有 sing-box（feeds/packages net/sing-box，实测产出 sing-box-1.14.3-r1.apk），
+          # 再被选一次等于同包双份/版本互相覆盖，属于重复集成。改锁 Xray 后只多引 xray-core。
+          for kv in "CONFIG_PACKAGE_luci-app-passwall2_Basic_Core_Xray=y" \
+                    "CONFIG_PACKAGE_luci-app-passwall2_Basic_Core_SingBox=n" \
+                    "CONFIG_PACKAGE_luci-app-passwall2_Basic_Core_All=n"; do
+            k="${kv%%=*}"; v="${kv#*=}"
+            sed -i "/^${k}=/d;/^# ${k} is not set/d" .config
+            printf '%s=%s\n' "$k" "$v" >> .config
+          done
+          grep -q '^CONFIG_PACKAGE_luci-app-passwall2_Basic_Core_Xray=y' .config \
+            || { echo "::error::passwall2 核心选择未落地（期望 Basic_Core_Xray=y）"; exit 1; }
+          grep -q '^CONFIG_PACKAGE_luci-app-passwall2_Basic_Core_All=n' .config \
+            || { echo "::error::passwall2 Basic_Core_All 未关掉（会重复 select sing-box）"; exit 1; }
+          echo ">>> passwall2 核心锁定为 Xray（未重复集成 sing-box）"
           echo ">>> =m 清单完成依赖解析"
 
       - name: 下载源码包
@@ -916,6 +971,14 @@ jobs:
           mkdir -p ../ipk_out
           pkg_list=(
             luci-app-iptv
+            luci-app-passwall2
+            xray-core
+            chinadns-ng
+            geoview
+            tcping
+            v2ray-geoip
+            v2ray-geosite
+            lyaml
             luci-app-airoha-npu
             luci-app-blueaudio
             luci-app-btsp
