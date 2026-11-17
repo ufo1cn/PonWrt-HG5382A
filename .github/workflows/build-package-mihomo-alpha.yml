@@ -582,28 +582,26 @@ jobs:
                 #   lockd.ko / sunrpc.ko   （build_log/full-build.log 144964-144967）
                 # 这里删掉内核配置产物并重跑一次 prepare + olddefconfig，让合并链路重新读 config-6.18，
                 # 然后回查内核 .config 真的落了 =m —— 校验失败直接失败，不放宽任何检查。
-                rm -f "$KD/.config" "$KD/.config.old" "$KD/.config.prev" "$KD/.configured" "$KD/.prepared"
-                if ! make -j1 V=s target/linux/prepare > "$LOGDIR/kernel-prepare2.log" 2>&1; then
-                  echo "::error::重跑 target/linux/prepare 失败（内核配置无法重新合并）"
-                  tail -n 30 "$LOGDIR/kernel-prepare2.log"
+                # 【实测 run 44093884502 第 18 步（head 37a5e575）】
+                #   sed: can't read build_dir/.../linux-6.18.55/.config: No such file or directory
+                #   ##[error]Process completed with exit code 2.
+                # 原因：删掉 $KD/.config 后跑 target/linux/prepare 并不会重新生成内核 .config ——
+                # prepare 只解压/打补丁，.config 是由 target/linux/compile 里的 Configure 合并
+                # generic + subtarget config 生成，所以紧接着的 sed 必然撞 "No such file"。
+                # 正确做法：删 .config 与 .configured 让 Configure 重跑，由 make target/linux/compile
+                # 按 target config-6.18（已含 NFS_FS/NFSD/LOCKD/SUNRPC/GRACE_PERIOD=m、NFS_V4=y）重新
+                # 合并生成 .config，并顺带把 nfs.ko/nfsd.ko/lockd.ko/sunrpc.ko 真编出来；
+                # 仍然是真产物路径，不放宽任何回查判据。
+                rm -f "$KD/.config" "$KD/.config.old" "$KD/.configured"
+                if ! make -j"$(nproc)" V=s target/linux/compile > "$LOGDIR/kernel-compile-nfs.log" 2>&1; then
+                  echo "::error::强制重算内核 .config 的 target/linux/compile 失败，nfs.ko 等不可能产出，尾部："
+                  tail -n 40 "$LOGDIR/kernel-compile-nfs.log"
                   exit 1
                 fi
                 KD=$(ls -d build_dir/target-*/linux-*/linux-* 2>/dev/null | head -1)
-                [ -n "$KD" ] || { echo "::error::重跑 prepare 后未找到内核目录"; exit 1; }
-                # 【实证 44053756195（bpkg success）】full-build.log 155083 行：
-                #   NOTICE: module '.../fs/nfs/nfs.ko' is built-in.
-                # 说明本树 .config 里 NFS_FS=y（generic config 默认），prepare 用 stamp 机制并未真正重建
-                # $KD/.config，所以只写 target config-6.18 永远不会落到内核 .config。
-                # 这里直接对内核 .config 落 =m（NFS_FS/NFSD 有 prompt 会保留，LOCKD/SUNRPC/GRACE_PERIOD
-                # 无 prompt，由 NFS_FS=m / LOCKD=m 的 select 自动带出），再 olddefconfig 固化，
-                # 目的是真的编出 nfs.ko/nfsd.ko/lockd.ko/sunrpc.ko，而不是把校验改松。
-                for s in CONFIG_NFS_FS CONFIG_NFSD CONFIG_LOCKD CONFIG_SUNRPC CONFIG_GRACE_PERIOD; do
-                  sed -i "/^${s}=/d; /^# ${s} is not set/d" "$KD/.config"
-                  printf '%s=m\n' "$s" >> "$KD/.config"
-                done
-                sed -i '/^CONFIG_NFS_V4=/d; /^# CONFIG_NFS_V4 is not set/d' "$KD/.config"
-                printf 'CONFIG_NFS_V4=y\n' >> "$KD/.config"
-                echo ">>> 已直接向 $KD/.config 写入 NFS_FS/NFSD/LOCKD/SUNRPC/GRACE_PERIOD=m、NFS_V4=y"
+                [ -n "$KD" ] || { echo "::error::重算后未找到内核目录"; exit 1; }
+                [ -f "$KD/.config" ] || { echo "::error::重算后 $KD/.config 仍不存在（Configure 没重跑，.configured 删除无效）"; exit 1; }
+                echo ">>> 内核 .config 已由 Configure 重新生成（$(grep -c '^CONFIG_' "$KD/.config") 个显式符号）"
                 if ! ( cd "$KD" && make ARCH=arm64 CROSS_COMPILE="$CROSS" olddefconfig </dev/null > "$LOGDIR/kernel-olddefconfig2.log" 2>&1 ); then
                   echo "::error::重跑后 olddefconfig 失败"
                   tail -n 30 "$LOGDIR/kernel-olddefconfig2.log"
