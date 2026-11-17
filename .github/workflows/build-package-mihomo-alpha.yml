@@ -550,6 +550,16 @@ jobs:
                   esac
                 done < "$KD/.config"
                 echo ">>> 内核配置固化：向 $CFG 追加 $added 个符号（原文件备份 $LOGDIR/config-6.18.orig）"
+                # kmod-fs-nfs 的 nfs.ko 链接依赖 lockd.ko / sunrpc.ko（run 44003278547 第 18 步原始报错：
+                #   Package kmod-fs-nfs is missing dependencies for the following libraries: lockd.ko / sunrpc.ko；
+                # 全量日志里 lockd.ko / sunrpc.ko 一次都没被编出来，kmod-fs-nfs-common 因此没有可打包的提供者）。
+                # 这三个符号由 kmod-fs-nfs-common 的 KCONFIG 声明，但 .config 里写的 CONFIG_KERNEL_* 在本树不生效，
+                # 只有 target config-6.18 会被合进内核 .config，所以这里硬写 =m —— 目的是把真 .ko 编出来，不是放宽校验。
+                for s in CONFIG_LOCKD CONFIG_SUNRPC CONFIG_GRACE_PERIOD; do
+                  sed -i "/^${s}=/d; /^# ${s} is not set/d" "$CFG"
+                  printf '%s=m\n' "$s" >> "$CFG"
+                done
+                echo ">>> 已强制 $CFG 内 LOCKD/SUNRPC/GRACE_PERIOD=m（kmod-fs-nfs 的 .ko 依赖）"
                 # 真实构建的 .config = merge(generic, target) 再叠加 package-metadata 生成的 .config.override；
                 # override 会把包依赖的内核符号抬成 =y/=m，从而让一批原本不可见的符号变可见（如 SPI_MTK_NOR=m → SPI_MTK_SNFI 变可见）。
                 # 这里按同样顺序先合入 override 的 =y/=m 项，再用真实 syncconfig 反复校验，仍报 (NEW) 的显式关掉后重来。
