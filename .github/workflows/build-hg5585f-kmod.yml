@@ -157,7 +157,7 @@ jobs:
         CONFIG_SND CONFIG_SND_PCM CONFIG_SND_USB_AUDIO
         CONFIG_USB_XHCI_HCD CONFIG_USB_STORAGE CONFIG_USB_UAS CONFIG_USB_SERIAL
         CONFIG_USB_ACM CONFIG_USB_NET_CDCETHER CONFIG_USB_NET_CDC_NCM
-        CONFIG_USB_NET_RTL8152 CONFIG_USB_NET_AX88179_178A
+        CONFIG_USB_RTL8152 CONFIG_USB_NET_AX88179_178A
         CONFIG_EXT4_FS CONFIG_VFAT_FS CONFIG_EXFAT_FS CONFIG_NTFS3_FS
         CONFIG_MEDIA_SUPPORT CONFIG_VIDEO_DEV CONFIG_USB_VIDEO_CLASS
         CONFIG_RTW88 CONFIG_RTW88_USB CONFIG_INET_DIAG CONFIG_NETLINK_DIAG CONFIG_TUN
@@ -445,6 +445,26 @@ jobs:
           CONFIG_DEBUG_FS_ALLOW_ALL=y
           CONFIG_DEVMEM=y
           CONFIG_COMMON_CLK=y
+          # ===== 强制 USB 栈以模块(.ko)形态编出（kmod 模块化版专用）=====
+          # 证据（run 44000719194 的 logs/kernel-config-check.txt 实测）：
+          #   CONFIG_USB_XHCI_HCD=y / CONFIG_USB_STORAGE=y / CONFIG_USB_HID=y / CONFIG_HID=y
+          #   → xhci-hcd.ko / usb-storage.ko / usbhid.ko 根本不存在，kmod-* 只能打出 ~1KB 空壳，
+          #   本工作流自带的硬校验当场判死（第 26 步注解原文：这些驱动被编进了 vmlinux
+          #   （应为 =m 模块）： CONFIG_USB_XHCI_HCD CONFIG_USB_STORAGE CONFIG_USB_HID）。
+          # 这几个符号来自内核 arch/arm64/configs/defconfig 的默认 =y；而 .config 里写的
+          # CONFIG_KERNEL_USB_*=m 在本树不生效（同一份 .config 里一条 CONFIG_KERNEL_USB_* 都没有），
+          # 只有 target config-6.18 的写法会合进内核 .config（CONFIG_USB_SUPPORT=y、
+          # CONFIG_NET_AIROHA_NPU=y 都出自这里），所以必须在���里写 =m。
+          CONFIG_USB=m
+          CONFIG_USB_XHCI_HCD=m
+          CONFIG_USB_XHCI_PLATFORM=m
+          CONFIG_USB_XHCI_MTK=m
+          CONFIG_USB_STORAGE=m
+          CONFIG_USB_UAS=m
+          CONFIG_HID_SUPPORT=y
+          CONFIG_HID=m
+          CONFIG_USB_HID=m
+          CONFIG_USB_RTL8152=m
           KEOF
           # 先删掉同名旧行（含 "# CONFIG_X is not set"），再整体追加，保证后写的生效
           while read -r line; do
@@ -456,7 +476,7 @@ jobs:
             esac
           done < /tmp/pon_extra_kconfig.txt
           cat /tmp/pon_extra_kconfig.txt >> "$KCFG"
-          echo ">>> 已向 $KCFG 注入 $(( $(grep -c '^CONFIG_' /tmp/pon_extra_kconfig.txt) )) 个底层驱动符号（=y 编进内核）"
+          echo ">>> 已向 $KCFG 注入 $(( $(grep -c '^CONFIG_' /tmp/pon_extra_kconfig.txt) )) 个内核符号（值以行内 =y/=m 为准）"
           grep -c '^CONFIG_' "$KCFG" | sed 's/^/>>> 该文件当前 CONFIG_ 行数: /'
 
       - name: 把驱动对应用户态包/固件 blob 一并装进镜像
