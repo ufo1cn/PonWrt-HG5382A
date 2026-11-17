@@ -559,7 +559,52 @@ jobs:
                   sed -i "/^${s}=/d; /^# ${s} is not set/d" "$CFG"
                   printf '%s=m\n' "$s" >> "$CFG"
                 done
+                # kmod-fs-nfs-common 的 KCONFIG 里 CONFIG_NFS_V4 是写成 =y 的硬要求（fs.mk:458），
+                # 若内核 .config 里是 m，整个包不满足可见性条件，同样不会产出。
+                sed -i '/^CONFIG_NFS_V4=/d; /^# CONFIG_NFS_V4 is not set/d' "$CFG"
+                printf 'CONFIG_NFS_V4=y\n' >> "$CFG"
                 echo ">>> 已强制 $CFG 内 LOCKD/SUNRPC/GRACE_PERIOD=m（kmod-fs-nfs 的 .ko 依赖）"
+                # 【关键】只改 config-6.18 不会影响已经生成的 $KD/.config：
+                # 上面先跑完 prepare→olddefconfig→modules_prepare，配置产物已经落地，
+                # 之后的 package/compile 用的仍是旧 .config，所以 =m 根本没生效。
+                # 实证 run 44029994245 第 18 步（head 75cc4311）仍然报：
+                #   Package kmod-fs-nfs is missing dependencies for the following libraries:
+                #   lockd.ko / sunrpc.ko   （build_log/full-build.log 144964-144967）
+                # 这里删掉内核配置产物并重跑一次 prepare + olddefconfig，让合并链路重新读 config-6.18，
+                # 然后回查内核 .config 真的落了 =m —— 校验失败直接失败，不放宽任何检查。
+                rm -f "$KD/.config" "$KD/.config.old" "$KD/.config.prev" "$KD/.configured" "$KD/.prepared"
+                if ! make -j1 V=s target/linux/prepare > "$LOGDIR/kernel-prepare2.log" 2>&1; then
+                  echo "::error::重跑 target/linux/prepare 失败（内核配置无法重新合并）"
+                  tail -n 30 "$LOGDIR/kernel-prepare2.log"
+                  exit 1
+                fi
+                KD=$(ls -d build_dir/target-*/linux-*/linux-* 2>/dev/null | head -1)
+                [ -n "$KD" ] || { echo "::error::重跑 prepare 后未找到内核目录"; exit 1; }
+                if ! ( cd "$KD" && make ARCH=arm64 CROSS_COMPILE="$CROSS" olddefconfig </dev/null > "$LOGDIR/kernel-olddefconfig2.log" 2>&1 ); then
+                  echo "::error::重跑后 olddefconfig 失败"
+                  tail -n 30 "$LOGDIR/kernel-olddefconfig2.log"
+                  exit 1
+                fi
+                if ! ( cd "$KD" && make ARCH=arm64 CROSS_COMPILE="$CROSS" modules_prepare </dev/null > "$LOGDIR/kernel-modules-prepare2.log" 2>&1 ); then
+                  echo "::error::重跑后 modules_prepare 失败"
+                  tail -n 30 "$LOGDIR/kernel-modules-prepare2.log"
+                  exit 1
+                fi
+                okcfg=1
+                for s in CONFIG_LOCKD CONFIG_SUNRPC CONFIG_GRACE_PERIOD; do
+                  if ! grep -q "^${s}=m" "$KD/.config"; then
+                    echo "::error::$s 在内核 .config 中不是 =m，kmod-fs-nfs-common 不可能产出 .ko"
+                    grep "^${s}" "$KD/.config" || echo "$s 未出现在 .config"
+                    okcfg=0
+                  fi
+                done
+                if ! grep -q "^CONFIG_NFS_V4=y" "$KD/.config"; then
+                  echo "::error::CONFIG_NFS_V4 在内核 .config 中不是 =y（fs.mk:458 的 KCONFIG 硬要求）"
+                  grep "^CONFIG_NFS_V4" "$KD/.config" || echo "CONFIG_NFS_V4 未出现在 .config"
+                  okcfg=0
+                fi
+                [ "$okcfg" = "1" ] || exit 1
+                echo ">>> 内核 .config 已回查通过：LOCKD/SUNRPC/GRACE_PERIOD=m、NFS_V4=y（.ko 提供者会真实产出）"
                 # 真实构建的 .config = merge(generic, target) 再叠加 package-metadata 生成的 .config.override；
                 # override 会把包依赖的内核符号抬成 =y/=m，从而让一批原本不可见的符号变可见（如 SPI_MTK_NOR=m → SPI_MTK_SNFI 变可见）。
                 # 这里按同样顺序先合入 override 的 =y/=m 项，再用真实 syncconfig 反复校验，仍报 (NEW) 的显式关掉后重来。
