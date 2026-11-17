@@ -590,6 +590,20 @@ jobs:
                 fi
                 KD=$(ls -d build_dir/target-*/linux-*/linux-* 2>/dev/null | head -1)
                 [ -n "$KD" ] || { echo "::error::重跑 prepare 后未找到内核目录"; exit 1; }
+                # 【实证 44053756195（bpkg success）】full-build.log 155083 行：
+                #   NOTICE: module '.../fs/nfs/nfs.ko' is built-in.
+                # 说明本树 .config 里 NFS_FS=y（generic config 默认），prepare 用 stamp 机制并未真正重建
+                # $KD/.config，所以只写 target config-6.18 永远不会落到内核 .config。
+                # 这里直接对内核 .config 落 =m（NFS_FS/NFSD 有 prompt 会保留，LOCKD/SUNRPC/GRACE_PERIOD
+                # 无 prompt，由 NFS_FS=m / LOCKD=m 的 select 自动带出），再 olddefconfig 固化，
+                # 目的是真的编出 nfs.ko/nfsd.ko/lockd.ko/sunrpc.ko，而不是把校验改松。
+                for s in CONFIG_NFS_FS CONFIG_NFSD CONFIG_LOCKD CONFIG_SUNRPC CONFIG_GRACE_PERIOD; do
+                  sed -i "/^${s}=/d; /^# ${s} is not set/d" "$KD/.config"
+                  printf '%s=m\n' "$s" >> "$KD/.config"
+                done
+                sed -i '/^CONFIG_NFS_V4=/d; /^# CONFIG_NFS_V4 is not set/d' "$KD/.config"
+                printf 'CONFIG_NFS_V4=y\n' >> "$KD/.config"
+                echo ">>> 已直接向 $KD/.config 写入 NFS_FS/NFSD/LOCKD/SUNRPC/GRACE_PERIOD=m、NFS_V4=y"
                 if ! ( cd "$KD" && make ARCH=arm64 CROSS_COMPILE="$CROSS" olddefconfig </dev/null > "$LOGDIR/kernel-olddefconfig2.log" 2>&1 ); then
                   echo "::error::重跑后 olddefconfig 失败"
                   tail -n 30 "$LOGDIR/kernel-olddefconfig2.log"
