@@ -730,6 +730,27 @@ jobs:
           if make -j1 V=s target/linux/prepare > "$LOGDIR/kernel-prepare.log" 2>&1; then
             KD=$(ls -d build_dir/target-*/linux-*/linux-* 2>/dev/null | head -1)
             if [ -n "$KD" ]; then
+              # AN7581 WAN IPv6 PPPoE 硬件流卸载修复（来源：wuziwei/ponwrt-ZN504-HG5585F 的
+              # target/linux/airoha/patches-6.18/931-net-airoha-fix-wan-ipv6-pppoe-flow-offload.patch；
+              # 我们 pin 的 pbs05/ponwrt 里没有这个补丁，所以由本仓库携带、在内核树上显式应用）。
+              # 修 PPE 流表四处硬伤：L3 IPv6 误跌入 L2 子流（br-lan 客户端 MAC 触发的 fallthrough）、
+              # PPPoE session ID 被 0xf 抹平、IPv6 条目被改写到 NPU 端口 6 造成黑洞、PPPoE/VLAN 开销未计入 MTU。
+              P931="$GITHUB_WORKSPACE/.github/patches/931-net-airoha-fix-wan-ipv6-pppoe-flow-offload.patch"
+              if [ -f "$P931" ]; then
+                if grep -q 'VLAN_ETH_HLEN + 16 + netdev->mtu' "$KD/drivers/net/ethernet/airoha/airoha_eth.c" 2>/dev/null; then
+                  echo ">>> 931 补丁已在内核树（跳过重复应用）"
+                elif patch -p1 -N -t --dry-run -d "$KD" "$P931" > "$LOGDIR/patch931-dryrun.log" 2>&1; then
+                  patch -p1 -t -d "$KD" "$P931" >> "$LOGDIR/patch931-apply.log" 2>&1 \
+                    && echo ">>> 已应用 931 补丁：AN7581 WAN IPv6 PPPoE 硬件流卸载修复" \
+                    || { echo "::error::931 补丁应用失败"; tail -n 20 "$LOGDIR/patch931-apply.log"; exit 1; }
+                else
+                  echo "::error::931 补丁在本内核树 dry-run 不通过（上下文已漂移，需按新源码重做补丁）"
+                  tail -n 30 "$LOGDIR/patch931-dryrun.log" || true
+                  exit 1
+                fi
+              else
+                echo "::warning::未找到 931 补丁文件，跳过（不影响编译）"
+              fi
               ( cd "$KD" && make ARCH=arm64 CROSS_COMPILE="$CROSS" olddefconfig </dev/null > "$LOGDIR/kernel-olddefconfig.log" 2>&1 ) \
                 && echo ">>> 内核 olddefconfig 完成：$KD/.config（$(grep -c '^CONFIG_' "$KD/.config") 个显式符号）" \
                 || { echo "::warning::olddefconfig 失败，尾部："; tail -n 30 "$LOGDIR/kernel-olddefconfig.log"; }
