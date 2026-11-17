@@ -266,18 +266,21 @@ jobs:
           set -o pipefail
           LOGDIR="$PWD/../build_log"
           mkdir -p "$LOGDIR"
-          TC_BIN=$(ls -d "$PWD"/staging_dir/toolchain-*/bin 2>/dev/null | head -1)
+          echo ">>> 先编工具链（staging_dir/toolchain-*/bin 由它产出，取路径必须放在其后）"
+          make -j"$(nproc)" V=s toolchain/compile > "$LOGDIR/toolchain.log" 2>&1 \
+            || { echo "::error::toolchain/compile 失败，尾部："; tail -n 30 "$LOGDIR/toolchain.log"; exit 1; }
+          # 关键：这里必须容错。目录尚不存在时 ls 返回 2，配合 pipefail + bash -e
+          # 会让赋值语句直接终止步骤（run 44171992609 第 12 步即以 exit code 2 静默失败）。
+          TC_BIN=$(ls -d "$PWD"/staging_dir/toolchain-*/bin 2>/dev/null | head -1 || true)
           CROSS="aarch64-openwrt-linux-musl-"
           [ -n "$TC_BIN" ] && export PATH="$TC_BIN:$PWD/staging_dir/host/bin:$PATH"
           echo ">>> 交叉工具链：${TC_BIN:-未找到}"
-          make -j"$(nproc)" V=s toolchain/compile > "$LOGDIR/toolchain.log" 2>&1 \
-            || { echo "::error::toolchain/compile 失败，尾部："; tail -n 30 "$LOGDIR/toolchain.log"; exit 1; }
           if ! make -j1 V=s target/linux/prepare > "$LOGDIR/kernel-prepare.log" 2>&1; then
             echo "::error::target/linux/prepare 失败，尾部："
             tail -n 40 "$LOGDIR/kernel-prepare.log"
             exit 1
           fi
-          KD=$(ls -d build_dir/target-*/linux-*/linux-* 2>/dev/null | head -1)
+          KD=$(ls -d build_dir/target-*/linux-*/linux-* 2>/dev/null | head -1 || true)
           [ -n "$KD" ] || { echo "::error::未找到内核源码目录"; exit 1; }
           echo ">>> 内核源码：$KD"
           ( cd "$KD" && make ARCH=arm64 CROSS_COMPILE="$CROSS" olddefconfig </dev/null > "$LOGDIR/kernel-olddefconfig.log" 2>&1 ) \
