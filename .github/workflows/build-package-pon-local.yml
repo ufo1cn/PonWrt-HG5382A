@@ -346,8 +346,13 @@ jobs:
           # 先编被选中的 kmod（uvc / bluetooth 系），让 luci-app-camlive 的依赖检查拿得到 .provides
           make -j"$(nproc)" V=s package/kernel/linux/compile > "$LOGDIR/kmod-compile.log" 2>&1 \
             || { echo "::warning::package/kernel/linux/compile 有报错，尾部："; tail -n 40 "$LOGDIR/kmod-compile.log"; }
-          # 再编 pon-local（纯用户态 + LuCI 前端 + tempinfo）
-          make -j"$(nproc)" V=s package/pon-local/compile > "$LOGDIR/ponlocal-compile.log" 2>&1
+          # 再编全部选中包。注意不能用 `make package/pon-local/compile`：
+          # pon-local 是多包目录（tempinfo/camlive/go2rtc/… 各自 BuildPackage），
+          # 该写法在 toplevel.mk 里没有对应规则，实测直接
+          #   make[1]: *** No rule to make target 'package/pon-local/compile'.  Stop.
+          # （run 44174747584 第 13 步 ponlocal-compile.log）。用 package/compile 全量编，
+          # 范围由 .config 决定（本工作流只落了 18 个目标包及其依赖）。
+          make -j"$(nproc)" V=s package/compile > "$LOGDIR/ponlocal-compile.log" 2>&1
           rc=$?
           tail -n 60 "$LOGDIR/ponlocal-compile.log"
           if [ $rc -ne 0 ]; then
