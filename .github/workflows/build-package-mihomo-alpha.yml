@@ -569,10 +569,12 @@ jobs:
                   sed -i "/^${s}=/d; /^# ${s} is not set/d" "$CFG"
                   printf '%s=m\n' "$s" >> "$CFG"
                 done
-                # kmod-fs-nfs-common 的 KCONFIG 里 CONFIG_NFS_V4 是写成 =y 的硬要求（fs.mk:458），
-                # 若内核 .config 里是 m，整个包不满足可见性条件，同样不会产出。
+                # CONFIG_NFS_V4 是 bool 且 depends on NFS_FS：当 NFS_FS=m 时 kconfig 只能把它落成 m
+                # （bool 依赖 tristate=m 会被降为 m，写 =y 会被 syncconfig 丢弃 → 回查永远对不上）。
+                # 实测 run 44134058654（head 77813022）就是写 =y 后内核 .config 落成 =m 然后硬失败。
+                # 因此这里按 NFS_FS 的取值写 =m，与内核语义一致；=m 时 obj-$(CONFIG_NFS_V4) 会单独产出 nfsv4.ko。
                 sed -i '/^CONFIG_NFS_V4=/d; /^# CONFIG_NFS_V4 is not set/d' "$CFG"
-                printf 'CONFIG_NFS_V4=y\n' >> "$CFG"
+                printf 'CONFIG_NFS_V4=m\n' >> "$CFG"
                 echo ">>> 已强制 $CFG 内 LOCKD/SUNRPC/GRACE_PERIOD=m（kmod-fs-nfs 的 .ko 依赖）"
                 # 【关键】只改 config-6.18 不会影响已经生成的 $KD/.config：
                 # 上面先跑完 prepare→olddefconfig→modules_prepare，配置产物已经落地，
@@ -664,13 +666,27 @@ jobs:
                     okcfg=0
                   fi
                 done
-                if ! grep -q "^CONFIG_NFS_V4=y" "$KD/.config"; then
-                  echo "::error::CONFIG_NFS_V4 在内核 .config 中不是 =y（fs.mk:458 的 KCONFIG 硬要求）"
+                # 判据按真实产物收紧（不是放宽）：NFS_V4 必须处于启用态（NFS_FS=m 时只能为 m），
+                # 并且内核必须真编出 fs/nfs/nfs.ko；若 NFS_V4=m 还必须真编出 fs/nfs/nfsv4.ko。
+                # 依据：build-package 44100839449 里 kmod-fs-nfs-6.18.55-r1.apk 只有 936B、
+                # kmod-fs-nfs-v4 只有 923B（空包），说明"符号看着对、.ko 没编出"才是要防的真问题。
+                if ! grep -qE '^CONFIG_NFS_V4=[my]' "$KD/.config"; then
+                  echo "::error::CONFIG_NFS_V4 在内核 .config 中未启用（NFS_FS=m 时必须为 m，not set 则 nfsv4 不产出）"
                   grep "^CONFIG_NFS_V4" "$KD/.config" || echo "CONFIG_NFS_V4 未出现在 .config"
                   okcfg=0
                 fi
+                if [ ! -f "$KD/fs/nfs/nfs.ko" ]; then
+                  echo "::error::内核未真编出 fs/nfs/nfs.ko（kmod-fs-nfs 会变成空包）"
+                  ls -l "$KD/fs/nfs/" 2>/dev/null | sed -n '1,25p'
+                  okcfg=0
+                fi
+                if grep -q '^CONFIG_NFS_V4=m' "$KD/.config" && [ ! -f "$KD/fs/nfs/nfsv4.ko" ]; then
+                  echo "::error::CONFIG_NFS_V4=m 但内核未真编出 fs/nfs/nfsv4.ko（kmod-fs-nfs-v4 会变成空包）"
+                  ls -l "$KD/fs/nfs/" 2>/dev/null | sed -n '1,25p'
+                  okcfg=0
+                fi
                 [ "$okcfg" = "1" ] || exit 1
-                echo ">>> 内核 .config 已回查通过：NFS_FS/NFSD=m、LOCKD/SUNRPC/GRACE_PERIOD=m、NFS_V4=y（.ko 提供者会真实产出）"
+                echo ">>> 内核 .config 已回查通过：NFS_FS/NFSD=m、LOCKD/SUNRPC/GRACE_PERIOD=m、NFS_V4=$(grep -E '^CONFIG_NFS_V4=[my]' "$KD/.config" | head -1 | cut -d= -f2)，且 nfs.ko / nfsv4.ko 真实存在"
                 # 真实构建的 .config = merge(generic, target) 再叠加 package-metadata 生成的 .config.override；
                 # override 会把包依赖的内核符号抬成 =y/=m，从而让一批原本不可见的符号变可见（如 SPI_MTK_NOR=m → SPI_MTK_SNFI 变可见）。
                 # 这里按同样顺序先合入 override 的 =y/=m 项，再用真实 syncconfig 反复校验，仍报 (NEW) 的显式关掉后重来。
