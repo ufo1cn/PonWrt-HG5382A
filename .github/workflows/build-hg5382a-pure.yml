@@ -1,16 +1,21 @@
 # ==============================================================================
-# PonWrt HG5382A（光猫 FiberHome HG5382A 电信版 / CT）纯净固件编译工作流
+# PonWrt HG5382A（光猫 FiberHome HG5382A 电信版 / CT）集成驱动版固件编译工作流
 # ------------------------------------------------------------------------------
-# 【这一条工作流只干一件事】产出可以刷机的 HG5382A 纯净固件（itb），
+# 命名更正（2026-11-17，仅改说明文字，构建逻辑零改动）：
+#   本流程原名“纯净版”。按实际内容，它把 USB 主机/存储/串口/网卡、无线（rtw88 / rtl8xxxu /
+#   rtl8192cu）、蓝牙（btusb）、USB 声卡、UVC 摄像头等驱动一并编进镜像，属于“集成驱动版”。
+#   真正只保留默认内核选项、不含 USB 相关驱动的是 build-hg5382a-nousb.yml，那个才是“纯净版”。
+# ------------------------------------------------------------------------------
+# 【这一条工作流只干一件事】产出可以刷机的 HG5382A 集成驱动版固件（itb），
 # 并且把"底层支持"一次开足，让后期单独编出来的应用包装上就能用。
 #
 # 一、与其它工作流的分工（改动前务必先看这里）
-#   1) 本文件 build-hg5382a-pure.yml（HG5382A 纯净版）
+#   1) 本文件 build-hg5382a-pure.yml（HG5382A 集成驱动版，原名“纯净版”）
 #      - 责任：PonWrt 源码 + 机型锁定 + 内核/驱动（kmod）+ 必要底层库 → 出固件
 #      - 原则：应用层软件（代理、LuCI 前端、摄像头发布等）**一律不进镜像**
 #      - 与旧 PonWrt1.yml 的关系：PonWrt1.yml 是 HG5382A 的**集成版基线，禁止修改**；
-#        本文件是它的"纯净版"姊妹流程，只保留底层，应用层改由独立工作流出包。
-#   2) .github/workflows/build-hg5585f.yml（HG5585F 纯净版，同一套思路）
+#        本文件是它的“集成驱动版”姊妹流程：底层驱动一并进镜像，应用层仍由独立工作流出包。
+#   2) .github/workflows/build-hg5585f.yml（HG5585F，同一套“集成驱动”思路）
 #   3) .github/workflows/build-package.yml（应用层独立包，刷完机按需安装）
 #
 # 二、为什么镜像里要"预先打开尽可能多的底层支持"
@@ -53,7 +58,7 @@
 #   - kmod-usb-net：包选中但内核 CONFIG_USB_USNBNET 未开时，打包阶段才报
 #     "usbnet.ko is missing"
 # ==============================================================================
-name: 编译 PonWrt HG5382A 电信版纯净固件（仅底层｜内核驱动全开）
+name: 编译 PonWrt HG5382A 电信版集成驱动固件（底层＋USB/无线/蓝牙/音频/摄像头驱动）
 on:
   # 5382A 在 ponwrt 里只有 fiberhome_hg5382a 一个机型，没有 ct / cu / usb-sfp 变体，
   # 所以这里不需要机型输入，直接手动触发即可。
@@ -68,7 +73,7 @@ concurrency:
 
 jobs:
   build-firmware:
-    name: 编译 HG5382A 纯净固件（仅底层｜内核驱动全开）
+    name: 编译 HG5382A 集成驱动固件（驱动全开）
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     # 注意：下面 env 里的多行值（>- 折叠块）中**不能写 # 注释**——
@@ -1434,7 +1439,7 @@ jobs:
         uses: softprops/action-gh-release@v2.0.8
         with:
           tag_name: hg5382a-pure-${{ github.run_number }}-${{ github.run_attempt }}
-          name: PonWrt HG5382A 纯净版预发布 #${{ github.run_number }}
+          name: PonWrt HG5382A 集成驱动版预发布 #${{ github.run_number }}
           prerelease: true
           make_latest: false
           generate_release_notes: true
