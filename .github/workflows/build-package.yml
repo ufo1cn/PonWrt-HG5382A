@@ -974,10 +974,12 @@ jobs:
             while IFS= read -r -d '' f; do
               cp -f "$f" ../ipk_out/
               found=1
-            done < <(find bin -type f \( -name "${pkg}*.ipk" \) -print0 )
+            # 本套构建产物是 .apk（apk 包格式），只匹配 *.ipk 会导致一个包都收不到，
+            # ipk_out 为空 → 第 20 步 "无IPK产出，终止发布"（run 43981080419 注解原文）。
+            done < <(find bin -type f \( -name "${pkg}*.ipk" -o -name "${pkg}*.apk" \) -print0 )
             [ "$found" -eq 1 ] && echo ">>> 已收集 $pkg" || echo "::notice::$pkg 未生成，跳过"
           done
-          ls -lh ../ipk_out/*.ipk 2>/dev/null || true
+          ls -lh ../ipk_out/*.ipk ../ipk_out/*.apk 2>/dev/null || true
 
       - name: 打包制品 & 生成校验和
         run: |
