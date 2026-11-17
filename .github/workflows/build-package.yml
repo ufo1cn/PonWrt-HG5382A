@@ -165,8 +165,12 @@ jobs:
               || { echo "::error::lyaml 注入失败（Makefile 未取到）"; exit 1; }
             grep -q 'PKG_NAME:=luarocks' package/lang/luarocks/Makefile \
               || { echo "::error::luarocks 注入失败（lyaml 的 Build 段依赖它）"; exit 1; }
-            find package/libs/yaml -maxdepth 2 -name Makefile -exec grep -l 'PKG_NAME:=libyaml' {} \; \
-              | grep -q . || { echo "::error::libyaml(yaml) 注入失败"; exit 1; }
+            # 注意：24.10 的 libs/yaml 里 PKG_NAME:=yaml（源包是 libyaml-0.2.5），
+            # 真正提供的是 Package/libyaml（$(eval $(call BuildPackage,libyaml))），
+            # 所以这里必须按 define Package/libyaml 判定，不能按 PKG_NAME 判定
+            # （run 44097273567 第 7 步就因按 PKG_NAME:=libyaml 判定而误报"注入失败"）。
+            [ -f package/libs/yaml/Makefile ] && grep -q 'define Package/libyaml' package/libs/yaml/Makefile \
+              || { echo "::error::libyaml(yaml) 注入失败（缺 define Package/libyaml）"; exit 1; }
             echo ">>> lyaml / luarocks / libyaml 注入完成"
           else
             echo ">>> 树里已有 lyaml，跳过注入"
