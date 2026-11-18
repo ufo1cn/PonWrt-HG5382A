@@ -899,7 +899,10 @@ jobs:
                 for p in libaio liburcu libstdcpp; do
                   grep -qE "^CONFIG_PACKAGE_${p}=" .config || printf 'CONFIG_PACKAGE_%s=m\n' "$p" >> .config
                 done
-                grep -qE '^CONFIG_PACKAGE_kmod-bridge=' .config || printf 'CONFIG_PACKAGE_kmod-bridge=m\n' >> .config
+                # 本树 package/kernel/linux/modules 里没有 KernelPackage/bridge，CONFIG_PACKAGE_kmod-bridge
+                # 是不存在的死符号（写进 .config 会被 defconfig 丢弃，起不到任何作用）。
+                # bridge 只能 built-in：这里先校验 target 配置里确实是 =y。
+                grep -qE '^CONFIG_BRIDGE=y' "$CFG" || { echo "::error::$CFG 里缺 CONFIG_BRIDGE=y（本树无 kmod-bridge，bridge 只能内置）"; exit 1; }
                 if [ ! -s "$KD/.config.override" ]; then
                   if [ ! -f tmp/.packageinfo ]; then
                     make -j1 V=s prepare-tmpinfo > "$LOGDIR/packageinfo.log" 2>&1 || true
@@ -909,6 +912,23 @@ jobs:
                   fi
                 fi
                 echo ">>> .config.override：$(wc -l < "$KD/.config.override" 2>/dev/null || echo 0) 行"
+
+                # 根因修复（run 44242796149 第 18 步）：
+                #   make[2]: *** [modules/netdevices.mk:721: .../kmod-dsa-6.18.55-r1.apk] Error 1
+                #   Package kmod-dsa is missing dependencies for the following libraries: bridge.ko
+                # dsa_core.ko 的 modinfo depends 里带 bridge.ko，而本树没有 kmod-bridge 包，
+                # 所以 bridge 必须 built-in（=y）：=y 时符号解析在内核本体，不再产生"缺 bridge.ko 提供者"。
+                # .config.override 是内核配置的最后合并层，包 KCONFIG 汇总会把 CONFIG_BRIDGE 抬成 =m，
+                # 因此必须在 override 上再压一次 =y（只改这一层，不动任何校验）。
+                if [ -s "$KD/.config.override" ]; then
+                  sed -i -E '/^(# )?CONFIG_BRIDGE[= ]/d' "$KD/.config.override"
+                  printf 'CONFIG_BRIDGE=y\n' >> "$KD/.config.override"
+                  grep -q '^CONFIG_BRIDGE=y' "$KD/.config.override" \
+                    || { echo "::error::.config.override 里 CONFIG_BRIDGE 未落到 =y"; exit 1; }
+                  echo ">>> .config.override 已锁定 CONFIG_BRIDGE=y（bridge built-in，kmod-dsa 的 bridge.ko 依赖消解）"
+                else
+                  echo "::error::.config.override 不存在，无法锁定 CONFIG_BRIDGE=y"; exit 1
+                fi
                 if [ ! -s "$KD/.config.override" ]; then
                   echo "::warning::.config.override 生成失败，显式关掉已知无默认值且会 (NEW) 的符号（SPI_MTK_SNFI）兜底"
                   printf '# CONFIG_SPI_MTK_SNFI is not set\n' >> "$CFG"
