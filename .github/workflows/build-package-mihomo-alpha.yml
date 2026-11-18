@@ -674,9 +674,12 @@ jobs:
                   fi
                 done
                 # 真实产物判据（不是放宽）：内置后 modules.builtin 必须收录 nfs/nfsv4/nfsd/lockd/sunrpc，
-                # 且 fs/nfs 下不应再有 .ko -- 残留 .ko 说明还是模块，built-in 分支不触发，打包会再报 missing。
+                # 且 NFS 各目录下不应再有 .ko -- 残留 .ko 说明还是模块，built-in 分支不触发，打包会再报 missing。
+                # 【路径修正】Linux 6.18 里 nfsd 的源码/模块在 fs/nfsd/（fs/nfs/ 只有客户端 nfs.ko、nfsv4.ko），
+                # modules.builtin 里的条目是 kernel/fs/nfsd/nfsd.ko。旧判据写成 fs/nfs/nfsd.ko 永远匹配不到，
+                # 导致 run 44227150985 第 18 步在其余 4 项全部通过的情况下仍然误报「未收录」而失败。
                 if [ -f "$KD/modules.builtin" ]; then
-                  for m in "fs/nfs/nfs.ko" "fs/nfs/nfsv4.ko" "fs/nfs/nfsd.ko" "fs/lockd/lockd.ko" "net/sunrpc/sunrpc.ko"; do
+                  for m in "fs/nfs/nfs.ko" "fs/nfs/nfsv4.ko" "fs/nfsd/nfsd.ko" "fs/lockd/lockd.ko" "net/sunrpc/sunrpc.ko"; do
                     if ! grep -q "${m}" "$KD/modules.builtin" 2>/dev/null; then
                       echo "::error::modules.builtin 未收录 ${m}（内核未真正内置该 NFS 组件）"
                       okcfg=0
@@ -685,7 +688,7 @@ jobs:
                 else
                   echo "::warning::modules.builtin 未生成，退回 .config=y + 无残留 .ko 判据"
                 fi
-                for f in "$KD/fs/nfs/nfs.ko" "$KD/fs/nfs/nfsv4.ko" "$KD/fs/nfs/nfsd.ko" "$KD/fs/lockd/lockd.ko" "$KD/net/sunrpc/sunrpc.ko"; do
+                for f in "$KD/fs/nfs/nfs.ko" "$KD/fs/nfs/nfsv4.ko" "$KD/fs/nfsd/nfsd.ko" "$KD/fs/nfs/nfsd.ko" "$KD/fs/lockd/lockd.ko" "$KD/net/sunrpc/sunrpc.ko"; do
                   if [ -f "$f" ]; then
                     echo "::error::内置方案下仍产出模块文件 $f（配置未生效，kmod 打包会再报 missing）"
                     okcfg=0
