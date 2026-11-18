@@ -203,6 +203,7 @@ jobs:
             bluez-daemon
             bluez-libs
             dbus
+            libffi
             kmod-video-core
             kmod-video-videobuf2
             kmod-video-uvc
