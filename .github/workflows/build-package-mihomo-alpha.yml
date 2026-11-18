@@ -345,6 +345,21 @@ jobs:
           printf '%s\n' 'CONFIG_KERNEL_NET_AIROHA=y' 'CONFIG_KERNEL_NET_AIROHA_NPU=y' >> .config
           grep -n '^CONFIG_KERNEL_NET_AIROHA' .config || { echo '::error::NET_AIROHA 内置定值未写入 .config'; exit 1; }
           echo ">>> airoha-eth 已定为内置（CONFIG_KERNEL_NET_AIROHA=y），与固件一致"
+          # 【NFS 全链内置：CONFIG_KERNEL_* 是 PrepareKernelConfig 的最终覆盖源】
+          # run 44214051200 第 18 步实证：DRIVER_KCONFIGS 里带 CONFIG_NFS_FS/NFSD/LOCKD/SUNRPC/GRACE_PERIOD，
+          # 上面统一写成 CONFIG_KERNEL_*=m，覆盖了 config-6.18 里的 =y，内核 .config 落成
+          #   CONFIG_NFS_FS=m / CONFIG_NFSD=m / CONFIG_LOCKD=m / CONFIG_SUNRPC=m / CONFIG_GRACE_PERIOD=m
+          # 于是 modules.builtin 不收 nfs.ko，fs/nfs/nfs.ko 仍产出，内置方案落空。
+          # 这里把这一组显式改成 =y（与 NET_AIROHA 同样的处理方式），并硬校验。
+          NFS_KCONFIGS="CONFIG_NFS_FS CONFIG_NFSD CONFIG_NFSD_V4 CONFIG_NFS_V4 CONFIG_LOCKD CONFIG_SUNRPC CONFIG_GRACE_PERIOD"
+          for s in $NFS_KCONFIGS; do
+            sed -i "/^CONFIG_KERNEL_${s#CONFIG_}=/d" .config
+            printf "CONFIG_KERNEL_%s=y\n" "${s#CONFIG_}" >> .config
+          done
+          for s in $NFS_KCONFIGS; do
+            grep -q "^CONFIG_KERNEL_${s#CONFIG_}=y" .config || { echo "::error::内核覆盖 CONFIG_KERNEL_${s#CONFIG_} 不是 =y（NFS 内置方案要求 =y）"; exit 1; }
+          done
+          echo ">>> NFS 全链已写成 CONFIG_KERNEL_*=y（PrepareKernelConfig 覆盖源，等于固件的内置配置）"
 
       - name: 批量设置目标包为 =m
         working-directory: ./ponwrt
@@ -490,6 +505,16 @@ jobs:
             grep -q "^CONFIG_PACKAGE_${p}=m" .config || { echo "::error::运行库提供者 ${p} 未落成 =m"; exit 1; }
           done
           echo ">>> libffmpeg 运行库提供者已落成 =m（libav*/libz/libbz2/libdrm/libmp3lame/libopus/libcap/libuv）"
+          # 【NFS kmod 包必须 =y，不能 =m】package-metadata.pl 生成 .config.override 时按包的 y/m
+          # 决定内核符号取值：包 =m → override 写 CONFIG_NFS_FS=m，再次压掉 config-6.18/CONFIG_KERNEL_* 的 =y。
+          # 包 =y → override 写 =y，内核真内置，kmod 包走 package/kernel/linux 的 built-in NOTICE 分支
+          # （仍然产出 apk，只是空壳，不会静默丢弃）。
+          for p in kmod-fs-nfs-common kmod-fs-nfs kmod-fs-nfs-v4 kmod-fs-nfsd; do
+            sed -i "/^CONFIG_PACKAGE_${p}=/d;/^# CONFIG_PACKAGE_${p} is not set/d" .config
+            printf "CONFIG_PACKAGE_%s=y\n" "$p" >> .config
+            grep -q "^CONFIG_PACKAGE_${p}=y" .config || { echo "::error::NFS kmod 包 ${p} 未落成 =y（内置方案要求 =y，否则 override 会把内核符号压回 =m）"; exit 1; }
+          done
+          echo ">>> NFS kmod 包锁定 =y：kmod-fs-nfs-common / kmod-fs-nfs / kmod-fs-nfs-v4 / kmod-fs-nfsd"
           echo ">>> 所有包设为模块，依赖解析完成"
 
       - name: 下载源码包
