@@ -815,30 +815,60 @@ jobs:
                 # 正解同 libarc4：补真实提供者 kmod-bridge（打包 linux-6.18.55/net/bridge/bridge.ko，=m），
                 # 并把 +kmod-bridge 写进 KernelPackage/dsa 的 DEPENDS，让依赖链里真的有 bridge.ko 的 provides。
                 BGM=package/kernel/linux/modules/netdev-bridge.mk
-                if [ ! -f "$BGM" ]; then
+                # 6.18 的 net/bridge/Kconfig 里 BRIDGE 会 select LLC 与 STP；BRIDGE=m 时这两个符号一并被降级成 =m，
+                # 于是 bridge.ko 的 modinfo 里带 llc.ko / stp.ko：
+                #   Package kmod-bridge is missing dependencies for the following libraries: llc.ko stp.ko
+                # （run 44334269997 第 18 步 job 日志 145881-145884 行；bridge.ko 自身已成功编出并打包）
+                # 树内同样没有这两个 .ko 的 KernelPackage，按既有做法补真实提供者，
+                # 并把 +kmod-net-llc / +kmod-net-802-stp 写进 kmod-bridge 的 DEPENDS，不放宽任何校验。
                 printf '%s\n' \
                   'define KernelPackage/bridge' \
                   '  SUBMENU:=Network Support' \
                   '  TITLE:=Ethernet Bridging support' \
                   '  KCONFIG:=CONFIG_BRIDGE' \
                   '  FILES:= $(LINUX_DIR)/net/bridge/bridge.ko' \
+                  '  DEPENDS:=+kmod-net-llc +kmod-net-802-stp' \
                   '  AUTOLOAD:=$(call AutoLoad,20,bridge)' \
                   'endef' \
                   'define KernelPackage/bridge/description' \
-                  '  Ethernet Bridging（dsa_core.ko / hsr.ko 的运行时依赖）' \
+                  '  Ethernet Bridging（dsa_core.ko / hsr.ko 的运行时依赖；llc.ko、stp.ko 分别由 kmod-net-llc、kmod-net-802-stp 提供）' \
                   'endef' \
                   '$(eval $(call KernelPackage,bridge))' \
+                  'define KernelPackage/net-llc' \
+                  '  SUBMENU:=Network Support' \
+                  '  TITLE:=802.2 LLC support' \
+                  '  KCONFIG:=CONFIG_LLC' \
+                  '  FILES:= $(LINUX_DIR)/net/llc/llc.ko' \
+                  'endef' \
+                  'define KernelPackage/net-llc/description' \
+                  '  802.2 Logical Link Control（bridge.ko 的 modinfo 依赖 llc.ko）' \
+                  'endef' \
+                  '$(eval $(call KernelPackage,net-llc))' \
+                  'define KernelPackage/net-802-stp' \
+                  '  SUBMENU:=Network Support' \
+                  '  TITLE:=802.1d STP support' \
+                  '  KCONFIG:=CONFIG_STP' \
+                  '  FILES:= $(LINUX_DIR)/net/802/stp.ko' \
+                  'endef' \
+                  'define KernelPackage/net-802-stp/description' \
+                  '  802.1d Spanning Tree Protocol（bridge.ko 的 modinfo 依赖 stp.ko）' \
+                  'endef' \
+                  '$(eval $(call KernelPackage,net-802-stp))' \
                   > "$BGM"
-                fi
-                grep -q 'KernelPackage/bridge' "$BGM" || { echo "::error::$BGM 生成失败"; exit 1; }
+                for kp in 'KernelPackage/bridge' 'KernelPackage/net-llc' 'KernelPackage/net-802-stp'; do
+                  grep -q "$kp" "$BGM" || { echo "::error::$BGM 缺少 $kp"; exit 1; }
+                done
+                grep -q 'DEPENDS:=+kmod-net-llc +kmod-net-802-stp' "$BGM" || { echo "::error::kmod-bridge 未声明 llc/stp 的提供者"; exit 1; }
                 if ! grep -q 'kmod-phylink +kmod-bridge' "$MK_NETDEV"; then
                   sed -i 's#^  DEPENDS:=+kmod-mdio-devres +kmod-net-selftests +kmod-phylink$#  DEPENDS:=+kmod-mdio-devres +kmod-net-selftests +kmod-phylink +kmod-bridge#' "$MK_NETDEV"
                 fi
                 grep -q 'kmod-phylink +kmod-bridge' "$MK_NETDEV" || { echo "::error::netdevices.mk 的 KernelPackage/dsa 未补上 +kmod-bridge"; exit 1; }
-                sed -i '/^CONFIG_PACKAGE_kmod-bridge=/d' .config
-                printf 'CONFIG_PACKAGE_kmod-bridge=m\n' >> .config
-                grep -q '^CONFIG_PACKAGE_kmod-bridge=m' .config || { echo "::error::kmod-bridge 未选中"; exit 1; }
-                echo ">>> kmod-bridge：已声明并提供 bridge.ko；kmod-dsa 的 DEPENDS 已补 +kmod-bridge"
+                for p in kmod-bridge kmod-net-llc kmod-net-802-stp; do
+                  sed -i "/^CONFIG_PACKAGE_${p}=/d" .config
+                  printf 'CONFIG_PACKAGE_%s=m\n' "$p" >> .config
+                  grep -q "^CONFIG_PACKAGE_${p}=m" .config || { echo "::error::$p 未选中"; exit 1; }
+                done
+                echo ">>> kmod-bridge：提供 bridge.ko 并声明 +kmod-net-llc / +kmod-net-802-stp；kmod-dsa 已补 +kmod-bridge"
 
                 # libarc4.ko 只有 kmod-crypto-arc4 提供（crypto.mk: FILES crypto/arc4.ko + lib/crypto/libarc4.ko），
                 # 而 kmod-mppe 的 KernelPackage 没声明 DEPENDS。上一版把它编成内置是错方向：
