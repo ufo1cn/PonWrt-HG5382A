@@ -94,6 +94,55 @@ jobs:
           # 这里不跑 make prereq：此时 .config 还没生成，CI 无 TTY 会进 menuconfig 卡死
           echo ">>> 跳过 make prereq"
 
+      - name: 注入 libffi 包源码（主树与 feeds 都没有，glib2 的硬依赖）
+        working-directory: ./ponwrt
+        run: |
+          set -o pipefail
+          LOGDIR="$PWD/../build_log"
+          mkdir -p "$LOGDIR"
+          # 【根因 run 44236241929 第 13 步原始错误行】
+          #   ::error::工程内找不到 libffi 包源码（package/libs/libffi 或 feeds/packages/libs/libffi）
+          # GitHub API 目录实测：
+          #   * pbs05/ponwrt 的 package/libs 里没有 libffi（有 libusb/libnl/libcap/... 但无 libffi）
+          #   * immortalwrt/packages 的 libs/ 下也没有 libffi（200+ 条目逐个核对无此项）
+          # 而 feeds/packages/libs/glib2 的 DEPENDS 明确写着 +libffi（glib2-core / glib2-gobject 都依赖），
+          # 缺包时 glib2 的 meson 发现 pkg-config 找不到 libffi，就下载 wrapdb 的 libffi-3.5.2
+          # 当私有 subproject 自编，产物只落在 build_dir 内部、不进 staging_dir，
+          # 于是打包报 Package glib2-gobject is missing dependencies for the following libraries: libffi.so.8
+          # （run 44216724172 ponlocal-compile.log 50047-50050）。只写 .config 不够：包不存在 → 没有构建目标。
+          # libffi 是 OpenWrt/ImmortalWrt 主树的核心包（package/libs/libffi，含 Makefile + patches/），
+          # 这里用 sparse checkout 只取该目录（不整树 clone），注入工程后让 defconfig 重扫 package 索引。
+          if [ -f package/libs/libffi/Makefile ]; then
+            echo ">>> package/libs/libffi 已存在，跳过注入"
+          else
+            SRC=""
+            for repo in immortalwrt/immortalwrt openwrt/openwrt; do
+              rm -rf "$RUNNER_TEMP/libffi-src"
+              if ! git clone --depth 1 --filter=blob:none --sparse "https://github.com/${repo}.git" "$RUNNER_TEMP/libffi-src" > "$LOGDIR/libffi-clone.log" 2>&1; then
+                echo "::warning::从 ${repo} clone 失败，继续尝试下一个源"
+                continue
+              fi
+              if ! git -C "$RUNNER_TEMP/libffi-src" sparse-checkout set package/libs/libffi >> "$LOGDIR/libffi-clone.log" 2>&1; then
+                echo "::warning::${repo} sparse-checkout 失败，继续尝试下一个源"
+                continue
+              fi
+              if [ -f "$RUNNER_TEMP/libffi-src/package/libs/libffi/Makefile" ]; then
+                SRC="$RUNNER_TEMP/libffi-src/package/libs/libffi"
+                echo ">>> 已从 ${repo} 取到 libffi 包源码"
+                break
+              fi
+            done
+            [ -n "$SRC" ] || { echo "::error::immortalwrt/openwrt 主树均取不到 package/libs/libffi，尾部："; tail -n 40 "$LOGDIR/libffi-clone.log"; exit 1; }
+            mkdir -p package/libs
+            cp -a "$SRC" package/libs/
+            echo ">>> 已注入 libffi 包源码：$(ls -1 package/libs/libffi)"
+          fi
+          [ -f package/libs/libffi/Makefile ] || { echo "::error::libffi 包源码注入后仍无 package/libs/libffi/Makefile"; exit 1; }
+          grep -q "PKG_NAME:=libffi" package/libs/libffi/Makefile || { echo "::error::注入的 libffi Makefile 不符合预期（PKG_NAME 不是 libffi）"; exit 1; }
+          grep -q "host-build.mk" package/libs/libffi/Makefile || echo "::warning::libffi Makefile 未 include host-build.mk，glib2 的 HOST_BUILD_DEPENDS(libffi/host) 可能落空"
+          echo ">>> libffi 版本：$(grep -m1 '^PKG_VERSION' package/libs/libffi/Makefile)"
+          # 清掉旧的 package 索引，让第 10 步 make defconfig 重新扫描，CONFIG_PACKAGE_libffi 才会是有效符号
+          rm -f tmp/.packageinfo tmp/.packagedeps
       - name: 部署 pon_userspace 到 package/pon-local
         working-directory: ./ponwrt
         run: |
@@ -356,16 +405,16 @@ jobs:
           # package/compile 并行调度下 libffi 排在 glib2 之后，gen-dependencies 查不到 provides。
           # 这里显式先编 libffi，并硬校验 staging 里真的出现 .so 与 .pc。
           LIBFFI_PKG=""
-          for cand in package/libs/libffi package/feeds/packages/libs/libffi package/feeds/packages/libffi; do
+          for cand in package/libs/libffi package/feeds/*/libffi package/feeds/*/libs/libffi feeds/*/*/libffi; do
             if [ -f "$cand/Makefile" ]; then LIBFFI_PKG="$cand"; break; fi
           done
           if [ -z "$LIBFFI_PKG" ]; then
             ./scripts/feeds install -f libffi > "$LOGDIR/feeds-install-libffi.log" 2>&1 || true
-            for cand in package/feeds/packages/libs/libffi package/feeds/packages/libffi package/libs/libffi; do
+            for cand in package/feeds/*/libffi package/feeds/*/libs/libffi package/libs/libffi; do
               if [ -f "$cand/Makefile" ]; then LIBFFI_PKG="$cand"; break; fi
             done
           fi
-          [ -n "$LIBFFI_PKG" ] || { echo "::error::工程内找不到 libffi 包源码（package/libs/libffi 或 feeds/packages/libs/libffi），glib2 会再次自编私有 subproject"; exit 1; }
+                    [ -n "$LIBFFI_PKG" ] || { echo "::error::工程内仍找不到 libffi 包源码（注入步骤应已放入 package/libs/libffi），glib2 会再次自编私有 subproject"; ls -la package/libs 2>/dev/null | head -30; exit 1; }
           echo ">>> libffi 包路径：$LIBFFI_PKG"
           make -j1 V=s "$LIBFFI_PKG/compile" > "$LOGDIR/libffi-compile.log" 2>&1 \
             || { echo "::error::libffi 编译失败，尾部："; tail -n 40 "$LOGDIR/libffi-compile.log"; exit 1; }
