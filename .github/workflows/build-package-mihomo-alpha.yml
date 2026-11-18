@@ -809,6 +809,36 @@ jobs:
                 grep -q 'net/hsr/hsr.ko' "$MK_NETDEV" || { echo "::error::hsr.ko 的归属没写进 netdevices.mk"; exit 1; }
                 grep -q 'CONFIG_HSR' "$MK_NETDEV" || { echo "::error::CONFIG_HSR 没写进 netdevices.mk 的 KCONFIG"; exit 1; }
                 echo ">>> dsa_core.ko 依赖链已选中：kmod-dsa + mdio-devres / net-selftests / phylink / libphy；kmod-dsa 已声明 hsr.ko"
+                # hsr.ko 自身 modinfo 还带 bridge.ko（6.18 的 hsr 引用桥接模块符号），而树内没有 KernelPackage/bridge，
+                # 于是打包 kmod-dsa 时报 Package kmod-dsa is missing dependencies for the following libraries:
+                #   bridge.ko（run 44284266493 第 18 步，build_log/full-build.log 145378-145384）。
+                # 正解同 libarc4：补真实提供者 kmod-bridge（打包 linux-6.18.55/net/bridge/bridge.ko，=m），
+                # 并把 +kmod-bridge 写进 KernelPackage/dsa 的 DEPENDS，让依赖链里真的有 bridge.ko 的 provides。
+                BGM=package/kernel/linux/modules/netdev-bridge.mk
+                if [ ! -f "$BGM" ]; then
+                printf '%s\n' \
+                  'define KernelPackage/bridge' \
+                  '  SUBMENU:=Network Support' \
+                  '  TITLE:=Ethernet Bridging support' \
+                  '  KCONFIG:=CONFIG_BRIDGE' \
+                  '  FILES:= $(LINUX_DIR)/net/bridge/bridge.ko' \
+                  '  AUTOLOAD:=$(call AutoLoad,20,bridge)' \
+                  'endef' \
+                  'define KernelPackage/bridge/description' \
+                  '  Ethernet Bridging（dsa_core.ko / hsr.ko 的运行时依赖）' \
+                  'endef' \
+                  '$(eval $(call KernelPackage,bridge))' \
+                  > "$BGM"
+                fi
+                grep -q 'KernelPackage/bridge' "$BGM" || { echo "::error::$BGM 生成失败"; exit 1; }
+                if ! grep -q 'kmod-phylink +kmod-bridge' "$MK_NETDEV"; then
+                  sed -i 's#^  DEPENDS:=+kmod-mdio-devres +kmod-net-selftests +kmod-phylink$#  DEPENDS:=+kmod-mdio-devres +kmod-net-selftests +kmod-phylink +kmod-bridge#' "$MK_NETDEV"
+                fi
+                grep -q 'kmod-phylink +kmod-bridge' "$MK_NETDEV" || { echo "::error::netdevices.mk 的 KernelPackage/dsa 未补上 +kmod-bridge"; exit 1; }
+                sed -i '/^CONFIG_PACKAGE_kmod-bridge=/d' .config
+                printf 'CONFIG_PACKAGE_kmod-bridge=m\n' >> .config
+                grep -q '^CONFIG_PACKAGE_kmod-bridge=m' .config || { echo "::error::kmod-bridge 未选中"; exit 1; }
+                echo ">>> kmod-bridge：已声明并提供 bridge.ko；kmod-dsa 的 DEPENDS 已补 +kmod-bridge"
 
                 # libarc4.ko 只有 kmod-crypto-arc4 提供（crypto.mk: FILES crypto/arc4.ko + lib/crypto/libarc4.ko），
                 # 而 kmod-mppe 的 KernelPackage 没声明 DEPENDS。上一版把它编成内置是错方向：
@@ -913,22 +943,11 @@ jobs:
                 fi
                 echo ">>> .config.override：$(wc -l < "$KD/.config.override" 2>/dev/null || echo 0) 行"
 
-                # 根因修复（run 44242796149 第 18 步）：
-                #   make[2]: *** [modules/netdevices.mk:721: .../kmod-dsa-6.18.55-r1.apk] Error 1
-                #   Package kmod-dsa is missing dependencies for the following libraries: bridge.ko
-                # dsa_core.ko 的 modinfo depends 里带 bridge.ko，而本树没有 kmod-bridge 包，
-                # 所以 bridge 必须 built-in（=y）：=y 时符号解析在内核本体，不再产生"缺 bridge.ko 提供者"。
-                # .config.override 是内核配置的最后合并层，包 KCONFIG 汇总会把 CONFIG_BRIDGE 抬成 =m，
-                # 因此必须在 override 上再压一次 =y（只改这一层，不动任何校验）。
-                if [ -s "$KD/.config.override" ]; then
-                  sed -i -E '/^(# )?CONFIG_BRIDGE[= ]/d' "$KD/.config.override"
-                  printf 'CONFIG_BRIDGE=y\n' >> "$KD/.config.override"
-                  grep -q '^CONFIG_BRIDGE=y' "$KD/.config.override" \
-                    || { echo "::error::.config.override 里 CONFIG_BRIDGE 未落到 =y"; exit 1; }
-                  echo ">>> .config.override 已锁定 CONFIG_BRIDGE=y（bridge built-in，kmod-dsa 的 bridge.ko 依赖消解）"
-                else
-                  echo "::error::.config.override 不存在，无法锁定 CONFIG_BRIDGE=y"; exit 1
-                fi
+                # 旧做法（往 $KD/.config.override 压 CONFIG_BRIDGE=y）已废弃：该文件每次 Kernel/Configure
+                # 都由 package-metadata.pl kconfig 重新生成（include/kernel-defaults.mk:123-124），写进去必被覆盖，
+                # 这也是 run 44242796149 的修法在 #42 里仍然报 bridge.ko 的原因。
+                # 实测该次内核里 bridge 是模块（否则 hsr.ko 的 modinfo 不会要求 bridge.ko），
+                # 所以改由 kmod-bridge 包真提供 bridge.ko，并已写进 kmod-dsa 的 DEPENDS。
                 if [ ! -s "$KD/.config.override" ]; then
                   echo "::warning::.config.override 生成失败，显式关掉已知无默认值且会 (NEW) 的符号（SPI_MTK_SNFI）兜底"
                   printf '# CONFIG_SPI_MTK_SNFI is not set\n' >> "$CFG"
