@@ -347,6 +347,33 @@ jobs:
           # 先编被选中的 kmod（uvc / bluetooth 系），让 luci-app-camlive 的依赖检查拿得到 .provides
           make -j"$(nproc)" V=s package/kernel/linux/compile > "$LOGDIR/kmod-compile.log" 2>&1 \
             || { echo "::warning::package/kernel/linux/compile 有报错，尾部："; tail -n 40 "$LOGDIR/kmod-compile.log"; }
+          # 【glib2 缺 libffi.so.8 的根因修复】glib2 的 meson 用 pkg-config 找 libffi；
+          # staging 里没有 libffi.pc 时它会下载 wrapdb 的 libffi-3.5.2 私有 subproject 自编，
+          # 产物只落在 glib2 的 build_dir 内部、不进 staging，于是打包报
+          #   Package glib2-gobject is missing dependencies for the following libraries: libffi.so.8
+          # （run 44216724172 第 13 步 ponlocal-compile.log 50047-50050；该日志前 42542 行
+          #   完全没有 libffi 编译记录 → libffi 包从未被编，只写进 .config 不够）。
+          # package/compile 并行调度下 libffi 排在 glib2 之后，gen-dependencies 查不到 provides。
+          # 这里显式先编 libffi，并硬校验 staging 里真的出现 .so 与 .pc。
+          LIBFFI_PKG=""
+          for cand in package/libs/libffi package/feeds/packages/libs/libffi package/feeds/packages/libffi; do
+            if [ -f "$cand/Makefile" ]; then LIBFFI_PKG="$cand"; break; fi
+          done
+          if [ -z "$LIBFFI_PKG" ]; then
+            ./scripts/feeds install -f libffi > "$LOGDIR/feeds-install-libffi.log" 2>&1 || true
+            for cand in package/feeds/packages/libs/libffi package/feeds/packages/libffi package/libs/libffi; do
+              if [ -f "$cand/Makefile" ]; then LIBFFI_PKG="$cand"; break; fi
+            done
+          fi
+          [ -n "$LIBFFI_PKG" ] || { echo "::error::工程内找不到 libffi 包源码（package/libs/libffi 或 feeds/packages/libs/libffi），glib2 会再次自编私有 subproject"; exit 1; }
+          echo ">>> libffi 包路径：$LIBFFI_PKG"
+          make -j1 V=s "$LIBFFI_PKG/compile" > "$LOGDIR/libffi-compile.log" 2>&1 \
+            || { echo "::error::libffi 编译失败，尾部："; tail -n 40 "$LOGDIR/libffi-compile.log"; exit 1; }
+          LIBFFI_SO=$(ls staging_dir/target-*/usr/lib/libffi.so.8* 2>/dev/null | head -1)
+          LIBFFI_PC=$(ls staging_dir/target-*/usr/lib/pkgconfig/libffi.pc staging_dir/target-*/usr/lib/pkgconfig/*/libffi.pc 2>/dev/null | head -1)
+          [ -n "$LIBFFI_SO" ] || { echo "::error::libffi 编译后 staging 仍无 libffi.so.8（glib2-gobject 打包会再次缺 provides）"; exit 1; }
+          [ -n "$LIBFFI_PC" ] || { echo "::error::libffi 编译后 staging 无 libffi.pc（glib2 的 meson 会再次走私有 subproject）"; exit 1; }
+          echo ">>> libffi 已进 staging：$LIBFFI_SO / $LIBFFI_PC"
           # 再编全部选中包。注意不能用 `make package/pon-local/compile`：
           # pon-local 是多包目录（tempinfo/camlive/go2rtc/… 各自 BuildPackage），
           # 该写法在 toplevel.mk 里没有对应规则，实测直接
@@ -424,5 +451,6 @@ jobs:
             build_log/defconfig-2.log
             build_log/ponlocal-compile.log
             build_log/kmod-compile.log
+            build_log/libffi-compile.log
           if-no-files-found: warn
           retention-days: 14
