@@ -437,6 +437,15 @@ jobs:
             # （run 44532267299 第 18 步 full-build.log 末段）——补真正的提供者包，不放宽校验。
             kmod-usb-serial
             kmod-usb-serial-ch341
+            # usbnet.ko 的真实提供者是 kmod-usb-net（modules/usb.mk 的 KernelPackage/usb-net，
+            # FILES=$(LINUX_DIR)/drivers/$(USBNET_DIR)/usbnet.ko），它自己 DEPENDS +kmod-mii。
+            # =m 清单只选 ax88179/rtl8152 而不选提供者时打包报：
+            #   Package kmod-usb-net-asix-ax88179 is missing dependencies for the following libraries: usbnet.ko
+            #   make[2]: *** [modules/usb.mk:1307: .../kmod-usb-net-asix-ax88179-6.18.55-r1.apk] Error 1
+            #   ERROR: package/kernel/linux failed to build
+            # （run 44580286135 第 18 步 full-build.log 148646-148652）——补真正的提供者包，不放宽校验。
+            kmod-usb-net
+            kmod-mii
             kmod-usb-net-rtl8152
             kmod-usb-net-asix-ax88179
             kmod-usb-audio
@@ -1152,6 +1161,15 @@ jobs:
             # （run 44532267299 第 18 步 full-build.log 末段）——补真正的提供者包，不放宽校验。
             kmod-usb-serial
             kmod-usb-serial-ch341
+            # usbnet.ko 的真实提供者是 kmod-usb-net（modules/usb.mk 的 KernelPackage/usb-net，
+            # FILES=$(LINUX_DIR)/drivers/$(USBNET_DIR)/usbnet.ko），它自己 DEPENDS +kmod-mii。
+            # =m 清单只选 ax88179/rtl8152 而不选提供者时打包报：
+            #   Package kmod-usb-net-asix-ax88179 is missing dependencies for the following libraries: usbnet.ko
+            #   make[2]: *** [modules/usb.mk:1307: .../kmod-usb-net-asix-ax88179-6.18.55-r1.apk] Error 1
+            #   ERROR: package/kernel/linux failed to build
+            # （run 44580286135 第 18 步 full-build.log 148646-148652）——补真正的提供者包，不放宽校验。
+            kmod-usb-net
+            kmod-mii
             kmod-usb-net-rtl8152
             kmod-usb-net-asix-ax88179
             kmod-usb-audio
