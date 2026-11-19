@@ -429,6 +429,13 @@ jobs:
             kmod-media-controller
             kmod-video-videobuf2
             kmod-video-uvc
+            # usbserial.ko 的真实提供者是 kmod-usb-serial（ponwrt modules/usb.mk 的 KernelPackage/usb-serial）。
+            # 只选 ch341 不选提供者时打包报：
+            #   Package kmod-usb-serial-ch341 is missing dependencies for the following libraries: usbserial.ko
+            #   make[2]: *** [modules/usb.mk:717: .../kmod-usb-serial-ch341-6.18.55-r1.apk] Error 1
+            #   ERROR: package/kernel/linux failed to build
+            # （run 44532267299 第 18 步 full-build.log 末段）——补真正的提供者包，不放宽校验。
+            kmod-usb-serial
             kmod-usb-serial-ch341
             kmod-usb-net-rtl8152
             kmod-usb-net-asix-ax88179
@@ -1137,6 +1144,13 @@ jobs:
             kmod-media-controller
             kmod-video-videobuf2
             kmod-video-uvc
+            # usbserial.ko 的真实提供者是 kmod-usb-serial（ponwrt modules/usb.mk 的 KernelPackage/usb-serial）。
+            # 只选 ch341 不选提供者时打包报：
+            #   Package kmod-usb-serial-ch341 is missing dependencies for the following libraries: usbserial.ko
+            #   make[2]: *** [modules/usb.mk:717: .../kmod-usb-serial-ch341-6.18.55-r1.apk] Error 1
+            #   ERROR: package/kernel/linux failed to build
+            # （run 44532267299 第 18 步 full-build.log 末段）——补真正的提供者包，不放宽校验。
+            kmod-usb-serial
             kmod-usb-serial-ch341
             kmod-usb-net-rtl8152
             kmod-usb-net-asix-ax88179
