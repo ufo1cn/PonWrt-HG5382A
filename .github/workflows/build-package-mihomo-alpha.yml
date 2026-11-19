@@ -419,6 +419,14 @@ jobs:
             kmod-usb-xhci-hcd
             kmod-usb-xhci-mtk
             kmod-video-core
+            # snd-usb-audio.ko 的 modinfo 依赖 mc.ko（drivers/media/mc/mc.ko），提供者是 kmod-media-controller
+            # （video.mk 的 KernelPackage/media-controller，FILES=$(LINUX_DIR)/drivers/media/mc/mc.ko）。
+            # usb.mk 的 KernelPackage/usb-audio 已经写了 +kmod-media-controller，但本工作流的 =m 清单里没选它，
+            # 提供者没被编出来（staging_dir/.../pkginfo/kmod-media-controller.provides 不存在）→
+            #   Package kmod-usb-audio is missing dependencies for the following libraries: mc.ko
+            #   make[2]: *** [modules/usb.mk:650: .../kmod-usb-audio-6.18.55-r1.apk] Error 1
+            # （run 44497411534 第 18 步 full-build.log 151738-151740）——补选真正的提供者包，不放宽校验。
+            kmod-media-controller
             kmod-video-videobuf2
             kmod-video-uvc
             kmod-usb-serial-ch341
@@ -1119,6 +1127,14 @@ jobs:
             kmod-usb-xhci-hcd
             kmod-usb-xhci-mtk
             kmod-video-core
+            # snd-usb-audio.ko 的 modinfo 依赖 mc.ko（drivers/media/mc/mc.ko），提供者是 kmod-media-controller
+            # （video.mk 的 KernelPackage/media-controller，FILES=$(LINUX_DIR)/drivers/media/mc/mc.ko）。
+            # usb.mk 的 KernelPackage/usb-audio 已经写了 +kmod-media-controller，但本工作流的 =m 清单里没选它，
+            # 提供者没被编出来（staging_dir/.../pkginfo/kmod-media-controller.provides 不存在）→
+            #   Package kmod-usb-audio is missing dependencies for the following libraries: mc.ko
+            #   make[2]: *** [modules/usb.mk:650: .../kmod-usb-audio-6.18.55-r1.apk] Error 1
+            # （run 44497411534 第 18 步 full-build.log 151738-151740）——补选真正的提供者包，不放宽校验。
+            kmod-media-controller
             kmod-video-videobuf2
             kmod-video-uvc
             kmod-usb-serial-ch341
