@@ -854,6 +854,28 @@ jobs:
                 grep -q '^CONFIG_PACKAGE_kmod-bridge=m' .config || { echo "::error::kmod-bridge 未选中"; exit 1; }
                 echo ">>> kmod-bridge：一个包提供 bridge.ko + llc.ko + stp.ko；kmod-dsa 已补 +kmod-bridge"
 
+                # 同一根因的第二个受害者：netfilter.mk 里两个 bridge 子模块也没声明 bridge.ko 的提供者。
+                # kmod-nf-conntrack-bridge 打包 nf_conntrack_bridge.ko，kmod-br-netfilter 打包 br_netfilter.ko，
+                # 两者 modinfo 都带 bridge.ko，而 .mk 里只写了 +kmod-nf-conntrack / +kmod-ipt-core →
+                #   Package kmod-nf-conntrack-bridge is missing dependencies for the following libraries: bridge.ko
+                # （run 44436817777 第 18 步，build_log/full-build.log 第 145984-145985 行）。
+                # 修法与 kmod-dsa 完全一致：把 +kmod-bridge 写进这两个 KernelPackage 的 DEPENDS；
+                # 用 awk 限定在块内替换，避免误伤文件里其它同名的 DEPENDS 行，不放宽任何校验。
+                NFMK=package/kernel/linux/modules/netfilter.mk
+                if [ -f "$NFMK" ] && ! grep -q 'DEPENDS:=+kmod-nf-conntrack +kmod-bridge' "$NFMK"; then
+                  awk '
+                    /^define KernelPackage\/br-netfilter$/ { inb=1 }
+                    /^define KernelPackage\/nf-conntrack-bridge$/ { inb=1 }
+                    inb && /^  DEPENDS:=/ { print $0 " +kmod-bridge"; next }
+                    inb && /^endef$/ { inb=0 }
+                    { print }
+                  ' "$NFMK" > "$NFMK.new" && mv "$NFMK.new" "$NFMK"
+                fi
+                grep -q 'DEPENDS:=+kmod-nf-conntrack +kmod-bridge' "$NFMK" || { echo "::error::netfilter.mk 的 KernelPackage/nf-conntrack-bridge 未补上 +kmod-bridge"; exit 1; }
+                grep -q 'DEPENDS:=+kmod-ipt-core +kmod-bridge' "$NFMK" || { echo "::error::netfilter.mk 的 KernelPackage/br-netfilter 未补上 +kmod-bridge"; exit 1; }
+                echo ">>> kmod-nf-conntrack-bridge / kmod-br-netfilter 已声明 +kmod-bridge（bridge.ko 的提供者）"
+
+
                 # libarc4.ko 只有 kmod-crypto-arc4 提供（crypto.mk: FILES crypto/arc4.ko + lib/crypto/libarc4.ko），
                 # 而 kmod-mppe 的 KernelPackage 没声明 DEPENDS。上一版把它编成内置是错方向：
                 # 内置后 lib/crypto/libarc4.ko 根本不会生成，ppp_mppe.ko 的 modinfo 依赖照样要求有包提供它，
