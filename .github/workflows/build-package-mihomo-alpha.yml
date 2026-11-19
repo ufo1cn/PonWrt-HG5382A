@@ -866,6 +866,7 @@ jobs:
                   awk '
                     /^define KernelPackage\/br-netfilter$/ { inb=1 }
                     /^define KernelPackage\/nf-conntrack-bridge$/ { inb=1 }
+                    /^define KernelPackage\/nft-bridge$/ { inb=1 }
                     inb && /^  DEPENDS:=/ { print $0 " +kmod-bridge"; next }
                     inb && /^endef$/ { inb=0 }
                     { print }
@@ -873,7 +874,8 @@ jobs:
                 fi
                 grep -q 'DEPENDS:=+kmod-nf-conntrack +kmod-bridge' "$NFMK" || { echo "::error::netfilter.mk 的 KernelPackage/nf-conntrack-bridge 未补上 +kmod-bridge"; exit 1; }
                 grep -q 'DEPENDS:=+kmod-ipt-core +kmod-bridge' "$NFMK" || { echo "::error::netfilter.mk 的 KernelPackage/br-netfilter 未补上 +kmod-bridge"; exit 1; }
-                echo ">>> kmod-nf-conntrack-bridge / kmod-br-netfilter 已声明 +kmod-bridge（bridge.ko 的提供者）"
+                grep -q 'DEPENDS:=+kmod-nft-core +kmod-bridge' "$NFMK" || { echo "::error::netfilter.mk 的 KernelPackage/nft-bridge 未补上 +kmod-bridge"; exit 1; }
+                echo ">>> kmod-nf-conntrack-bridge / kmod-br-netfilter / kmod-nft-bridge 已声明 +kmod-bridge（bridge.ko 的提供者）"
 
 
                 # libarc4.ko 只有 kmod-crypto-arc4 提供（crypto.mk: FILES crypto/arc4.ko + lib/crypto/libarc4.ko），
