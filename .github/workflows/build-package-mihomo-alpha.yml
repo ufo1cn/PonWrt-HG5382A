@@ -585,6 +585,15 @@ jobs:
             lua5.3
             liblua5.3
             libyaml
+            # zerotier 的 ELF 依赖 libminiupnpc.so.21 / libnatpmp.so.1（run 44801228428 第 19 步）：
+            #   Package zerotier is missing dependencies for the following libraries:
+            #   libminiupnpc.so.21 / libnatpmp.so.1
+            # 这两个库被当成依赖链编译了（InstallDev 进 staging、链接成功），但手写 .config
+            # 没有 CONFIG_PACKAGE_libminiupnpc / libnatpmp，package-pack.mk 里 PACK 目标按
+            # CONFIG_PACKAGE_$(1) 门控 → 只写了 .built/.installed，没打 apk、没写 provides。
+            # 这里显式选上真实提供者包（包名就是 libminiupnpc / libnatpmp），不放宽校验。
+            libnatpmp
+            libminiupnpc
             zerotier
             luci-app-zerotier
             tailscale
@@ -1199,14 +1208,21 @@ jobs:
             exit 1
           fi
           echo ">>> 内核编译完成，Module.symvers 行数：$(wc -l < "$KD/Module.symvers" 2>/dev/null || echo 0)"
-          # package/compile 是多目标并行：被依赖的库包（alsa-lib）的 .provides 由它自己的 PACK 目标写出，
-          # 并行时可能在 alsa-utils 的 CheckDependencies 之后才写，先单独串行编一次库包。
-          if grep -qE "^CONFIG_PACKAGE_alsa-lib=[my]$" .config; then
-            echo ">>> 预编 alsa-lib（保证 libasound.so.2 / libatopology.so.2 的 provides 先就位）"
-            make -j1 V=s package/feeds/packages/alsa-lib/compile 2>&1 | tee ../build_log/prelib-alsa-lib.log
-          else
-            echo "::warning::.config 未选 alsa-lib，跳过预编"
-          fi
+          # package/compile 是多目标并行：被依赖的库包的 .provides 由它自己的 PACK 目标写出，
+          # 并行时可能在依赖方的 CheckDependencies 之后才写，先按顺序串行编一次提供者库包。
+          #   alsa-lib   → libasound.so.2 / libatopology.so.2（alsa-utils 依赖）
+          #   libnatpmp  → libnatpmp.so.1 / miniupnpc → libminiupnpc.so.21（zerotier 依赖）
+          # run 44801228428（#54）：后两者被当依赖编了 InstallDev 却因 .config 没选包而不出 apk，
+          # zerotier 打包时报 missing dependencies —— 已同时补进 pkg_list，这里保证先落地。
+          for spec in "alsa-lib:alsa-lib" "libnatpmp:libnatpmp" "miniupnpc:libminiupnpc"; do
+            pdir="${spec%%:*}"; pkg="${spec##*:}"
+            if grep -qE "^CONFIG_PACKAGE_${pkg}=[my]$" .config; then
+              echo ">>> 预编 ${pkg}（${pdir}，保证其 .apk 与 .provides 先就位）"
+              make -j1 V=s "package/feeds/packages/${pdir}/compile" 2>&1 | tee "../build_log/prelib-${pkg}.log"
+            else
+              echo "::warning::.config 未选 ${pkg}，跳过预编"
+            fi
+          done
           make WARN_RECURSIVE_DEP=1 package/compile -j"$(nproc)" V=s 2>&1 | tee ../build_log/full-build.log
           echo ">>> package/compile 执行结束"
 
@@ -1349,6 +1365,15 @@ jobs:
             luci-app-ddns
             ddns-scripts
             # mihomo-meta 与 mihomo-alpha 互斥（都 PROVIDES:=mihomo），本工作流用 alpha
+            # zerotier 的 ELF 依赖 libminiupnpc.so.21 / libnatpmp.so.1（run 44801228428 第 19 步）：
+            #   Package zerotier is missing dependencies for the following libraries:
+            #   libminiupnpc.so.21 / libnatpmp.so.1
+            # 这两个库被当成依赖链编译了（InstallDev 进 staging、链接成功），但手写 .config
+            # 没有 CONFIG_PACKAGE_libminiupnpc / libnatpmp，package-pack.mk 里 PACK 目标按
+            # CONFIG_PACKAGE_$(1) 门控 → 只写了 .built/.installed，没打 apk、没写 provides。
+            # 这里显式选上真实提供者包（包名就是 libminiupnpc / libnatpmp），不放宽校验。
+            libnatpmp
+            libminiupnpc
             zerotier
             luci-app-zerotier
             tailscale
