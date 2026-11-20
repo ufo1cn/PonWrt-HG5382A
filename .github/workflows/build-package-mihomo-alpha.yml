@@ -380,6 +380,62 @@ jobs:
       - name: 批量设置目标包为 =m
         working-directory: ./ponwrt
         run: |
+          # 【nfs-kernel-server 缺 ELF 库提供者】run 44675098193 第 18 步实测原始报错：
+          #   Package nfs-kernel-server is missing dependencies for the following libraries:
+          #   libnl-3.so.200 / libnl-genl-3.so.200 / libreadline.so.8 / libtirpc.so.3 / libxml2.so.16
+          #   make[2]: *** [.../nfs-kernel-server-2.9.1-r2.apk] Error 1
+          # 提供者包（上游 Makefile 核实）：libnl-core / libnl-genl / libreadline / libtirpc / libxml2。
+          # 两件事都要做，缺一仍报同样的错：
+          #   1) 打包检查是按「本包 DEPENDS 里有没有声明提供者」判定的 → 补进 DEPENDS；
+          #   2) 提供者必须在 .config 里被选中，否则 staging_dir/.../pkginfo 里没有 provides。
+          NS=feeds/packages/net/nfs-kernel-server/Makefile
+          if [ -f "$NS" ]; then
+            python3 - "$NS" <<'PY'
+          import io, sys
+          p = sys.argv[1]
+          ADD = "+libnl-core +libnl-genl +libreadline +libtirpc +libxml2"
+          lines = io.open(p, encoding='utf-8').read().splitlines()
+          out, i, n = [], 0, len(lines)
+          targets = {"define Package/nfs-kernel-server", "define Package/nfs-kernel-server/Default"}
+          changed = []
+          while i < n:
+              st = lines[i].strip()
+              if st in targets:
+                  block = [lines[i]]
+                  i += 1
+                  while i < n and not lines[i].strip().startswith('endef'):
+                      block.append(lines[i])
+                      i += 1
+                  if i < n:
+                      block.append(lines[i])
+                      i += 1
+                  if 'libnl-core' not in "\n".join(block):
+                      di = None
+                      for k, b in enumerate(block):
+                          if b.strip().startswith('DEPENDS'):
+                              di = k
+                              break
+                      if di is not None:
+                          block[di] = block[di].rstrip() + " " + ADD
+                      else:
+                          ins = 1
+                          for k, b in enumerate(block):
+                              if '$(call Package/nfs-kernel-server/Default)' in b:
+                                  ins = k + 1
+                                  break
+                          block.insert(ins, "\tDEPENDS+=" + ADD)
+                      changed.append(st)
+                  out.extend(block)
+                  continue
+              out.append(lines[i])
+              i += 1
+          io.open(p, 'w', encoding='utf-8', newline='\n').write("\n".join(out) + "\n")
+          print("nfs-kernel-server DEPENDS 已补块: %s" % (changed or "none(已补过)"))
+          PY
+          else
+            echo "::warning::未找到 $NS，nfs-kernel-server 的库依赖无法补声明"
+          fi
+
           set_pkg_m() {
             local pkg="$1"
             sed -i "/^CONFIG_PACKAGE_${pkg}/d" .config
@@ -406,6 +462,12 @@ jobs:
             nfs-kernel-server-utils
             nfs-utils
             nfs-utils-libs
+            # nfs-kernel-server 的 ELF 依赖提供者（缺失时报 missing dependencies，见本节开头注释）
+            libnl-core
+            libnl-genl
+            libreadline
+            libtirpc
+            libxml2
             kmod-fs-nfs-common
             kmod-fs-nfs
             kmod-fs-nfs-v4
