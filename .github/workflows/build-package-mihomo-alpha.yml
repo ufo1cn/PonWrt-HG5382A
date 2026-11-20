@@ -38,7 +38,7 @@
 #   同一份 .config 里只能存在一个，所以拆成两个工作流，各自产出完整的一套 apk，
 #   你按需要装哪一版就只跑哪一条，装错版本会导致 mihomo 同名文件冲突。
 # ==============================================================================
-name: 【独立包编译·mihomo-alpha】PonWrt HG5585F-CT 全部可选IPK（编译成功后预发布｜防循环依赖+防Tag重复）
+name: 【独立包编译·仅 mihomo-alpha】PonWrt HG5585F-CT mihomo-alpha（编译成功后预发布｜防Tag重复）
 on:
   workflow_dispatch:
 permissions:
@@ -49,12 +49,12 @@ concurrency:
   cancel-in-progress: true
 jobs:
   build_ipk:
-    name: 编译HG5585F-CT全部独立插件包（mihomo-alpha 变体）
+    name: 只编译 HG5585F-CT 的 mihomo-alpha 独立包
     runs-on: ubuntu-24.04
     timeout-minutes: 320
     env:
       SOURCE_REF: d01485cc909fac33144dc07fa9dc05ed4455380f
-      TAR_NAME: HG5585F-CT-all-ipk-mihomo-alpha.tar.zst
+      TAR_NAME: HG5585F-CT-mihomo-alpha.tar.zst
       SHA_NAME: SHA256SUMS
       # 与 build-hg5585f.yml 保持同一套内核配置：万一在这里补编 kmod，
       # 生成的 .ko 的 vermagic 才会和固件匹配，装得上也加载得上。
@@ -443,170 +443,10 @@ jobs:
           }
 
           pkg_list=(
-            luci-app-iptv
-            luci-app-airoha-npu
-            luci-app-blueaudio
-            luci-app-btsp
-            luci-app-camlive
-            gensio
-            ser2net
-            # alsa-utils 的 ELF 依赖由 alsa-lib 包提供（libasound.so.2 / libatopology.so.2）。
-            # package-pack.mk 的 CheckDependencies 读的是 $(PKG_INFO_DIR)/alsa-lib.provides，
-            # 只有 alsa-lib 的包真的被打出来才有这份文件（仅 InstallDev 进 staging 不算）→
-            #   Package alsa-utils is missing dependencies for the following libraries:
-            #   libasound.so.2 / libatopology.so.2（alpha run 44763139999 第 19 步 full-build.log 174468-174470）
-            # 补真正的提供者包，不改校验。
-            alsa-lib
-            luci-app-ser2net
-            samba4
-            luci-app-samba4
-            autosamba
-            ksmbd-tools
-            luci-app-ksmbd
-            avahi-daemon
-            luci-app-avahi
-            nfs-kernel-server
-            nfs-kernel-server-utils
-            nfs-utils
-            nfs-utils-libs
-            # nfs-kernel-server 的 ELF 依赖提供者（缺失时报 missing dependencies，见本节开头注释）
-            libnl-core
-            libnl-genl
-            libreadline
-            libtirpc
-            libxml2
-            kmod-fs-nfs-common
-            kmod-fs-nfs
-            kmod-fs-nfs-v4
-            kmod-fs-nfsd
-            kmod-rtw88
-            kmod-rtw88-usb
-            kmod-rtw88-8822c
-            kmod-rtw88-8821c
-            kmod-rtw88-8822cu
-            kmod-rtw88-8821cu
-            # kmod-rtw88-8723du（USB 版 rtw88_8723du.ko）链接依赖 rtw88_8723d.ko，
-            # 该 .ko 由 PCI 变体 kmod-rtw88-8723d 提供；提供者没被选中时 mac80211 打包阶段报
-            #   Package kmod-rtw88-8723du is missing dependencies for the following libraries: rtw88_8723d.ko
-            #   make[2]: *** [Makefile:408: .../kmod-rtw88-8723du-6.18.55.7.2-r5.apk] Error 1
-            #   ERROR: package/kernel/mac80211 failed to build (build variant: regular).
-            # （run 43891442354 第 18 步 full-build.log 172533-172538）——补真正的提供者。
-            # kmod-rtw88-8723d 的 Makefile 声明 DEPENDS+=+kmod-rtw88-8723x（realtek.mk 334-341 行，产出 rtw88_8723x.ko），
-            # 不选提供者时打包报：Package kmod-rtw88-8723d is missing dependencies for the following libraries:
-            #   rtw88_8723x.ko / rtw88_core.ko → make[2]: *** [Makefile:408: .../kmod-rtw88-8723d-6.18.55.7.2-r5.apk] Error 1
-            #   ERROR: package/kernel/mac80211 failed to build (build variant: regular)
-            # （bpkg run 43948046310 第 18 步 full-build.log 180151-180157）——补 rtw88_8723x.ko 的真实提供者。
-            kmod-rtw88-8723x
-            kmod-rtw88-8723d
-            kmod-rtw88-8723du
-            kmod-rtl8xxxu
-            # kmod-rtl8192cu 的 rtl8192cu.ko 在 backports 7.2 里需要 RTLWIFI / RTLWIFI_USB /
-            # RTL8192C_COMMON 同时开（mac80211 的 config_package() 只从 CONFIG_PACKAGE_kmod-*
-            # 推符号，手写 .config 不会 select 依赖）。提供者没被选中时 backports 里 RTL8192CU
-            # 直接不可用，打包阶段报：
-            #   ERROR: module '.../rtlwifi/rtl8192cu/rtl8192cu.ko' is missing.
-            #   ERROR: package/kernel/mac80211 failed to build (build variant: regular)
-            # （alpha run 44763139999 第 19 步 full-build.log 174528-174532）——补真实提供者。
-            kmod-rtlwifi
-            kmod-rtlwifi-usb
-            kmod-rtl8192c-common
-            kmod-rtl8192cu
-            kmod-usb-xhci-hcd
-            kmod-usb-xhci-mtk
-            kmod-video-core
-            # snd-usb-audio.ko 的 modinfo 依赖 mc.ko（drivers/media/mc/mc.ko），提供者是 kmod-media-controller
-            # （video.mk 的 KernelPackage/media-controller，FILES=$(LINUX_DIR)/drivers/media/mc/mc.ko）。
-            # usb.mk 的 KernelPackage/usb-audio 已经写了 +kmod-media-controller，但本工作流的 =m 清单里没选它，
-            # 提供者没被编出来（staging_dir/.../pkginfo/kmod-media-controller.provides 不存在）→
-            #   Package kmod-usb-audio is missing dependencies for the following libraries: mc.ko
-            #   make[2]: *** [modules/usb.mk:650: .../kmod-usb-audio-6.18.55-r1.apk] Error 1
-            # （run 44497411534 第 18 步 full-build.log 151738-151740）——补选真正的提供者包，不放宽校验。
-            kmod-media-controller
-            kmod-video-videobuf2
-            # videobuf2-vmalloc.ko 的真实提供者是 kmod-video-vmalloc（video.mk 的 KernelPackage/video-vmalloc，
-            # FILES=$(LINUX_DIR)/drivers/media/common/videobuf2/videobuf2-vmalloc.ko）。
-            # usb.mk 的 KernelPackage/video-uvc 已写 +kmod-video-vmalloc，但 =m 清单里没选提供者，
-            # 提供者没被编出来（pkginfo/kmod-video-vmalloc.provides 不存在）→ 打包报：
-            #   Package kmod-video-uvc is missing dependencies for the following libraries: videobuf2-vmalloc.ko
-            #   make[2]: *** [modules/video.mk:1155: .../kmod-video-uvc-6.18.55-r1.apk] Error 1
-            #   ERROR: package/kernel/linux failed to build（run 44617406265 第 18 步 full-build.log 152070-152075）
-            # ——补选真正的提供者包，不放宽校验。
-            kmod-video-vmalloc
-            kmod-video-uvc
-            # usbserial.ko 的真实提供者是 kmod-usb-serial（ponwrt modules/usb.mk 的 KernelPackage/usb-serial）。
-            # 只选 ch341 不选提供者时打包报：
-            #   Package kmod-usb-serial-ch341 is missing dependencies for the following libraries: usbserial.ko
-            #   make[2]: *** [modules/usb.mk:717: .../kmod-usb-serial-ch341-6.18.55-r1.apk] Error 1
-            #   ERROR: package/kernel/linux failed to build
-            # （run 44532267299 第 18 步 full-build.log 末段）——补真正的提供者包，不放宽校验。
-            kmod-usb-serial
-            kmod-usb-serial-ch341
-            # usbnet.ko 的真实提供者是 kmod-usb-net（modules/usb.mk 的 KernelPackage/usb-net，
-            # FILES=$(LINUX_DIR)/drivers/$(USBNET_DIR)/usbnet.ko），它自己 DEPENDS +kmod-mii。
-            # =m 清单只选 ax88179/rtl8152 而不选提供者时打包报：
-            #   Package kmod-usb-net-asix-ax88179 is missing dependencies for the following libraries: usbnet.ko
-            #   make[2]: *** [modules/usb.mk:1307: .../kmod-usb-net-asix-ax88179-6.18.55-r1.apk] Error 1
-            #   ERROR: package/kernel/linux failed to build
-            # （run 44580286135 第 18 步 full-build.log 148646-148652）——补真正的提供者包，不放宽校验。
-            kmod-usb-net
-            kmod-mii
-            kmod-usb-net-rtl8152
-            kmod-usb-net-asix-ax88179
-            kmod-usb-audio
-            kmod-sound-core
-            audio-support
-            camlive
-            go2rtc
-            luci-app-go2rtc
-            ffmpeg
-            libx264
-            libopus
-            alsa-utils
-            luci-compat
-            luci-lua-runtime
-            lsblk
-            sing-box
-            luci-app-homeproxy
-            libcronet
+            # 用户 2026-11-21 明确要求：本工作流只编 mihomo-alpha，不再编其它插件包。
+            # mihomo-alpha 的运行期依赖（libc / ca-bundle / ip-full / kmod-tun / kmod-inet-diag）
+            # 已由固件 configs/an7581.config + configs/release.config 以 =y 内置，无需在此重编。
             mihomo-alpha
-            nikki
-            luci-app-nikki
-            luci-i18n-nikki-zh-cn
-            omcproxy
-            luci-app-omcproxy
-            luci-app-ttyd
-            ttyd
-            usbutils
-            libusb-1.0
-            libudev-zero
-            luci-theme-argon
-            luci-app-ddns
-            ddns-scripts
-            lua5.3
-            liblua5.3
-            libyaml
-            # zerotier 的 ELF 依赖 libminiupnpc.so.21 / libnatpmp.so.1（run 44801228428 第 19 步）：
-            #   Package zerotier is missing dependencies for the following libraries:
-            #   libminiupnpc.so.21 / libnatpmp.so.1
-            # 这两个库被当成依赖链编译了（InstallDev 进 staging、链接成功），但手写 .config
-            # 没有 CONFIG_PACKAGE_libminiupnpc / libnatpmp，package-pack.mk 里 PACK 目标按
-            # CONFIG_PACKAGE_$(1) 门控 → 只写了 .built/.installed，没打 apk、没写 provides。
-            # 这里显式选上真实提供者包（包名就是 libminiupnpc / libnatpmp），不放宽校验。
-            libnatpmp
-            libminiupnpc
-            zerotier
-            luci-app-zerotier
-            tailscale
-            luci-app-tailscale
-            wireguard
-            luci-proto-wireguard
-            kmod-wireguard
-            nebula
-            luci-proto-nebula
-            n2n
-            luci-app-n2n
-            frpc
-            luci-app-frpc
           )
 
           for p in "${pkg_list[@]}"; do
@@ -662,6 +502,18 @@ jobs:
           echo ">>> NFS kmod 包锁定 =y：kmod-fs-nfs-common / kmod-fs-nfs / kmod-fs-nfs-v4 / kmod-fs-nfsd"
           echo ">>> 所有包设为模块，依赖解析完成"
 
+          # 【只编 mihomo-alpha】清掉其它所有 =m 包选择：本工作流不再编译别的包。
+          # 保留固件 config 里的 =y（构建基础设施/toolchain 需要），只裁 =m。
+          awk -v keep="mihomo-alpha" '
+            /^CONFIG_PACKAGE_[A-Za-z0-9_.+-]+=m$/ {
+              pkg=$0; sub(/^CONFIG_PACKAGE_/, "", pkg); sub(/=m$/, "", pkg)
+              if (pkg != keep) { print "prune =m: " pkg > "/dev/stderr"; next }
+            }
+            { print }
+          ' .config > .config.pruned && mv -f .config.pruned .config
+          grep -qxF "CONFIG_PACKAGE_mihomo-alpha=m" .config || { echo "::error::.config 里没有 CONFIG_PACKAGE_mihomo-alpha=m"; exit 1; }
+          echo ">>> .config 已收敛：只剩 mihomo-alpha 为 =m"
+
       - name: 下载源码包
         working-directory: ./ponwrt
         run: |
@@ -672,7 +524,7 @@ jobs:
           make download -j1 V=s || { echo "::warning::仍有下载失败"; }
           find dl -type f -size -1024c ! -path 'dl/go-mod-cache/*' -delete
 
-      - name: 批量编译全部模块 package/compile
+      - name: 只编译 mihomo-alpha（包目录级目标）
         working-directory: ./ponwrt
         run: |
           export GOPROXY=https://goproxy.cn,https://goproxy.io,direct
@@ -687,6 +539,10 @@ jobs:
           #  3) kmod 编译还要内核 generated/ 头文件（如 generated/rq-offsets.h），必须用交叉工具链跑 modules_prepare。
           LOGDIR="$PWD/../build_log"
           mkdir -p "$LOGDIR"
+          # 【只编 mihomo-alpha】mihomo 是纯 Go 二进制，不含 kmod、不读内核头文件；
+          # 整段内核 prepare/olddefconfig/6 轮编译/modpost 对本工作流纯属浪费，直接跳过。
+          SKIP_KERNEL=1
+          if [ "$SKIP_KERNEL" != "1" ]; then
           TC_BIN=$(ls -d "$PWD"/staging_dir/toolchain-*/bin 2>/dev/null | head -1)
           CROSS="aarch64-openwrt-linux-musl-"
           [ -n "$TC_BIN" ] && export PATH="$TC_BIN:$PWD/staging_dir/host/bin:$PATH"
@@ -1208,185 +1064,24 @@ jobs:
             exit 1
           fi
           echo ">>> 内核编译完成，Module.symvers 行数：$(wc -l < "$KD/Module.symvers" 2>/dev/null || echo 0)"
-          # package/compile 是多目标并行：被依赖的库包的 .provides 由它自己的 PACK 目标写出，
-          # 并行时可能在依赖方的 CheckDependencies 之后才写，先按顺序串行编一次提供者库包。
-          #   alsa-lib   → libasound.so.2 / libatopology.so.2（alsa-utils 依赖）
-          #   libnatpmp  → libnatpmp.so.1 / miniupnpc → libminiupnpc.so.21（zerotier 依赖）
-          # run 44801228428（#54）：后两者被当依赖编了 InstallDev 却因 .config 没选包而不出 apk，
-          # zerotier 打包时报 missing dependencies —— 已同时补进 pkg_list，这里保证先落地。
-          for spec in "alsa-lib:alsa-lib" "libnatpmp:libnatpmp" "miniupnpc:libminiupnpc"; do
-            pdir="${spec%%:*}"; pkg="${spec##*:}"
-            if grep -qE "^CONFIG_PACKAGE_${pkg}=[my]$" .config; then
-              echo ">>> 预编 ${pkg}（${pdir}，保证其 .apk 与 .provides 先就位）"
-              make -j1 V=s "package/feeds/packages/${pdir}/compile" 2>&1 | tee "../build_log/prelib-${pkg}.log"
-            else
-              echo "::warning::.config 未选 ${pkg}，跳过预编"
-            fi
-          done
-          make WARN_RECURSIVE_DEP=1 package/compile -j"$(nproc)" V=s 2>&1 | tee ../build_log/full-build.log
-          echo ">>> package/compile 执行结束"
+          fi
+          # 【只编 mihomo-alpha】用包目录级目标，避免 package/compile 把 .config 里所有选中的
+          # 包（固件 =y 那一大套）都编一遍。目录级目标会自动带上 PKG_BUILD_DEPENDS（golang/host 等）。
+          MH_DIR=$(ls -d package/feeds/*/mihomo 2>/dev/null | head -1)
+          [ -n "$MH_DIR" ] || { echo "::error::未找到 mihomo 包目录（package/feeds/*/mihomo）"; ls -d package/feeds/*/mihomo* 2>/dev/null || true; exit 1; }
+          echo ">>> 只编译：$MH_DIR（mihomo-alpha 变体）"
+          make WARN_RECURSIVE_DEP=1 -j"$(nproc)" V=s "$MH_DIR/compile" 2>&1 | tee ../build_log/full-build.log
+          echo ">>> mihomo-alpha 编译结束"
 
       - name: 收集全部IPK
         working-directory: ./ponwrt
         run: |
           mkdir -p ../ipk_out
           pkg_list=(
-            luci-app-iptv
-            luci-app-airoha-npu
-            luci-app-blueaudio
-            luci-app-btsp
-            luci-app-camlive
-            gensio
-            ser2net
-            # alsa-utils 的 ELF 依赖由 alsa-lib 包提供（libasound.so.2 / libatopology.so.2）。
-            # package-pack.mk 的 CheckDependencies 读的是 $(PKG_INFO_DIR)/alsa-lib.provides，
-            # 只有 alsa-lib 的包真的被打出来才有这份文件（仅 InstallDev 进 staging 不算）→
-            #   Package alsa-utils is missing dependencies for the following libraries:
-            #   libasound.so.2 / libatopology.so.2（alpha run 44763139999 第 19 步 full-build.log 174468-174470）
-            # 补真正的提供者包，不改校验。
-            alsa-lib
-            luci-app-ser2net
-            samba4
-            luci-app-samba4
-            autosamba
-            ksmbd-tools
-            luci-app-ksmbd
-            avahi-daemon
-            luci-app-avahi
-            nfs-kernel-server
-            nfs-kernel-server-utils
-            nfs-utils
-            nfs-utils-libs
-            kmod-fs-nfs-common
-            kmod-fs-nfs
-            kmod-fs-nfs-v4
-            kmod-fs-nfsd
-            kmod-rtw88
-            kmod-rtw88-usb
-            kmod-rtw88-8822c
-            kmod-rtw88-8821c
-            kmod-rtw88-8822cu
-            kmod-rtw88-8821cu
-            # kmod-rtw88-8723du（USB 版 rtw88_8723du.ko）链接依赖 rtw88_8723d.ko，
-            # 该 .ko 由 PCI 变体 kmod-rtw88-8723d 提供；提供者没被选中时 mac80211 打包阶段报
-            #   Package kmod-rtw88-8723du is missing dependencies for the following libraries: rtw88_8723d.ko
-            #   make[2]: *** [Makefile:408: .../kmod-rtw88-8723du-6.18.55.7.2-r5.apk] Error 1
-            #   ERROR: package/kernel/mac80211 failed to build (build variant: regular).
-            # （run 43891442354 第 18 步 full-build.log 172533-172538）——补真正的提供者。
-            # kmod-rtw88-8723d 的 Makefile 声明 DEPENDS+=+kmod-rtw88-8723x（realtek.mk 334-341 行，产出 rtw88_8723x.ko），
-            # 不选提供者时打包报：Package kmod-rtw88-8723d is missing dependencies for the following libraries:
-            #   rtw88_8723x.ko / rtw88_core.ko → make[2]: *** [Makefile:408: .../kmod-rtw88-8723d-6.18.55.7.2-r5.apk] Error 1
-            #   ERROR: package/kernel/mac80211 failed to build (build variant: regular)
-            # （bpkg run 43948046310 第 18 步 full-build.log 180151-180157）——补 rtw88_8723x.ko 的真实提供者。
-            kmod-rtw88-8723x
-            kmod-rtw88-8723d
-            kmod-rtw88-8723du
-            kmod-rtl8xxxu
-            # kmod-rtl8192cu 的 rtl8192cu.ko 在 backports 7.2 里需要 RTLWIFI / RTLWIFI_USB /
-            # RTL8192C_COMMON 同时开（mac80211 的 config_package() 只从 CONFIG_PACKAGE_kmod-*
-            # 推符号，手写 .config 不会 select 依赖）。提供者没被选中时 backports 里 RTL8192CU
-            # 直接不可用，打包阶段报：
-            #   ERROR: module '.../rtlwifi/rtl8192cu/rtl8192cu.ko' is missing.
-            #   ERROR: package/kernel/mac80211 failed to build (build variant: regular)
-            # （alpha run 44763139999 第 19 步 full-build.log 174528-174532）——补真实提供者。
-            kmod-rtlwifi
-            kmod-rtlwifi-usb
-            kmod-rtl8192c-common
-            kmod-rtl8192cu
-            kmod-usb-xhci-hcd
-            kmod-usb-xhci-mtk
-            kmod-video-core
-            # snd-usb-audio.ko 的 modinfo 依赖 mc.ko（drivers/media/mc/mc.ko），提供者是 kmod-media-controller
-            # （video.mk 的 KernelPackage/media-controller，FILES=$(LINUX_DIR)/drivers/media/mc/mc.ko）。
-            # usb.mk 的 KernelPackage/usb-audio 已经写了 +kmod-media-controller，但本工作流的 =m 清单里没选它，
-            # 提供者没被编出来（staging_dir/.../pkginfo/kmod-media-controller.provides 不存在）→
-            #   Package kmod-usb-audio is missing dependencies for the following libraries: mc.ko
-            #   make[2]: *** [modules/usb.mk:650: .../kmod-usb-audio-6.18.55-r1.apk] Error 1
-            # （run 44497411534 第 18 步 full-build.log 151738-151740）——补选真正的提供者包，不放宽校验。
-            kmod-media-controller
-            kmod-video-videobuf2
-            # videobuf2-vmalloc.ko 的真实提供者是 kmod-video-vmalloc（video.mk 的 KernelPackage/video-vmalloc，
-            # FILES=$(LINUX_DIR)/drivers/media/common/videobuf2/videobuf2-vmalloc.ko）。
-            # usb.mk 的 KernelPackage/video-uvc 已写 +kmod-video-vmalloc，但 =m 清单里没选提供者，
-            # 提供者没被编出来（pkginfo/kmod-video-vmalloc.provides 不存在）→ 打包报：
-            #   Package kmod-video-uvc is missing dependencies for the following libraries: videobuf2-vmalloc.ko
-            #   make[2]: *** [modules/video.mk:1155: .../kmod-video-uvc-6.18.55-r1.apk] Error 1
-            #   ERROR: package/kernel/linux failed to build（run 44617406265 第 18 步 full-build.log 152070-152075）
-            # ——补选真正的提供者包，不放宽校验。
-            kmod-video-vmalloc
-            kmod-video-uvc
-            # usbserial.ko 的真实提供者是 kmod-usb-serial（ponwrt modules/usb.mk 的 KernelPackage/usb-serial）。
-            # 只选 ch341 不选提供者时打包报：
-            #   Package kmod-usb-serial-ch341 is missing dependencies for the following libraries: usbserial.ko
-            #   make[2]: *** [modules/usb.mk:717: .../kmod-usb-serial-ch341-6.18.55-r1.apk] Error 1
-            #   ERROR: package/kernel/linux failed to build
-            # （run 44532267299 第 18 步 full-build.log 末段）——补真正的提供者包，不放宽校验。
-            kmod-usb-serial
-            kmod-usb-serial-ch341
-            # usbnet.ko 的真实提供者是 kmod-usb-net（modules/usb.mk 的 KernelPackage/usb-net，
-            # FILES=$(LINUX_DIR)/drivers/$(USBNET_DIR)/usbnet.ko），它自己 DEPENDS +kmod-mii。
-            # =m 清单只选 ax88179/rtl8152 而不选提供者时打包报：
-            #   Package kmod-usb-net-asix-ax88179 is missing dependencies for the following libraries: usbnet.ko
-            #   make[2]: *** [modules/usb.mk:1307: .../kmod-usb-net-asix-ax88179-6.18.55-r1.apk] Error 1
-            #   ERROR: package/kernel/linux failed to build
-            # （run 44580286135 第 18 步 full-build.log 148646-148652）——补真正的提供者包，不放宽校验。
-            kmod-usb-net
-            kmod-mii
-            kmod-usb-net-rtl8152
-            kmod-usb-net-asix-ax88179
-            kmod-usb-audio
-            kmod-sound-core
-            audio-support
-            camlive
-            go2rtc
-            luci-app-go2rtc
-            ffmpeg
-            libx264
-            libopus
-            alsa-utils
-            luci-compat
-            luci-lua-runtime
-            lsblk
-            sing-box
-            luci-app-homeproxy
-            libcronet
+            # 用户 2026-11-21 明确要求：本工作流只编 mihomo-alpha，不再编其它插件包。
+            # mihomo-alpha 的运行期依赖（libc / ca-bundle / ip-full / kmod-tun / kmod-inet-diag）
+            # 已由固件 configs/an7581.config + configs/release.config 以 =y 内置，无需在此重编。
             mihomo-alpha
-            nikki
-            luci-app-nikki
-            luci-i18n-nikki-zh-cn
-            omcproxy
-            luci-app-omcproxy
-            luci-app-ttyd
-            ttyd
-            usbutils
-            libusb-1.0
-            libudev-zero
-            luci-theme-argon
-            luci-app-ddns
-            ddns-scripts
-            # mihomo-meta 与 mihomo-alpha 互斥（都 PROVIDES:=mihomo），本工作流用 alpha
-            # zerotier 的 ELF 依赖 libminiupnpc.so.21 / libnatpmp.so.1（run 44801228428 第 19 步）：
-            #   Package zerotier is missing dependencies for the following libraries:
-            #   libminiupnpc.so.21 / libnatpmp.so.1
-            # 这两个库被当成依赖链编译了（InstallDev 进 staging、链接成功），但手写 .config
-            # 没有 CONFIG_PACKAGE_libminiupnpc / libnatpmp，package-pack.mk 里 PACK 目标按
-            # CONFIG_PACKAGE_$(1) 门控 → 只写了 .built/.installed，没打 apk、没写 provides。
-            # 这里显式选上真实提供者包（包名就是 libminiupnpc / libnatpmp），不放宽校验。
-            libnatpmp
-            libminiupnpc
-            zerotier
-            luci-app-zerotier
-            tailscale
-            luci-app-tailscale
-            wireguard
-            luci-proto-wireguard
-            kmod-wireguard
-            nebula
-            luci-proto-nebula
-            n2n
-            luci-app-n2n
-            frpc
-            luci-app-frpc
           )
           for pkg in "${pkg_list[@]}"; do
             found=0
@@ -1420,6 +1115,9 @@ jobs:
           # 之前 libusb-1.0 / libudev-zero 只被当构建依赖 stage 过、没产出 apk，
           # 于是出现 "Package usbutils is missing dependencies for the following libraries:
           # libudev.so.1 / libusb-1.0.so.0" 直接把整批编译打断（run 43798029752 第 18 步）。
+          # 本工作流只编 mihomo-alpha：apk 必须在，否则等于空跑
+          ls ipk_out/mihomo-alpha-*.apk >/dev/null 2>&1 || { echo "::error::未产出 mihomo-alpha apk"; exit 1; }
+          echo ">>> mihomo-alpha apk：$(ls ipk_out/mihomo-alpha-*.apk)"
           if ls ipk_out/usbutils-*.apk >/dev/null 2>&1; then
             for dep in libudev-zero libusb-1.0; do
               ls ipk_out/${dep}-*.apk >/dev/null 2>&1 || {
@@ -1453,26 +1151,12 @@ jobs:
           make_latest: false
           generate_release_notes: false
           body: |
-            【预发布｜HG5585F-CT 独立IPK插件包】
+            【预发布｜HG5585F-CT mihomo-alpha 独立包】
             基准源码 commit: `${{ env.SOURCE_REF }}`
-            编译方式：`make package/compile`，分组 feeds install 规避循环依赖
-            ✅ 包含组件：
-            1. luci-app-iptv、luci-app-airoha-npu、luci-app-blueaudio、luci-app-btsp、luci-app-camlive
-            2. ser2net4串口服务器套件：gensio、ser2net、luci-app-ser2net
-            3. SMB共享两套（运行时二选一）
-               - samba4 + luci-app-samba4 + autosamba
-               - ksmbd + luci-app-ksmbd
-            4. NFS服务套件
-            5. mDNS局域网发现 avahi-daemon + luci-app-avahi
-            6. USB网卡驱动：rtw88、rtl8723bu、usb-modeswitch
-            7. mihomo-alpha（和固件内置mihomo-meta互斥）
-            8. 远程Mesh互联VPN（CGNAT可用，运行时**只启用一个**）
-               ZeroTier / Tailscale / WireGuard / Nebula / N2N / FRP frpc
-            ⚠️ 重要提醒
-            - 全部为模块ipk，编译阶段共存；运行阶段大量服务互斥
-            - SMB两套不能同时启用；多VPN不要同时运行
-            - 校验文件：`SHA256SUMS`
-            - 日志与.config一并上传，用于排障
+            编译方式：只编 `package/feeds/*/mihomo`（mihomo-alpha 变体），不编其它插件
+            ✅ 包含：mihomo-alpha（与固件内置 mihomo-meta 互斥，二者只能装一个）
+            ✅ 运行期依赖已随固件内置：kmod-tun / kmod-inet-diag / ip-full / ca-bundle
+            ⚠️ 校验文件：`SHA256SUMS`；日志与 .config 一并上传，用于排障
           files: |
             ${{ env.TAR_NAME }}
             ${{ env.SHA_NAME }}
