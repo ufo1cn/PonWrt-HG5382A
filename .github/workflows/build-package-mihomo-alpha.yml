@@ -450,6 +450,13 @@ jobs:
             luci-app-camlive
             gensio
             ser2net
+            # alsa-utils 的 ELF 依赖由 alsa-lib 包提供（libasound.so.2 / libatopology.so.2）。
+            # package-pack.mk 的 CheckDependencies 读的是 $(PKG_INFO_DIR)/alsa-lib.provides，
+            # 只有 alsa-lib 的包真的被打出来才有这份文件（仅 InstallDev 进 staging 不算）→
+            #   Package alsa-utils is missing dependencies for the following libraries:
+            #   libasound.so.2 / libatopology.so.2（alpha run 44763139999 第 19 步 full-build.log 174468-174470）
+            # 补真正的提供者包，不改校验。
+            alsa-lib
             luci-app-ser2net
             samba4
             luci-app-samba4
@@ -493,6 +500,16 @@ jobs:
             kmod-rtw88-8723d
             kmod-rtw88-8723du
             kmod-rtl8xxxu
+            # kmod-rtl8192cu 的 rtl8192cu.ko 在 backports 7.2 里需要 RTLWIFI / RTLWIFI_USB /
+            # RTL8192C_COMMON 同时开（mac80211 的 config_package() 只从 CONFIG_PACKAGE_kmod-*
+            # 推符号，手写 .config 不会 select 依赖）。提供者没被选中时 backports 里 RTL8192CU
+            # 直接不可用，打包阶段报：
+            #   ERROR: module '.../rtlwifi/rtl8192cu/rtl8192cu.ko' is missing.
+            #   ERROR: package/kernel/mac80211 failed to build (build variant: regular)
+            # （alpha run 44763139999 第 19 步 full-build.log 174528-174532）——补真实提供者。
+            kmod-rtlwifi
+            kmod-rtlwifi-usb
+            kmod-rtl8192c-common
             kmod-rtl8192cu
             kmod-usb-xhci-hcd
             kmod-usb-xhci-mtk
@@ -1182,6 +1199,14 @@ jobs:
             exit 1
           fi
           echo ">>> 内核编译完成，Module.symvers 行数：$(wc -l < "$KD/Module.symvers" 2>/dev/null || echo 0)"
+          # package/compile 是多目标并行：被依赖的库包（alsa-lib）的 .provides 由它自己的 PACK 目标写出，
+          # 并行时可能在 alsa-utils 的 CheckDependencies 之后才写，先单独串行编一次库包。
+          if grep -qE "^CONFIG_PACKAGE_alsa-lib=[my]$" .config; then
+            echo ">>> 预编 alsa-lib（保证 libasound.so.2 / libatopology.so.2 的 provides 先就位）"
+            make -j1 V=s package/feeds/packages/alsa-lib/compile 2>&1 | tee ../build_log/prelib-alsa-lib.log
+          else
+            echo "::warning::.config 未选 alsa-lib，跳过预编"
+          fi
           make WARN_RECURSIVE_DEP=1 package/compile -j"$(nproc)" V=s 2>&1 | tee ../build_log/full-build.log
           echo ">>> package/compile 执行结束"
 
@@ -1197,6 +1222,13 @@ jobs:
             luci-app-camlive
             gensio
             ser2net
+            # alsa-utils 的 ELF 依赖由 alsa-lib 包提供（libasound.so.2 / libatopology.so.2）。
+            # package-pack.mk 的 CheckDependencies 读的是 $(PKG_INFO_DIR)/alsa-lib.provides，
+            # 只有 alsa-lib 的包真的被打出来才有这份文件（仅 InstallDev 进 staging 不算）→
+            #   Package alsa-utils is missing dependencies for the following libraries:
+            #   libasound.so.2 / libatopology.so.2（alpha run 44763139999 第 19 步 full-build.log 174468-174470）
+            # 补真正的提供者包，不改校验。
+            alsa-lib
             luci-app-ser2net
             samba4
             luci-app-samba4
@@ -1234,6 +1266,16 @@ jobs:
             kmod-rtw88-8723d
             kmod-rtw88-8723du
             kmod-rtl8xxxu
+            # kmod-rtl8192cu 的 rtl8192cu.ko 在 backports 7.2 里需要 RTLWIFI / RTLWIFI_USB /
+            # RTL8192C_COMMON 同时开（mac80211 的 config_package() 只从 CONFIG_PACKAGE_kmod-*
+            # 推符号，手写 .config 不会 select 依赖）。提供者没被选中时 backports 里 RTL8192CU
+            # 直接不可用，打包阶段报：
+            #   ERROR: module '.../rtlwifi/rtl8192cu/rtl8192cu.ko' is missing.
+            #   ERROR: package/kernel/mac80211 failed to build (build variant: regular)
+            # （alpha run 44763139999 第 19 步 full-build.log 174528-174532）——补真实提供者。
+            kmod-rtlwifi
+            kmod-rtlwifi-usb
+            kmod-rtl8192c-common
             kmod-rtl8192cu
             kmod-usb-xhci-hcd
             kmod-usb-xhci-mtk
