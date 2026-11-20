@@ -428,6 +428,15 @@ jobs:
             # （run 44497411534 第 18 步 full-build.log 151738-151740）——补选真正的提供者包，不放宽校验。
             kmod-media-controller
             kmod-video-videobuf2
+            # videobuf2-vmalloc.ko 的真实提供者是 kmod-video-vmalloc（video.mk 的 KernelPackage/video-vmalloc，
+            # FILES=$(LINUX_DIR)/drivers/media/common/videobuf2/videobuf2-vmalloc.ko）。
+            # usb.mk 的 KernelPackage/video-uvc 已写 +kmod-video-vmalloc，但 =m 清单里没选提供者，
+            # 提供者没被编出来（pkginfo/kmod-video-vmalloc.provides 不存在）→ 打包报：
+            #   Package kmod-video-uvc is missing dependencies for the following libraries: videobuf2-vmalloc.ko
+            #   make[2]: *** [modules/video.mk:1155: .../kmod-video-uvc-6.18.55-r1.apk] Error 1
+            #   ERROR: package/kernel/linux failed to build（run 44617406265 第 18 步 full-build.log 152070-152075）
+            # ——补选真正的提供者包，不放宽校验。
+            kmod-video-vmalloc
             kmod-video-uvc
             # usbserial.ko 的真实提供者是 kmod-usb-serial（ponwrt modules/usb.mk 的 KernelPackage/usb-serial）。
             # 只选 ch341 不选提供者时打包报：
@@ -1152,6 +1161,15 @@ jobs:
             # （run 44497411534 第 18 步 full-build.log 151738-151740）——补选真正的提供者包，不放宽校验。
             kmod-media-controller
             kmod-video-videobuf2
+            # videobuf2-vmalloc.ko 的真实提供者是 kmod-video-vmalloc（video.mk 的 KernelPackage/video-vmalloc，
+            # FILES=$(LINUX_DIR)/drivers/media/common/videobuf2/videobuf2-vmalloc.ko）。
+            # usb.mk 的 KernelPackage/video-uvc 已写 +kmod-video-vmalloc，但 =m 清单里没选提供者，
+            # 提供者没被编出来（pkginfo/kmod-video-vmalloc.provides 不存在）→ 打包报：
+            #   Package kmod-video-uvc is missing dependencies for the following libraries: videobuf2-vmalloc.ko
+            #   make[2]: *** [modules/video.mk:1155: .../kmod-video-uvc-6.18.55-r1.apk] Error 1
+            #   ERROR: package/kernel/linux failed to build（run 44617406265 第 18 步 full-build.log 152070-152075）
+            # ——补选真正的提供者包，不放宽校验。
+            kmod-video-vmalloc
             kmod-video-uvc
             # usbserial.ko 的真实提供者是 kmod-usb-serial（ponwrt modules/usb.mk 的 KernelPackage/usb-serial）。
             # 只选 ch341 不选提供者时打包报：
