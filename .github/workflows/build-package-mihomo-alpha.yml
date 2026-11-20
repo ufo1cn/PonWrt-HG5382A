@@ -532,12 +532,20 @@ jobs:
           # for the following libraries: libcap.so.2 / libuv.so.1 -> Error 1 ->
           # ERROR: package/feeds/packages/libwebsockets failed to build (build variant: full)）。
           # 补真正的提供者 libcap / libuv。
-          for p in libffmpeg libbz2 libdrm libopus lame-lib zlib libcap libuv; do
+          # n2n 同样踩了"提供者没落 =m"的坑（run 44650306780 第 18 步 full-build.log 154374-154376）：
+          #   Package n2n is missing dependencies for the following libraries:
+          #   libzstd.so.1
+          #   make[2]: *** [Makefile:98: .../n2n-3.0-r5.apk] Error 1
+          # n2n 的 feeds Makefile 里 DEPENDS 已带 +libzstd，且 zstd-1.5.7 已被编进 staging
+          # （libzstd.so.1 / libzstd.so 都在），但 .config 里没有 CONFIG_PACKAGE_libzstd=m，
+          # package-metadata 就不会登记 libzstd 的 ABI，打包校验才判"缺提供者"。
+          # 补 libzstd 为 =m（真正的提供者，不动校验）。
+          for p in libffmpeg libbz2 libdrm libopus lame-lib zlib libcap libuv libzstd; do
             sed -i "/^CONFIG_PACKAGE_${p}=/d" .config
             printf 'CONFIG_PACKAGE_%s=m\n' "$p" >> .config
             grep -q "^CONFIG_PACKAGE_${p}=m" .config || { echo "::error::运行库提供者 ${p} 未落成 =m"; exit 1; }
           done
-          echo ">>> libffmpeg 运行库提供者已落成 =m（libav*/libz/libbz2/libdrm/libmp3lame/libopus/libcap/libuv）"
+          echo ">>> libffmpeg 运行库提供者已落成 =m（libav*/libz/libbz2/libdrm/libmp3lame/libopus/libcap/libuv/libzstd）"
           # 【NFS kmod 包必须 =y，不能 =m】package-metadata.pl 生成 .config.override 时按包的 y/m
           # 决定内核符号取值：包 =m → override 写 CONFIG_NFS_FS=m，再次压掉 config-6.18/CONFIG_KERNEL_* 的 =y。
           # 包 =y → override 写 =y，内核真内置，kmod 包走 package/kernel/linux 的 built-in NOTICE 分支
