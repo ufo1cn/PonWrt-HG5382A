@@ -75,7 +75,7 @@ jobs:
         CONFIG_NFSD CONFIG_MACVLAN CONFIG_VETH CONFIG_BRIDGE CONFIG_BRIDGE_NF_EBTABLES
         CONFIG_NFT_NAT CONFIG_NF_NAT CONFIG_USB_STORAGE CONFIG_USB_UAS CONFIG_USB_XHCI_HCD
         CONFIG_SND CONFIG_SND_USB_AUDIO CONFIG_MEDIA_SUPPORT CONFIG_VIDEO_DEV CONFIG_USB_VIDEO_CLASS
-        CONFIG_INET_DIAG CONFIG_TUN CONFIG_LOCKD CONFIG_SUNRPC CONFIG_GRACE_PERIOD
+        CONFIG_INET_DIAG CONFIG_TUN CONFIG_LOCKD CONFIG_SUNRPC CONFIG_GRACE_PERIOD CONFIG_CRYPTO_ARC4
     steps:
       - name: 签出工作流仓库
         uses: actions/checkout@v4
@@ -239,6 +239,51 @@ jobs:
           PONWRT_DIR: ponwrt
           FEED_PATCHES_STRICT: '1'
         run: bash scripts/apply-feed-patches.sh
+
+      - name: 修补 kmod-mppe 缺 libarc4.ko 依赖
+        working-directory: ./ponwrt
+        run: |
+          set -e
+          MK=package/kernel/linux/modules/netsupport.mk
+          # run 44908566765（#65）第 19 步原始报错：
+          #   Package kmod-mppe is missing dependencies for the following libraries:
+          #   libarc4.ko
+          #   make[2]: *** [.../modules/netsupport.mk:707: .../kmod-mppe-6.18.55-r1.apk] Error 1
+          #   ERROR: package/kernel/linux failed to build.
+          # 上游 KernelPackage/mppe 的 DEPENDS 只有 kmod-ppp +kmod-crypto-sha1，没声明 libarc4.ko
+          # 的提供者 kmod-crypto-arc4（package/kernel/linux/modules/crypto.mk，FILES 含
+          # $(LINUX_DIR)/lib/crypto/libarc4.ko，KCONFIG=CONFIG_CRYPTO_ARC4）。
+          python3 - "$MK" <<'PY'
+          import io, sys
+          p = sys.argv[1]
+          lines = io.open(p, encoding='utf-8').read().splitlines()
+          out, i, n, hit = [], 0, len(lines), 0
+          while i < n:
+              st = lines[i].strip()
+              if st == 'define KernelPackage/mppe':
+                  block = [lines[i]]
+                  i += 1
+                  while i < n and not lines[i].strip().startswith('endef'):
+                      block.append(lines[i])
+                      i += 1
+                  if i < n:
+                      block.append(lines[i])
+                      i += 1
+                  if 'kmod-crypto-arc4' not in '\n'.join(block):
+                      for k, b in enumerate(block):
+                          if b.strip().startswith('DEPENDS'):
+                              block[k] = b.rstrip() + ' +kmod-crypto-arc4'
+                              hit += 1
+                              break
+                  out.extend(block)
+                  continue
+              out.append(lines[i])
+              i += 1
+          io.open(p, 'w', encoding='utf-8', newline='\n').write('\n'.join(out) + '\n')
+          print('mppe DEPENDS 补块次数: %d' % hit)
+          PY
+          grep -q 'kmod-crypto-arc4' "$MK" || { echo '::error::netsupport.mk 里 KernelPackage/mppe 未补上 kmod-crypto-arc4'; exit 1; }
+          echo ">>> kmod-mppe DEPENDS 已补 kmod-crypto-arc4（libarc4.ko 提供者）"
 
       - name: 生成基础配置，锁定HG5585F-CT机型
         working-directory: ./ponwrt
