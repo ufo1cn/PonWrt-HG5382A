@@ -570,6 +570,13 @@ jobs:
           ( set +o pipefail; cd "$KD" && yes "" | make ARCH=arm64 CROSS_COMPILE="$CROSS" oldconfig ) > "$LOGDIR/kernel-olddefconfig.log" 2>&1 \
             || { echo "::error::内核 oldconfig 失败，尾部："; tail -n 40 "$LOGDIR/kernel-olddefconfig.log"; exit 1; }
           echo ">>> 内核 oldconfig 的 (NEW) 提示行数：$(grep -c '(NEW)' "$LOGDIR/kernel-olddefconfig.log" || echo 0)"
+          # 内核 6.18.55 新增的 BT_HCIUART_INTEL 在 config 片段里没有取值，syncconfig 在 CI 无 TTY 下
+          # 直接 (NEW) 报错（#59/#60 实测：yes "" 管道对 target/linux/compile 无效，子 make 的 stdin 被关闭，
+          # 日志只有 `yes: standard output: Broken pipe`）。顶层 CONFIG_KERNEL_* 是 PrepareKernelConfig 的覆盖源，
+          # 显式定值即可彻底消除提示（默认就是 n，写 n 不改变内核功能）。
+          sed -i '/^CONFIG_KERNEL_BT_HCIUART_INTEL=/d' .config
+          printf '%s\n' 'CONFIG_KERNEL_BT_HCIUART_INTEL=n' >> .config
+          grep -q '^CONFIG_KERNEL_BT_HCIUART_INTEL=n' .config || { echo '::error::BT_HCIUART_INTEL 内核覆盖未写入 .config'; exit 1; }
           echo ">>> 内核 .config 已生成：$(grep -c '^CONFIG_' "$KD/.config" 2>/dev/null || echo 0) 个显式符号"
           ( set +o pipefail; cd "$KD" && yes "" | make ARCH=arm64 CROSS_COMPILE="$CROSS" modules_prepare ) > "$LOGDIR/kernel-modules-prepare.log" 2>&1 \
             || { echo "::warning::modules_prepare 失败，kmod 可能缺 generated 头文件，尾部："; tail -n 20 "$LOGDIR/kernel-modules-prepare.log"; }
