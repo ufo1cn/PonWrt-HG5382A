@@ -628,7 +628,13 @@ jobs:
               compile_ok=1
               break
             fi
-            read -r newsym newdef < <(grep -oE '\([A-Z0-9_]+\) \[[A-Za-z]/[^]]*\] \(NEW\)' "$LOGDIR/kernel-compile.log" | tail -1 | sed -E 's/^\(([A-Z0-9_]+)\) \[([A-Za-z])/[^]]*\] \(NEW\)$/\1 \2/')
+            # #63 实测：原来那条 sed 表达式里带 `/`（[^]]* 那段）会被当成 s 命令的分隔符，
+            # 报 `sed: -e expression #1, char 51: unknown option to 's'`，取到空符号。
+            # 改成先抓最后一条含 (NEW) 的行，再用不含 `/` 的两条 sed 分别取符号与默认值。
+            newline=$(grep -F '(NEW)' "$LOGDIR/kernel-compile.log" | tail -1)
+            newsym=$(printf '%s' "$newline" | sed -n 's/.*(\([A-Z0-9_]\{1,\}\)) \[.*(NEW).*/\1/p')
+            newdef=$(printf '%s' "$newline" | sed -n 's/.*) \[\([A-Za-z]\).*/\1/p')
+            [ -n "$newdef" ] || newdef=n
             if [ -z "$newsym" ]; then
               echo "::error::target/linux/compile 第 $attempt 轮失败，且日志里没有 (NEW) 符号，尾部 60 行："
               tail -n 60 "$LOGDIR/kernel-compile.log"
