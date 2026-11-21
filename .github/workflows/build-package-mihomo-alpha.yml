@@ -578,6 +578,36 @@ jobs:
           printf '%s\n' 'CONFIG_KERNEL_BT_HCIUART_INTEL=n' >> .config
           grep -q '^CONFIG_KERNEL_BT_HCIUART_INTEL=n' .config || { echo '::error::BT_HCIUART_INTEL 内核覆盖未写入 .config'; exit 1; }
           echo ">>> 内核 .config 已生成：$(grep -c '^CONFIG_' "$KD/.config" 2>/dev/null || echo 0) 个显式符号"
+          # #61 实测：补完 BT_HCIUART_INTEL 后 target/linux/compile 又在下一个 (NEW) 符号上死掉——
+          #   nl80211 testmode command (NL80211_TESTMODE) [N/y/?] (NEW) make[7]: *** [scripts/kconfig/Makefile:85: syncconfig] Error 1
+          # 说明逐个补符号是打地鼠：Kernel/Configure 每次都按 config 片段重新生成 .config.set，
+          # 会覆盖我们在内核源码树里手改的 .config，片段里没有取值的符号仍是 (NEW)。
+          # 一次性把「oldconfig 已补全的整份内核 .config」回灌成构建源：
+          #   (a) 每个符号写一行顶层 CONFIG_KERNEL_<SYM>=<val>（已存在同名内核选项的不覆盖）；
+          #   (b) 同时追加进 target/linux/<板级>/config-<kver> 片段，让重建 .config.set 时带上全部取值。
+          BOARD=$(basename "$(dirname "$KD")"); BOARD=${BOARD#linux-}; BOARD=${BOARD%%_*}
+          KVER=$(basename "$KD"); KVER=${KVER#linux-}; KVER=${KVER%.*}
+          FRAG="target/linux/$BOARD/config-$KVER"
+          [ -f "$FRAG" ] || FRAG=$(ls "target/linux/$BOARD"/config-[0-9]* 2>/dev/null | head -1)
+          k_add=0
+          while IFS= read -r line; do
+            case "$line" in
+              CONFIG_*=*) sym=${line%%=*}; val=${line#*=} ;;
+              '# CONFIG_'*' is not set') sym=$(printf '%s' "$line" | sed 's/^# //; s/ is not set$//'); val=n ;;
+              *) continue ;;
+            esac
+            grep -q "^CONFIG_KERNEL_${sym#CONFIG_}=." .config && continue
+            printf 'CONFIG_KERNEL_%s=%s\n' "${sym#CONFIG_}" "$val" >> .config
+            k_add=$((k_add+1))
+          done < "$KD/.config"
+          echo ">>> 顶层 CONFIG_KERNEL_ 回灌：$k_add 个符号"
+          if [ -f "$FRAG" ]; then
+            awk '/^CONFIG_[A-Za-z0-9_]+=/ {print} /^# CONFIG_[A-Za-z0-9_]+ is not set$/ {sub(/^# /,""); sub(/ is not set$/,"=n"); print}' "$KD/.config" >> "$FRAG"
+            echo ">>> 配置片段追加完成：$FRAG 现有 $(wc -l < "$FRAG") 行"
+          else
+            echo "::warning::未找到 target/linux/$BOARD/config-$KVER 片段，仅回灌顶层 CONFIG_KERNEL_"
+          fi
+          grep -q '^CONFIG_KERNEL_NL80211_TESTMODE=' .config || echo "::warning::NL80211_TESTMODE 未回灌到顶层 .config"
           ( set +o pipefail; cd "$KD" && yes "" | make ARCH=arm64 CROSS_COMPILE="$CROSS" modules_prepare ) > "$LOGDIR/kernel-modules-prepare.log" 2>&1 \
             || { echo "::warning::modules_prepare 失败，kmod 可能缺 generated 头文件，尾部："; tail -n 20 "$LOGDIR/kernel-modules-prepare.log"; }
 
