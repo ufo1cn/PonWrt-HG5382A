@@ -611,15 +611,43 @@ jobs:
           ( set +o pipefail; cd "$KD" && yes "" | make ARCH=arm64 CROSS_COMPILE="$CROSS" modules_prepare ) > "$LOGDIR/kernel-modules-prepare.log" 2>&1 \
             || { echo "::warning::modules_prepare 失败，kmod 可能缺 generated 头文件，尾部："; tail -n 20 "$LOGDIR/kernel-modules-prepare.log"; }
 
-          # 内核（含 kmod）编译：这一步才真正产出 .ko 与 generated 头文件
-          # 顶层 target/linux/compile 会再触发一次内核 syncconfig（#59 死在这里），
-          # 同样喂空行取默认值，避免无 TTY 下 kconfig 直接 Error。
-          if ! ( set +o pipefail; yes "" | make -j"$(nproc)" V=s target/linux/compile > "$LOGDIR/kernel-compile.log" 2>&1 ); then
-            echo "::error::target/linux/compile 失败，尾部 60 行："
+          # 内核（含 kmod）编译：这一步才真正产出 .ko 与 generated 头文件。
+          # #62 实测：整份 .config 回灌到顶层后，target/linux/compile 仍会在「被包依赖 override
+          # 打开、片段里又没有取值」的符号上以 (NEW) 形式要求输入，CI 无 TTY 直接报错：
+          #   Debugging output for rtlwifi driver family (RTLWIFI_DEBUG) [Y/n/?] (NEW)
+          #   make[7]: *** [scripts/kconfig/Makefile:85: syncconfig] Error 1
+          # include/kernel-defaults.mk 的 Kernel/Configure/Default 会把顶层 .config 里所有
+          # CONFIG_KERNEL_* 逐行拷进 .config.target（awk '^(# )?CONFIG_KERNEL' 段），
+          # 所以改成「失败 → 从本轮日志里抓真实报错的 (NEW) 符号 → 按提示括号里的默认值写
+          # 顶层 CONFIG_KERNEL_<SYM>=<def> → 重试」，最多 25 轮；
+          # 只补日志真实报出来的符号、取值就是 kconfig 默认值，不改内核功能。
+          compile_ok=0
+          : > "$LOGDIR/new-symbols.txt"
+          for attempt in $(seq 1 25); do
+            if ( set +o pipefail; yes "" | make -j"$(nproc)" V=s target/linux/compile > "$LOGDIR/kernel-compile.log" 2>&1 ); then
+              compile_ok=1
+              break
+            fi
+            read -r newsym newdef < <(grep -oE '\([A-Z0-9_]+\) \[[A-Za-z]/[^]]*\] \(NEW\)' "$LOGDIR/kernel-compile.log" | tail -1 | sed -E 's/^\(([A-Z0-9_]+)\) \[([A-Za-z])/[^]]*\] \(NEW\)$/\1 \2/')
+            if [ -z "$newsym" ]; then
+              echo "::error::target/linux/compile 第 $attempt 轮失败，且日志里没有 (NEW) 符号，尾部 60 行："
+              tail -n 60 "$LOGDIR/kernel-compile.log"
+              exit 1
+            fi
+            newdef=$(printf '%s' "$newdef" | tr 'A-Z' 'a-z')
+            echo ">>> 第 $attempt 轮 (NEW) 符号：$newsym，顶层定值 CONFIG_KERNEL_$newsym=$newdef 后重试"
+            sed -i "/^CONFIG_KERNEL_${newsym}=/d" .config
+            printf 'CONFIG_KERNEL_%s=%s\n' "$newsym" "$newdef" >> .config
+            grep -q "^CONFIG_KERNEL_${newsym}=" .config || { echo "::error::顶层 .config 未写入 CONFIG_KERNEL_$newsym"; exit 1; }
+            printf '%s=%s\n' "$newsym" "$newdef" >> "$LOGDIR/new-symbols.txt"
+          done
+          if [ "$compile_ok" -ne 1 ]; then
+            echo "::error::target/linux/compile 25 轮仍失败，尾部 60 行："
             tail -n 60 "$LOGDIR/kernel-compile.log"
             exit 1
           fi
-          echo ">>> 内核编译完成"
+          echo ">>> 内核编译完成；本轮补齐的 (NEW) 符号 $(wc -l < "$LOGDIR/new-symbols.txt") 个："
+          cat "$LOGDIR/new-symbols.txt"
 
           if ! make WARN_RECURSIVE_DEP=1 -j"$(nproc)" V=s "$MH_DIR/compile" 2>&1 | tee "$LOGDIR/full-build.log"; then
             rc=${PIPESTATUS[0]}
