@@ -528,9 +528,11 @@ jobs:
         working-directory: ./ponwrt
         run: |
           set +e
-          export GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
+          export GOPROXY="${GOPROXY:-https://goproxy.cn,https://goproxy.io,direct}"
           export GO111MODULE=on
           set -uo pipefail
+          LOGDIR="$PWD/../build_log"
+          mkdir -p "$LOGDIR"
           echo ">>> step18 start: dir=$(pwd)"
           MH_DIR=""
           for d in package/feeds/*/mihomo-alpha package/feeds/*/mihomo feeds/*/mihomo-alpha feeds/*/mihomo; do
@@ -543,15 +545,49 @@ jobs:
           fi
           echo ">>> 只编译：$MH_DIR"
           grep -qxF "CONFIG_PACKAGE_mihomo-alpha=m" .config || { echo "::error::.config 缺少 CONFIG_PACKAGE_mihomo-alpha=m"; exit 1; }
-          mkdir -p ../build_log
-          make WARN_RECURSIVE_DEP=1 -j"$(nproc)" V=s "$MH_DIR/compile" 2>&1 | tee ../build_log/full-build.log
-          rc=${PIPESTATUS[0]}
+
+          # mihomo-alpha 的 DEPENDS 里有 kmod-tun / kmod-inet-diag 等内核模块包，
+          # 它们需要 build_dir 里的内核树 .config；内核树没预置时会直接报
+          #   make: *** No rule to make target '.../linux-6.18.55/.config'
+          # 所以必须先 target/linux/prepare + 内核树 olddefconfig/modules_prepare + target/linux/compile。
+          TC_BIN=$(ls -d "$PWD"/staging_dir/toolchain-*/bin 2>/dev/null | head -1)
+          CROSS="aarch64-openwrt-linux-musl-"
+          [ -n "$TC_BIN" ] && export PATH="$TC_BIN:$PWD/staging_dir/host/bin:$PATH"
+          echo ">>> 交叉工具链：${TC_BIN:-未找到}"
+
+          make -j"$(nproc)" V=s target/linux/prepare > "$LOGDIR/kernel-prepare.log" 2>&1 \
+            || { echo "::error::target/linux/prepare 失败，尾部："; tail -n 40 "$LOGDIR/kernel-prepare.log"; exit 1; }
+          KD=$(ls -d build_dir/target-*/linux-*/linux-* 2>/dev/null | head -1)
+          if [ -z "$KD" ]; then
+            echo "::error::未找到内核源码目录（build_dir/target-*/linux-*/linux-*）"
+            exit 1
+          fi
+          echo ">>> 内核树：$KD"
+          ( cd "$KD" && make ARCH=arm64 CROSS_COMPILE="$CROSS" olddefconfig </dev/null > "$LOGDIR/kernel-olddefconfig.log" 2>&1 ) \
+            || { echo "::error::内核 olddefconfig 失败，尾部："; tail -n 40 "$LOGDIR/kernel-olddefconfig.log"; exit 1; }
+          echo ">>> 内核 .config 已生成：$(grep -c '^CONFIG_' "$KD/.config" 2>/dev/null || echo 0) 个显式符号"
+          ( cd "$KD" && make ARCH=arm64 CROSS_COMPILE="$CROSS" modules_prepare </dev/null > "$LOGDIR/kernel-modules-prepare.log" 2>&1 ) \
+            || { echo "::warning::modules_prepare 失败，kmod 可能缺 generated 头文件，尾部："; tail -n 20 "$LOGDIR/kernel-modules-prepare.log"; }
+
+          # 内核（含 kmod）编译：这一步才真正产出 .ko 与 generated 头文件
+          if ! make -j"$(nproc)" V=s target/linux/compile > "$LOGDIR/kernel-compile.log" 2>&1; then
+            echo "::error::target/linux/compile 失败，尾部 60 行："
+            tail -n 60 "$LOGDIR/kernel-compile.log"
+            exit 1
+          fi
+          echo ">>> 内核编译完成"
+
+          if ! make WARN_RECURSIVE_DEP=1 -j"$(nproc)" V=s "$MH_DIR/compile" 2>&1 | tee "$LOGDIR/full-build.log"; then
+            rc=${PIPESTATUS[0]}
+          else
+            rc=0
+          fi
           if [ "$rc" -ne 0 ]; then
             echo "::error::mihomo-alpha 编译失败 rc=$rc，日志尾部 60 行："
-            tail -n 60 ../build_log/full-build.log
+            tail -n 60 "$LOGDIR/full-build.log"
             exit "$rc"
           fi
-          [ -s ../build_log/full-build.log ] || { echo "::error::编译日志为空"; exit 1; }
+          [ -s "$LOGDIR/full-build.log" ] || { echo "::error::编译日志为空"; exit 1; }
           echo ">>> 产物 apk："
           ls -l "$MH_DIR"/*.apk bin/packages/*/*/*mihomo*alpha*.apk 2>/dev/null | head -30 || true
           echo ">>> mihomo-alpha 编译结束 rc=$rc"
