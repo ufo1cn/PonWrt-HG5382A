@@ -377,6 +377,20 @@ jobs:
           done
           echo ">>> NFS 全链已写成 CONFIG_KERNEL_*=y（PrepareKernelConfig 覆盖源，等于固件的内置配置）"
 
+          # 【BRIDGE 必须内置】DRIVER_KCONFIGS 里带 CONFIG_BRIDGE / CONFIG_BRIDGE_NF_EBTABLES，
+          # 上面循环把它们写成了 CONFIG_KERNEL_BRIDGE=m，bridge 就成了 .ko 模块；
+          # 而 kmod-bridge 包没被选中，没人提供 bridge.ko。run 44898135271（#64）第 19 步原始报错：
+          #   Package kmod-nf-conntrack-bridge is missing dependencies for the following libraries:
+          #   bridge.ko
+          # 固件侧（build-hg5585f.yml 第 1097 行）是 CONFIG_PACKAGE_kmod-bridge=y → 内核内置，
+          # 这里同样把 CONFIG_KERNEL_BRIDGE 定成 =y，与固件一致（并硬校验）。
+          for s in CONFIG_BRIDGE CONFIG_BRIDGE_NF_EBTABLES; do
+            sed -i "/^CONFIG_KERNEL_${s#CONFIG_}=/d" .config
+            printf "CONFIG_KERNEL_%s=y\n" "${s#CONFIG_}" >> .config
+          done
+          grep -q '^CONFIG_KERNEL_BRIDGE=y' .config || { echo '::error::CONFIG_KERNEL_BRIDGE 不是 =y（bridge 必须内置，否则 kmod-nf-conntrack-bridge 缺 bridge.ko 提供者）'; exit 1; }
+          echo ">>> bridge / bridge_nf_ebtables 已定为内置（=y），与固件一致"
+
       - name: 批量设置目标包为 =m
         working-directory: ./ponwrt
         run: |
@@ -500,6 +514,19 @@ jobs:
             grep -q "^CONFIG_PACKAGE_${p}=y" .config || { echo "::error::NFS kmod 包 ${p} 未落成 =y（内置方案要求 =y，否则 override 会把内核符号压回 =m）"; exit 1; }
           done
           echo ">>> NFS kmod 包锁定 =y：kmod-fs-nfs-common / kmod-fs-nfs / kmod-fs-nfs-v4 / kmod-fs-nfsd"
+
+          # 【打包缺库提供者】run 44898135271（#64）第 19 步两处原始报错：
+          #   Package kmod-nf-conntrack-bridge is missing dependencies for the following libraries: bridge.ko
+          #   Package libelf is missing dependencies for the following libraries: libz.so.1
+          #    make[2]: *** [.../libelf1-0.196-r1.apk] Error 1
+          # 对应提供者：bridge.ko → kmod-bridge（固件侧本来就是 =y）；libz.so.1 → zlib。
+          # 两个都落成 =y（不是放宽校验：依赖检查照旧，只是把真实提供者选进来）。
+          for p in kmod-bridge zlib; do
+            sed -i "/^CONFIG_PACKAGE_${p}=/d;/^# CONFIG_PACKAGE_${p} is not set/d" .config
+            printf "CONFIG_PACKAGE_%s=y\n" "$p" >> .config
+            grep -q "^CONFIG_PACKAGE_${p}=y" .config || { echo "::error::缺库提供者 ${p} 未落成 =y"; exit 1; }
+          done
+          echo ">>> 缺库提供者已落成 =y：kmod-bridge（bridge.ko）/ zlib（libz.so.1）"
           echo ">>> 所有包设为模块，依赖解析完成"
 
           # 【只编 mihomo-alpha】清掉其它所有 =m 包选择：本工作流不再编译别的包。
