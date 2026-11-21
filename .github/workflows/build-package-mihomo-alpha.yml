@@ -563,14 +563,21 @@ jobs:
             exit 1
           fi
           echo ">>> 内核树：$KD"
-          ( cd "$KD" && make ARCH=arm64 CROSS_COMPILE="$CROSS" olddefconfig </dev/null > "$LOGDIR/kernel-olddefconfig.log" 2>&1 ) \
-            || { echo "::error::内核 olddefconfig 失败，尾部："; tail -n 40 "$LOGDIR/kernel-olddefconfig.log"; exit 1; }
+          # 内核 syncconfig 在 CI 无 TTY 下遇到无默认值的新符号会直接报错（#59 实测）：
+          #   Intel protocol support (BT_HCIUART_INTEL) [N/y/?] (NEW) make[7]: *** [scripts/kconfig/Makefile:85: syncconfig] Error 1
+          # 所以用 yes "" 喂空行 = 对每个 (NEW) 取默认值；必须同时关掉 pipefail，
+          # 否则 make 一读完就退出、yes 被 SIGPIPE 杀掉会让管道状态非 0。
+          ( set +o pipefail; cd "$KD" && yes "" | make ARCH=arm64 CROSS_COMPILE="$CROSS" oldconfig ) > "$LOGDIR/kernel-olddefconfig.log" 2>&1 \
+            || { echo "::error::内核 oldconfig 失败，尾部："; tail -n 40 "$LOGDIR/kernel-olddefconfig.log"; exit 1; }
+          echo ">>> 内核 oldconfig 的 (NEW) 提示行数：$(grep -c '(NEW)' "$LOGDIR/kernel-olddefconfig.log" || echo 0)"
           echo ">>> 内核 .config 已生成：$(grep -c '^CONFIG_' "$KD/.config" 2>/dev/null || echo 0) 个显式符号"
-          ( cd "$KD" && make ARCH=arm64 CROSS_COMPILE="$CROSS" modules_prepare </dev/null > "$LOGDIR/kernel-modules-prepare.log" 2>&1 ) \
+          ( set +o pipefail; cd "$KD" && yes "" | make ARCH=arm64 CROSS_COMPILE="$CROSS" modules_prepare ) > "$LOGDIR/kernel-modules-prepare.log" 2>&1 \
             || { echo "::warning::modules_prepare 失败，kmod 可能缺 generated 头文件，尾部："; tail -n 20 "$LOGDIR/kernel-modules-prepare.log"; }
 
           # 内核（含 kmod）编译：这一步才真正产出 .ko 与 generated 头文件
-          if ! make -j"$(nproc)" V=s target/linux/compile > "$LOGDIR/kernel-compile.log" 2>&1; then
+          # 顶层 target/linux/compile 会再触发一次内核 syncconfig（#59 死在这里），
+          # 同样喂空行取默认值，避免无 TTY 下 kconfig 直接 Error。
+          if ! ( set +o pipefail; yes "" | make -j"$(nproc)" V=s target/linux/compile > "$LOGDIR/kernel-compile.log" 2>&1 ); then
             echo "::error::target/linux/compile 失败，尾部 60 行："
             tail -n 60 "$LOGDIR/kernel-compile.log"
             exit 1
